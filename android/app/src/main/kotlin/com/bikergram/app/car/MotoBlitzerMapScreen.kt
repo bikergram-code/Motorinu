@@ -39,6 +39,7 @@ class MotoBlitzerMapScreen(
     private var items: List<PoiItem> = emptyList()
     private var errorMessage: String? = null
     private var retryCount = 0
+    private var activeRequestId = 0
     private val handler = Handler(Looper.getMainLooper())
 
     init {
@@ -46,6 +47,8 @@ class MotoBlitzerMapScreen(
     }
 
     private fun loadData() {
+        handler.removeCallbacksAndMessages(null)
+        val requestId = ++activeRequestId
         isLoading = true
         errorMessage = null
         invalidate()
@@ -71,6 +74,10 @@ class MotoBlitzerMapScreen(
         MotoBridge.fetchPoiData(
             category = "blitzer",
             onResult = { result ->
+                if (requestId != activeRequestId) {
+                    Log.d(TAG, "Ignoring stale result for request=$requestId")
+                    return@fetchPoiData
+                }
                 Log.d(TAG, "Got ${result.size} blitzer items")
                 items = result.mapNotNull { map ->
                     try {
@@ -100,6 +107,19 @@ class MotoBlitzerMapScreen(
                 invalidate()
             }
         )
+
+        handler.postDelayed({
+            if (requestId != activeRequestId || !isLoading) return@postDelayed
+            Log.w(TAG, "Blitzer fetch timeout — showing fallback data")
+            val demoItems = PoiData.getItems(PoiCategory.BLITZER)
+            if (demoItems.isNotEmpty()) {
+                items = demoItems
+            } else {
+                errorMessage = "Blitzer-Daten konnten nicht geladen werden"
+            }
+            isLoading = false
+            invalidate()
+        }, 8000L)
     }
 
     override fun onGetTemplate(): Template {
@@ -165,9 +185,22 @@ class MotoBlitzerMapScreen(
             )
         }
 
+        val refreshAction = Action.Builder()
+            .setTitle("Aktualisieren")
+            .setOnClickListener {
+                Log.d(TAG, "Manual refresh requested")
+                loadData()
+            }
+            .build()
+
         val templateBuilder = PlaceListMapTemplate.Builder()
             .setTitle("Blitzer & Kontrollen")
             .setHeaderAction(Action.BACK)
+            .setActionStrip(
+                ActionStrip.Builder()
+                    .addAction(refreshAction)
+                    .build()
+            )
             .setItemList(itemListBuilder.build())
             .setCurrentLocationEnabled(true) // Host shows current location + loads map tiles
 
@@ -185,4 +218,9 @@ class MotoBlitzerMapScreen(
 
         return templateBuilder.build()
     }
+    override fun onDestroy() {
+        super.onDestroy()
+        handler.removeCallbacksAndMessages(null)
+    }
+
 }

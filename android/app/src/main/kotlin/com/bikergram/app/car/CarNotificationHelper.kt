@@ -191,7 +191,7 @@ object CarNotificationHelper {
 
         // ── Build notification ──
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.ic_dialog_email) // TODO: use your app icon
+            .setSmallIcon(com.bikergram.app.R.drawable.ic_launcher_foreground)
             .setStyle(messagingStyle)
             .addAction(replyAction)
             .addAction(markReadAction)
