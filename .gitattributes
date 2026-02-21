@@ -1,0 +1,8 @@
+﻿# Normalisiere Textdateien
+* text=auto
+
+# Shell-Skripte immer LF
+*.sh text eol=lf
+
+# PowerShell meistens CRLF ok
+*.ps1 text eol=crlf

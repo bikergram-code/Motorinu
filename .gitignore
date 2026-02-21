@@ -1,98 +1,70 @@
-# Miscellaneous
-*.class
-*.log
-*.pyc
-*.swp
-.DS_Store
-.atom/
-.build/
-.buildlog/
-.history
-.svn/
-.swiftpm/
-migrate_working_dir/
-pubspec.lock
-
-# IntelliJ related
-*.iml
-*.ipr
-*.iws
-.idea/
-
-# The .vscode folder contains launch configuration and tasks you configure in
-# VS Code which you may wish to be included in version control, so this line
-# is commented out by default.
-#.vscode/
-
-# Flutter/Dart/Pub related
-**/doc/api/
-**/ios/Flutter/.last_build_id
+﻿# ----------------------------
+# Flutter / Dart
+# ----------------------------
 .dart_tool/
+.packages
+.pub/
+.pub-cache/
+build/
 .flutter-plugins
 .flutter-plugins-dependencies
-.pub-cache/
-.pub/
-/build/
-/web/
 
-# Symbolication related
-app.*.symbols
+# ----------------------------
+# IDE / OS
+# ----------------------------
+.vscode/
+.idea/
+.vs/
+*.iml
+*.log
+.DS_Store
+Thumbs.db
 
-# Obfuscation related
-app.*.map.json
+# ----------------------------
+# Local / tooling
+# ----------------------------
+.claude/
+lib.zip
+*.zip
 
-# Android Studio will place build artifacts here
-/android/app/debug
-/android/app/profile
-/android/app/release
-android/app/.cxx
+# ----------------------------
+# Android (generated / local)
+# ----------------------------
+android/.gradle/
+android/local.properties
+**/android/**/GeneratedPluginRegistrant.java
 
-# Release signing (sensibel — NICHT einchecken!)
-android/key.properties
-android/app/upload-keystore.jks
+# Keystores / signing
+**/android/**/key.properties
 *.jks
 *.keystore
+*.pem
+*.p12
 
-# Local tooling
-.claude/settings.local.json
+# Firebase (empfohlen NICHT zu tracken, wenn Repo evtl. public wird)
+android/app/google-services.json
 
+# ----------------------------
+# iOS (generated / local)
+# ----------------------------
+ios/Pods/
+ios/.symlinks/
+ios/Flutter/Flutter.framework
+ios/Flutter/App.framework
+ios/Flutter/.last_build_id
 
-# --- Windows reserved device-name file (breaks git on Windows) ---
+# Firebase iOS (empfohlen NICHT zu tracken, wenn Repo evtl. public wird)
+ios/Runner/GoogleService-Info.plist
+
+# ----------------------------
+# App config / secrets
+# ----------------------------
+.env
+.env.*
+env.json
+
+# ----------------------------
+# Windows reserved device file (kann Git killen)
+# ----------------------------
 nul
 NUL
-
-# IDE
-.vs/
-.idea/
-*.iml
-
-# Local Claude settings (optional)
-.claude/settings.local.json
-
-# Local artifacts (optional)
-lib.zip
-
-# --- Windows reserved device-name file (breaks git on Windows) ---
-nul
-NUL
-
-# IDE
-.vs/
-.idea/
-*.iml
-
-# Local Claude settings (optional)
-.claude/settings.local.json
-
-# Local artifacts (optional)
-lib.zip
-
-# Windows reserved device file
-nul
-NUL
-
-
-# Windows reserved device file
-nul
-NUL
-
