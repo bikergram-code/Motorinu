@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Konto & Daten löschen – Bikergram / Motorino</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0d0d0d;
+            color: #e0e0e0;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            padding: 40px 20px;
+        }
+        .container {
+            max-width: 600px;
+            width: 100%;
+        }
+        .logo {
+            text-align: center;
+            margin-bottom: 32px;
+        }
+        .logo h1 {
+            font-size: 28px;
+            color: #fff;
+            letter-spacing: 1px;
+        }
+        .logo span {
+            color: #00E676;
+        }
+        .card {
+            background: #1a1a1a;
+            border-radius: 16px;
+            padding: 32px;
+            border: 1px solid #2a2a2a;
+        }
+        h2 {
+            font-size: 22px;
+            color: #fff;
+            margin-bottom: 16px;
+        }
+        p {
+            line-height: 1.6;
+            margin-bottom: 16px;
+            color: #b0b0b0;
+        }
+        .warning {
+            background: #1c1207;
+            border: 1px solid #f59e0b33;
+            border-radius: 10px;
+            padding: 16px;
+            margin-bottom: 24px;
+        }
+        .warning strong {
+            color: #f59e0b;
+        }
+        ul {
+            margin: 8px 0 16px 20px;
+            color: #b0b0b0;
+            line-height: 1.8;
+        }
+        label {
+            display: block;
+            margin-bottom: 6px;
+            font-weight: 500;
+            color: #ccc;
+            font-size: 14px;
+        }
+        input[type="email"],
+        input[type="text"],
+        textarea {
+            width: 100%;
+            padding: 12px 16px;
+            background: #111;
+            border: 1px solid #333;
+            border-radius: 10px;
+            color: #fff;
+            font-size: 16px;
+            margin-bottom: 16px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        input:focus, textarea:focus {
+            border-color: #00E676;
+        }
+        textarea {
+            height: 80px;
+            resize: vertical;
+        }
+        .checkbox-row {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        .checkbox-row input[type="checkbox"] {
+            margin-top: 4px;
+            accent-color: #00E676;
+            width: 18px;
+            height: 18px;
+        }
+        .checkbox-row label {
+            margin: 0;
+            font-size: 14px;
+            color: #b0b0b0;
+        }
+        button {
+            width: 100%;
+            padding: 14px;
+            background: #dc2626;
+            color: #fff;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        button:hover {
+            background: #b91c1c;
+        }
+        button:disabled {
+            background: #444;
+            cursor: not-allowed;
+        }
+        .success {
+            display: none;
+            text-align: center;
+            padding: 40px 20px;
+        }
+        .success .check {
+            font-size: 48px;
+            margin-bottom: 16px;
+        }
+        .success h3 {
+            color: #00E676;
+            font-size: 20px;
+            margin-bottom: 12px;
+        }
+        .info {
+            margin-top: 24px;
+            padding-top: 20px;
+            border-top: 1px solid #2a2a2a;
+        }
+        .info h3 {
+            font-size: 16px;
+            color: #fff;
+            margin-bottom: 8px;
+        }
+        .info p {
+            font-size: 13px;
+            color: #888;
+        }
+        a { color: #00E676; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">
+            <h1><span>Bikergram</span> / Motorino</h1>
+        </div>
+
+        <div class="card" id="formCard">
+            <h2>Konto & Daten löschen</h2>
+            <p>Du kannst die Löschung deines Kontos und aller zugehörigen Daten hier beantragen.
+               Die Löschung erfolgt innerhalb von 30 Tagen nach Eingang deiner Anfrage.</p>
+
+            <div class="warning">
+                <strong>Achtung:</strong> Folgende Daten werden unwiderruflich gelöscht:
+                <ul>
+                    <li>Dein Profil (Benutzername, Avatar, Bio)</li>
+                    <li>Alle deine Beiträge, Kommentare & Likes</li>
+                    <li>Nachrichten & Konversationen</li>
+                    <li>Gespeicherte Tracks, Spots & Events</li>
+                    <li>GPS- / Standortdaten & Fahrtverläufe</li>
+                    <li>Garage-Einträge (Fahrzeuge)</li>
+                    <li>Follower- & Following-Listen</li>
+                </ul>
+            </div>
+
+            <form id="deleteForm" onsubmit="submitForm(event)">
+                <label for="email">E-Mail-Adresse (mit der du registriert bist)</label>
+                <input type="email" id="email" name="email" required placeholder="deine@email.de">
+
+                <label for="username">Benutzername / Bikername</label>
+                <input type="text" id="username" name="username" required placeholder="Dein Benutzername">
+
+                <label for="reason">Grund (optional)</label>
+                <textarea id="reason" name="reason" placeholder="Warum möchtest du dein Konto löschen?"></textarea>
+
+                <div class="checkbox-row">
+                    <input type="checkbox" id="confirm" required>
+                    <label for="confirm">Ich verstehe, dass alle meine Daten unwiderruflich gelöscht werden
+                        und dies nicht rückgängig gemacht werden kann.</label>
+                </div>
+
+                <button type="submit" id="submitBtn">Konto & Daten löschen beantragen</button>
+            </form>
+
+            <div class="info">
+                <h3>Alternativ: In der App</h3>
+                <p>Du kannst die Löschung auch direkt in der App beantragen:
+                   Profil → Einstellungen → Konto löschen</p>
+                <h3 style="margin-top: 12px;">Kontakt</h3>
+                <p>Bei Fragen wende dich an: <a href="mailto:support@bikergram.com">support@bikergram.com</a></p>
+                <h3 style="margin-top: 12px;">DSGVO</h3>
+                <p>Gemäß Art. 17 DSGVO hast du das Recht auf Löschung deiner personenbezogenen Daten.
+                   Wir bearbeiten deine Anfrage innerhalb von 30 Tagen.</p>
+            </div>
+        </div>
+
+        <div class="card success" id="successCard">
+            <div class="check">&#10003;</div>
+            <h3>Anfrage eingegangen</h3>
+            <p>Wir haben deine Lösch-Anfrage erhalten. Dein Konto und alle zugehörigen Daten
+               werden innerhalb von 30 Tagen gelöscht.</p>
+            <p>Du erhältst eine Bestätigung per E-Mail.</p>
+        </div>
+    </div>
+
+    <script>
+        function submitForm(e) {
+            e.preventDefault();
+
+            const email = document.getElementById('email').value;
+            const username = document.getElementById('username').value;
+            const reason = document.getElementById('reason').value;
+
+            // Option 1: Send via mailto (simple, no backend needed)
+            const subject = encodeURIComponent('Konto löschen: ' + username);
+            const body = encodeURIComponent(
+                'Lösch-Anfrage\n\n' +
+                'E-Mail: ' + email + '\n' +
+                'Benutzername: ' + username + '\n' +
+                'Grund: ' + (reason || 'Nicht angegeben') + '\n\n' +
+                'Ich bestätige, dass alle meine Daten gelöscht werden sollen.'
+            );
+            window.location.href = 'mailto:support@bikergram.com?subject=' + subject + '&body=' + body;
+
+            // Show success message
+            document.getElementById('formCard').querySelector('form').style.display = 'none';
+            document.getElementById('formCard').querySelector('.warning').style.display = 'none';
+            document.getElementById('formCard').querySelector('p').style.display = 'none';
+            document.getElementById('successCard').style.display = 'block';
+        }
+    </script>
+</body>
+</html>

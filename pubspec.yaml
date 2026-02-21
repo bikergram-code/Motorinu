@@ -1,0 +1,111 @@
+name: bikergram
+description: A new Flutter project.
+publish_to: none
+version: 1.2.5+8
+
+environment:
+  sdk: ^3.8.0
+
+dependencies:
+  http: ^1.6.0
+  flutter:
+    sdk: flutter
+
+  # UI / Responsive
+  sizer: ^3.1.3
+  flutter_svg: ^2.0.9
+  google_fonts: ^8.0.1
+  shared_preferences: ^2.5.4
+  flutter_secure_storage: ^10.0.0
+  web: ^1.1.1
+
+  # State Management
+  flutter_riverpod: ^3.1.0
+  riverpod_annotation: ^4.0.0
+
+  # Immutable Models
+  freezed_annotation: ^3.1.0
+  json_annotation: ^4.9.0
+
+  # Routing
+  go_router: ^17.1.0
+
+  # Payment (preparation)
+  flutter_stripe: ^12.2.0
+
+  # WebSocket
+  web_socket_channel: ^3.0.2
+
+  # Backend
+  supabase_flutter: ^2.8.4
+
+  # Social Sign-In
+  google_sign_in: ^6.2.2
+  sign_in_with_apple: ^6.1.4
+  crypto: ^3.0.6
+
+  # Features
+  cached_network_image: ^3.3.1
+  connectivity_plus: ^7.0.0
+  dio: ^5.9.1
+  fluttertoast: ^9.0.0
+  fl_chart: ^1.1.1
+  google_maps_flutter: ^2.12.3
+  geolocator: ^14.0.2
+  flutter_slidable: ^4.0.3
+  image_picker: ^1.0.4
+  video_player: ^2.9.2
+  permission_handler: ^12.0.1
+  speech_to_text: ^7.3.0
+  universal_html: ^2.2.4
+  url_launcher: ^6.3.2
+  share_plus: ^10.1.4
+
+  # Messaging (WhatsApp-style)
+  emoji_picker_flutter: ^4.3.0
+  record: ^5.2.1
+  audioplayers: ^6.1.0
+  path_provider: ^2.1.4
+  flutter_tts: ^4.2.5
+  visibility_detector: ^0.4.0+2
+
+dependency_overrides:
+  record_platform_interface: 1.2.0
+  record_linux: 0.7.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+  # Code Generation
+  build_runner: ^2.4.13
+  freezed: ^3.2.3
+  json_serializable: ^6.9.3
+  riverpod_generator: ^4.0.0+1
+  custom_lint: ^0.8.1
+
+  # Testing
+  mocktail: ^1.0.4
+
+  # App Icon
+  flutter_launcher_icons: ^0.14.3
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/images/motorino_icon.png"
+  min_sdk_android: 21
+  remove_alpha_ios: true
+  adaptive_icon_background: "#87CEEB"
+  adaptive_icon_foreground: "assets/images/motorino_icon.png"
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/
+    - assets/icons/
+    - assets/images/
+    - assets/sounds/
+    - assets/images/carbon.png
+    - assets/images/1bikerin_welcome.png

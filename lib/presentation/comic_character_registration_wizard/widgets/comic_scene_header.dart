@@ -1,0 +1,260 @@
+// (genau dein Code 1:1)
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:sizer/sizer.dart';
+
+import 'animated_biker_character.dart';
+import 'comic_speech_bubble.dart';
+
+enum BubblePlacement {
+  auto,
+  topCenter,
+  topLeft,
+  topRight,
+  nearCharacter,
+}
+
+class ComicSceneHeader extends StatefulWidget {
+  final String mainText;
+  final String? commentText;
+
+  /// âœ… NEW: Leading-Widget (Emoji/Icon) fÃ¼r die Kommentar-Bubble
+  final Widget? commentLeading;
+
+  final String? errorText;
+
+  final String characterAsset;
+
+  final bool showCharacter;
+  final bool watermarkCharacter;
+
+  final double watermarkOpacity;
+
+  final double heightFactor;
+  final double lift;
+  final double characterBottomOffset;
+  final double bubbleOpacity;
+
+  final BubblePlacement bubblePlacement;
+  final bool interactivePlacement;
+
+  const ComicSceneHeader({
+    super.key,
+    required this.mainText,
+    this.commentText,
+    this.commentLeading,
+    this.errorText,
+    required this.characterAsset,
+    this.showCharacter = true,
+    this.watermarkCharacter = false,
+    this.watermarkOpacity = 0.12,
+    this.heightFactor = 0.24,
+    this.lift = 6.0,
+    this.characterBottomOffset = -0.2,
+    this.bubbleOpacity = 0.86,
+    this.bubblePlacement = BubblePlacement.auto,
+    this.interactivePlacement = false,
+  });
+
+  @override
+  State<ComicSceneHeader> createState() => _ComicSceneHeaderState();
+}
+
+class _ComicSceneHeaderState extends State<ComicSceneHeader> {
+  late BubblePlacement _placement;
+
+  @override
+  void initState() {
+    super.initState();
+    _placement = widget.bubblePlacement;
+  }
+
+  @override
+  void didUpdateWidget(covariant ComicSceneHeader oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!widget.interactivePlacement &&
+        oldWidget.bubblePlacement != widget.bubblePlacement) {
+      _placement = widget.bubblePlacement;
+    }
+  }
+
+  void _cyclePlacement() {
+    const order = <BubblePlacement>[
+      BubblePlacement.auto,
+      BubblePlacement.nearCharacter,
+      BubblePlacement.topCenter,
+      BubblePlacement.topLeft,
+      BubblePlacement.topRight,
+    ];
+    final idx = order.indexOf(_placement);
+    setState(() => _placement = order[(idx + 1) % order.length]);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    final hasComment =
+        widget.commentText != null && widget.commentText!.trim().isNotEmpty;
+    final hasError =
+        widget.errorText != null && widget.errorText!.trim().isNotEmpty;
+
+    return Center(
+      child: SizedBox(
+        width: 92.w,
+        height: widget.heightFactor * 100.h,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final isNarrow = constraints.maxWidth < 380;
+
+            BubblePlacement effective = _placement;
+            if (effective == BubblePlacement.auto) {
+              effective = isNarrow
+                  ? BubblePlacement.topCenter
+                  : BubblePlacement.nearCharacter;
+            }
+
+            Alignment bubbleAlign;
+            EdgeInsets bubblePadding;
+
+            switch (effective) {
+              case BubblePlacement.topLeft:
+                bubbleAlign = Alignment.topLeft;
+                bubblePadding =
+                    EdgeInsets.only(left: 2.w, right: 18.w, top: 1.2.h);
+                break;
+              case BubblePlacement.topRight:
+                bubbleAlign = Alignment.topRight;
+                bubblePadding =
+                    EdgeInsets.only(left: 18.w, right: 2.w, top: 1.2.h);
+                break;
+              case BubblePlacement.nearCharacter:
+                bubbleAlign = Alignment.topRight;
+                bubblePadding = EdgeInsets.only(
+                  left: 14.w,
+                  right: 2.w,
+                  top: (widget.lift * 0.25).clamp(0.0, 10.0) * 1.0,
+                );
+                break;
+              case BubblePlacement.topCenter:
+              case BubblePlacement.auto:
+                bubbleAlign = Alignment.topCenter;
+                bubblePadding =
+                    EdgeInsets.only(left: 2.w, right: 2.w, top: 1.2.h);
+                break;
+            }
+
+            final bubbleColumn = ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: constraints.maxWidth),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: (bubbleAlign == Alignment.topLeft)
+                    ? CrossAxisAlignment.start
+                    : (bubbleAlign == Alignment.topRight)
+                        ? CrossAxisAlignment.end
+                        : CrossAxisAlignment.center,
+                children: [
+                  ComicSpeechBubble(
+                    text: widget.mainText,
+                    opacity: widget.bubbleOpacity,
+                  ),
+                  if (hasComment) ...[
+                    SizedBox(height: 1.2.h),
+                    ComicSpeechBubble(
+                      text: widget.commentText!.trim(),
+                      opacity: (widget.bubbleOpacity - 0.10).clamp(0.65, 0.95),
+                    ),
+                  ],
+                ],
+              ),
+            );
+
+            return Stack(
+              clipBehavior: Clip.none,
+              children: [
+                if (widget.watermarkCharacter)
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      ignoring: true,
+                      child: Opacity(
+                        opacity: widget.watermarkOpacity,
+                        child: Align(
+                          alignment: Alignment.bottomCenter,
+                          child: Image.asset(
+                            widget.characterAsset,
+                            height: 26.h,
+                            fit: BoxFit.contain,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                if (widget.showCharacter && !widget.watermarkCharacter)
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: widget.characterBottomOffset.h,
+                    child: Center(
+                      child: AnimatedBikerCharacter(
+                        assetPath: widget.characterAsset,
+                        height: 240,
+                      ),
+                    ),
+                  ),
+                AnimatedAlign(
+                  duration: const Duration(milliseconds: 260),
+                  curve: Curves.easeOutCubic,
+                  alignment: bubbleAlign,
+                  child: Padding(
+                    padding: bubblePadding,
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.translucent,
+                      onTap:
+                          widget.interactivePlacement ? _cyclePlacement : null,
+                      child: bubbleColumn,
+                    ),
+                  ),
+                ),
+                if (kDebugMode && widget.interactivePlacement)
+                  Positioned(
+                    right: 2.w,
+                    bottom: 0.5.h,
+                    child: Container(
+                      padding: EdgeInsets.symmetric(
+                        horizontal: 2.w,
+                        vertical: 0.5.h,
+                      ),
+                      decoration: BoxDecoration(
+                        color: theme.colorScheme.surface.withOpacity(0.85),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: theme.colorScheme.onSurface.withOpacity(0.08),
+                        ),
+                      ),
+                      child: Text(
+                        'Tippe die Blase: Position wechseln',
+                        style: theme.textTheme.labelSmall?.copyWith(
+                          fontWeight: FontWeight.w700,
+                          color: theme.colorScheme.onSurface.withOpacity(0.8),
+                        ),
+                      ),
+                    ),
+                  ),
+                if (hasError)
+                  Positioned(
+                    left: 10.w,
+                    right: 10.w,
+                    bottom: -1.2.h,
+                    child: ComicSpeechBubble(
+                      text: widget.errorText!.trim(),
+                      opacity: 0.90,
+                    ),
+                  ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+}

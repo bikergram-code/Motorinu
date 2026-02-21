@@ -1,0 +1,300 @@
+﻿== ApiClient gefunden ==
+
+
+Path       : C:\Users\pinoi\BikergramFL\bikergram\lib\core\api_client.dart
+LineNumber : 11
+
+
+
+
+== bikergram_api.dart (1-80) ==
+// lib/core/backend/bikergram_api.dart
+import '../api_client.dart';
+
+/// Thin API layer you can call from your Wizard steps.
+///
+/// IMPORTANT:
+/// - Replace the endpoint paths below with your real PHP endpoints.
+/// - This file is safe even if endpoints don't exist yet.
+class BikergramApi {
+  BikergramApi({ApiClient? client}) : _client = client ?? ApiClient();
+  final ApiClient _client;
+
+  /// Health/Ping (you already have it on '/')
+  Future<Map<String, dynamic>> ping() => _client.getJson('/');
+
+  /// Example: check if username is available
+  /// TODO: adjust endpoint/path to your server route
+  Future<Map<String, dynamic>> checkUserName(String userName) {
+    return _client.postJson('/auth/check-username', body: {'userName': userName});
+  }
+
+  /// Example: check if email is available / valid
+  /// TODO: adjust endpoint/path to your server route
+  Future<Map<String, dynamic>> checkEmail(String email) {
+    return _client.postJson('/auth/check-email', body: {'email': email});
+  }
+
+  /// Example: submit registration
+  /// TODO: adjust endpoint/path to your server route
+  Future<Map<String, dynamic>> register({
+    required String userName,
+    required String postalCode,
+    required String email,
+    required String password,
+    Map<String, dynamic>? extra,
+  }) {
+    return _client.postJson(
+      '/auth/register',
+      body: {
+        'userName': userName,
+        'postalCode': postalCode,
+        'email': email,
+        'password': password,
+        if (extra != null) ...extra,
+      },
+    );
+  }
+}
+
+== ApiClient Datei (1-140) ==
+import 'dart:convert';
+
+import 'package:http/http.dart' as http;
+
+import 'api_config.dart';
+
+/// Minimal HTTP client wrapper for the Bikergram API.
+/// - Supports a global `baseUrl`
+/// - Supports bearer token via `setToken()`
+/// - Supports lazy token retrieval via `sessionTokenProvider` (e.g. from secure storage)
+class ApiClient {
+  ApiClient._internal();
+
+  static final ApiClient instance = ApiClient._internal();
+
+  static String _baseUrl = ApiConfig.apiBaseUrl;
+  static String? _token;
+
+  /// Optional async token provider. If set, it will be consulted when a request
+  /// needs auth and no token is currently stored (or to refresh, if you choose
+  /// to keep _token empty).
+  static Future<String?> Function()? _sessionTokenProvider;
+
+  static const Duration _timeout = Duration(seconds: 25);
+
+  /// Configure the API client.
+  /// - [baseUrl] should be the API base, e.g. https://api.bikergram.com
+  /// - [token] optional initial bearer token
+  /// - [sessionTokenProvider] optional async function returning the current token
+  static void configure({
+    required String baseUrl,
+    String? token,
+    Future<String?> Function()? sessionTokenProvider,
+  }) {
+    _baseUrl = baseUrl.trim().isEmpty ? _baseUrl : baseUrl.trim();
+    if (token != null) {
+      _token = token.trim().isEmpty ? null : token.trim();
+    }
+    if (sessionTokenProvider != null) {
+      _sessionTokenProvider = sessionTokenProvider;
+    }
+  }
+
+  /// Set/replace bearer token (e.g. after login).
+  Future<void> setToken(String? token) async {
+    _token = (token == null || token.trim().isEmpty) ? null : token.trim();
+  }
+
+  /// Optional: update token provider after configure.
+  static void setSessionTokenProvider(Future<String?> Function()? provider) {
+    _sessionTokenProvider = provider;
+  }
+
+  static Uri _resolveUri(String path) {
+    final base = Uri.parse(_baseUrl.endsWith('/') ? _baseUrl : '$_baseUrl/');
+    final p = path.startsWith('/') ? path.substring(1) : path;
+    return base.resolve(p);
+  }
+
+  static Future<String?> _resolveToken() async {
+    if (_token != null && _token!.isNotEmpty) return _token;
+
+    final provider = _sessionTokenProvider;
+    if (provider == null) return _token;
+
+    try {
+      final t = await provider();
+      if (t != null && t.trim().isNotEmpty) {
+        _token = t.trim();
+        return _token;
+      }
+    } catch (_) {
+      // ignore; fall back to existing token
+    }
+    return _token;
+  }
+
+  static Map<String, dynamic> _decodeJson(String body) {
+    final decoded = jsonDecode(body);
+    if (decoded is Map<String, dynamic>) return decoded;
+    return {'data': decoded};
+  }
+
+  static Map<String, dynamic> _asError(int status, String message, [dynamic details]) {
+    final m = <String, dynamic>{
+      'ok': false,
+      '_status': status,
+      'status': status,
+      'message': message,
+    };
+    if (details != null) m['details'] = details;
+    return m;
+  }
+
+  Future<Map<String, dynamic>> getJson(
+    String path, {
+    Map<String, String>? headers,
+    bool withAuth = true,
+  }) async {
+    final uri = _resolveUri(path);
+
+    final h = <String, String>{
+      'Accept': 'application/json',
+      ...?headers,
+    };
+
+    if (withAuth) {
+      final t = await _resolveToken();
+      if (t != null && t.isNotEmpty) h['Authorization'] = 'Bearer $t';
+    }
+
+    final res = await http.get(uri, headers: h).timeout(_timeout);
+    return _handleResponse(res);
+  }
+
+  Future<Map<String, dynamic>> postJson(
+    String path, {
+    Map<String, dynamic>? body,
+    Map<String, String>? headers,
+    bool withAuth = true,
+  }) async {
+    final uri = _resolveUri(path);
+
+    final h = <String, String>{
+      'Content-Type': 'application/json; charset=utf-8',
+      'Accept': 'application/json',
+      ...?headers,
+    };
+
+    if (withAuth) {
+      final t = await _resolveToken();
+      if (t != null && t.isNotEmpty) h['Authorization'] = 'Bearer $t';
+    }
+
+    final res = await http
+        .post(uri, headers: h, body: jsonEncode(body ?? const {}))
+        .timeout(_timeout);
+
+    return _handleResponse(res);
+  }
+
+== build_log_editor.dart (470-510) ==
+          ],
+        ),
+        body: _isLoading
+            ? Center(
+                child: CircularProgressIndicator(
+                  color: theme.colorScheme.secondary,
+                ),
+              )
+            : RefreshIndicator(
+                onRefresh: () async {
+                  await Future.delayed(const Duration(seconds: 1));
+                  setState(() {});
+                },
+                child: SingleChildScrollView(
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      ProjectHeaderWidget(
+                        projectData: _projectData,
+                        onEdit: () {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('Projekt-Details bearbeiten'),
+                            ),
+                          );
+                        },
+                      ),
+                      SizedBox(height: 2.h),
+                      Padding(
+                        padding: EdgeInsets.symmetric(horizontal: 4.w),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              'Arbeitsschritte',
+                              style: theme.textTheme.titleLarge?.copyWith(
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            TextButton.icon(
+
+== comic_scene_header.dart (145-175) ==
+            }
+
+            final bubbleColumn = ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: constraints.maxWidth),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: (bubbleAlign == Alignment.topLeft)
+                    ? CrossAxisAlignment.start
+                    : (bubbleAlign == Alignment.topRight)
+                        ? CrossAxisAlignment.end
+                        : CrossAxisAlignment.center,
+                children: [
+                  ComicSpeechBubble(
+                    text: widget.mainText,
+                    leading: const Text('ðŸ—¯ï¸'),
+                    opacity: widget.bubbleOpacity,
+                  ),
+                  if (hasComment) ...[
+                    SizedBox(height: 1.2.h),
+                    ComicSpeechBubble(
+                      text: widget.commentText!.trim(),
+                      leading: widget.commentLeading ?? const Text('ðŸ’¬'),
+                      opacity: (widget.bubbleOpacity - 0.10).clamp(0.65, 0.95),
+                    ),
+                  ],
+                ],
+              ),
+            );
+
+            return Stack(
+              clipBehavior: Clip.none,
+
+== comic_scene_header.dart (240-260) ==
+                          color: theme.colorScheme.onSurface.withOpacity(0.8),
+                        ),
+                      ),
+                    ),
+                  ),
+                if (hasError)
+                  Positioned(
+                    left: 10.w,
+                    right: 10.w,
+                    bottom: -1.2.h,
+                    child: ComicSpeechBubble(
+                      text: widget.errorText!.trim(),
+                      leading: const Text('âš ï¸'),
+                      opacity: 0.90,
+                    ),
+                  ),
+              ],
+            );
+          },
+        ),
+      ),
+

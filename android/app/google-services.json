@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "611571947292",
+    "project_id": "bikergram-2675d",
+    "storage_bucket": "bikergram-2675d.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:611571947292:android:ad9e2c7db642ba624cccd9",
+        "android_client_info": {
+          "package_name": "com.bikergram.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCwEOiwj0DD7qTmi7VAJRN75pnqbwefnZQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

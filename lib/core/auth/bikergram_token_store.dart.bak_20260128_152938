@@ -1,0 +1,56 @@
+// lib/core/auth/bikergram_token_store.dart
+//
+// Stores session tokens locally (SharedPreferences).
+// Keys are namespaced with "bg_" to avoid collisions.
+
+import 'package:shared_preferences/shared_preferences.dart';
+
+class BikergramTokenStore {
+  static const _kAccess = 'bg_access_token';
+  static const _kRefresh = 'bg_refresh_token';
+
+  static Future<void> save({
+    String? accessToken,
+    String? refreshToken,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+
+    if (accessToken != null) {
+      final t = accessToken.trim();
+      if (t.isEmpty) {
+        await prefs.remove(_kAccess);
+      } else {
+        await prefs.setString(_kAccess, t);
+      }
+    }
+
+    if (refreshToken != null) {
+      final t = refreshToken.trim();
+      if (t.isEmpty) {
+        await prefs.remove(_kRefresh);
+      } else {
+        await prefs.setString(_kRefresh, t);
+      }
+    }
+  }
+
+  static Future<String?> readAccessToken() async {
+    final prefs = await SharedPreferences.getInstance();
+    final t = prefs.getString(_kAccess);
+    if (t == null || t.trim().isEmpty) return null;
+    return t.trim();
+  }
+
+  static Future<String?> readRefreshToken() async {
+    final prefs = await SharedPreferences.getInstance();
+    final t = prefs.getString(_kRefresh);
+    if (t == null || t.trim().isEmpty) return null;
+    return t.trim();
+  }
+
+  static Future<void> clear() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_kAccess);
+    await prefs.remove(_kRefresh);
+  }
+}

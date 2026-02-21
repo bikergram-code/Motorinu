@@ -1,0 +1,406 @@
+import 'dart:async';
+import 'dart:math' as math;
+import 'dart:ui';
+import 'package:flutter/material.dart';
+import 'package:sizer/sizer.dart';
+
+class WelcomeIntroStepWidget extends StatefulWidget {
+  final VoidCallback onAutoNext;
+  final Duration totalHold;
+
+  const WelcomeIntroStepWidget({
+    super.key,
+    required this.onAutoNext,
+    this.totalHold = const Duration(milliseconds: 4200),
+  });
+
+  @override
+  State<WelcomeIntroStepWidget> createState() => _WelcomeIntroStepWidgetState();
+}
+
+class _WelcomeIntroStepWidgetState extends State<WelcomeIntroStepWidget> {
+  static const String _text = 'Willkommen bei\nBikergram';
+  static const String _bgAsset = 'assets/images/bikerin_idle23.png';
+
+  Timer? _autoNextTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _autoNextTimer = Timer(widget.totalHold, () {
+      if (mounted) widget.onAutoNext();
+    });
+  }
+
+  @override
+  void dispose() {
+    _autoNextTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return SafeArea(
+      child: LayoutBuilder(
+        builder: (context, c) {
+          final maxW = c.maxWidth;
+          final maxH = c.maxHeight;
+
+          // ✅ Tablet/landscape safe: Größe an Höhe koppeln
+          final heroSize = math.min(maxW * 0.78, maxH * 0.48);
+
+          // ✅ Text nicht unendlich groß skalieren
+          final titleSize = (42.sp).clamp(26.0, 42.0);
+
+          return Stack(
+            children: [
+              // ✅ Carbon Background
+              Positioned.fill(
+                child: CustomPaint(
+                  painter: _CarbonFiberPainter(
+                    base: theme.colorScheme.surface,
+                    lineA: theme.colorScheme.onSurface.withOpacity(0.05),
+                    lineB: Colors.black.withOpacity(0.10),
+                  ),
+                ),
+              ),
+
+              // ✅ „Mehr Carbon“: vertikaler Verlauf (macht die Fläche weniger weiß)
+              Positioned.fill(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      stops: const [0.0, 0.55, 1.0],
+                      colors: [
+                        Colors.black.withOpacity(0.24),
+                        Colors.black.withOpacity(0.10),
+                        Colors.transparent,
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+
+              // ✅ Subtiler Premium-Gradient (etwas kräftiger)
+              Positioned.fill(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                      colors: [
+                        theme.colorScheme.surface.withOpacity(0.88),
+                        theme.colorScheme.surface.withOpacity(0.66),
+                        theme.colorScheme.secondaryContainer.withOpacity(0.18),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+
+              // ✅ Inhalt: scrollt notfalls minimal (nie Overflow)
+              Positioned.fill(
+                child: SingleChildScrollView(
+                  physics: const BouncingScrollPhysics(),
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(minHeight: maxH),
+                    child: IntrinsicHeight(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          SizedBox(height: 3.h),
+
+                          // 🟢 HERO-Kreis
+                          Center(
+                            child: Container(
+                              width: heroSize,
+                              height: heroSize,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.black.withOpacity(0.22),
+                                    blurRadius: 28,
+                                    offset: const Offset(0, 18),
+                                  ),
+                                ],
+                              ),
+                              child: ClipOval(
+                                child: Stack(
+                                  fit: StackFit.expand,
+                                  children: [
+                                    Image.asset(
+                                      _bgAsset,
+                                      fit: BoxFit.cover,
+                                      alignment: Alignment.center,
+                                    ),
+
+                                    // ✅ etwas weniger „Milchglas“
+                                    Container(color: Colors.black.withOpacity(0.18)),
+                                    BackdropFilter(
+                                      filter: ImageFilter.blur(sigmaX: 2.2, sigmaY: 2.2),
+                                      child: const SizedBox.shrink(),
+                                    ),
+
+                                    Container(
+                                      decoration: BoxDecoration(
+                                        gradient: RadialGradient(
+                                          radius: 0.95,
+                                          colors: [
+                                            Colors.transparent,
+                                            Colors.black.withOpacity(0.22),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+
+                          SizedBox(height: 2.2.h),
+
+                          Padding(
+                            padding: EdgeInsets.symmetric(horizontal: 6.w),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              children: [
+                                Text(
+                                  _text,
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    fontSize: titleSize,
+                                    height: 1.02,
+                                    fontWeight: FontWeight.w600,
+                                    fontFamily: 'cursive',
+                                    color: theme.colorScheme.onSurface,
+                                    shadows: [
+                                      Shadow(
+                                        color: Colors.black.withOpacity(0.30),
+                                        blurRadius: 14,
+                                        offset: const Offset(0, 7),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                SizedBox(height: 1.4.h),
+                                Text(
+                                  'die interaktive Biker App',
+                                  textAlign: TextAlign.center,
+                                  style: theme.textTheme.titleMedium?.copyWith(
+                                    fontWeight: FontWeight.w900,
+                                    color: theme.colorScheme.onSurfaceVariant,
+                                    letterSpacing: 0.8,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+
+                          const Spacer(),
+
+                          // 🏍️ Loader — Moped fährt sichtbar nach rechts (mit leichtem Bob)
+                          Center(
+                            child: SizedBox(
+                              width: math.min(maxW * 0.82, 520),
+                              height: 48,
+                              child: const _BikerRoadLoader(),
+                            ),
+                          ),
+
+                          SizedBox(height: 2.0.h),
+
+                          Text(
+                            'Motor an…',
+                            textAlign: TextAlign.center,
+                            style: theme.textTheme.bodyLarge?.copyWith(
+                              fontWeight: FontWeight.w900,
+                              color: theme.colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+
+                          SizedBox(height: 3.h),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// ✅ Carbon Fiber Pattern Painter
+class _CarbonFiberPainter extends CustomPainter {
+  final Color base;
+  final Color lineA;
+  final Color lineB;
+
+  _CarbonFiberPainter({
+    required this.base,
+    required this.lineA,
+    required this.lineB,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    canvas.drawRect(Offset.zero & size, Paint()..color = base);
+
+    const double tile = 18.0;
+    final paintA = Paint()..color = lineA..strokeWidth = 1.0;
+    final paintB = Paint()..color = lineB..strokeWidth = 1.0;
+
+    for (double x = -size.height; x < size.width; x += tile) {
+      canvas.drawLine(Offset(x, 0), Offset(x + size.height, size.height), paintA);
+    }
+    for (double x = 0; x < size.width + size.height; x += tile) {
+      canvas.drawLine(Offset(x, 0), Offset(x - size.height, size.height), paintB);
+    }
+
+    final weavePaint = Paint()..color = Colors.black.withOpacity(0.06);
+    for (double y = 0; y < size.height; y += tile) {
+      for (double x = 0; x < size.width; x += tile) {
+        if (((x / tile).floor() + (y / tile).floor()) % 2 == 0) {
+          canvas.drawRect(Rect.fromLTWH(x, y, tile, tile), weavePaint);
+        }
+      }
+    }
+
+    final noisePaint = Paint()..color = Colors.black.withOpacity(0.02);
+    for (double y = 0; y < size.height; y += 6) {
+      canvas.drawLine(Offset(0, y), Offset(size.width, y), noisePaint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _CarbonFiberPainter oldDelegate) {
+    return oldDelegate.base != base ||
+        oldDelegate.lineA != lineA ||
+        oldDelegate.lineB != lineB;
+  }
+}
+
+/// 🏍️ Loader (Stateful, eigener Controller -> garantiert nicht starr)
+class _BikerRoadLoader extends StatefulWidget {
+  const _BikerRoadLoader();
+
+  @override
+  State<_BikerRoadLoader> createState() => _BikerRoadLoaderState();
+}
+
+class _BikerRoadLoaderState extends State<_BikerRoadLoader>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1200),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return AnimatedBuilder(
+      animation: _ctrl,
+      builder: (context, _) {
+        final t = _ctrl.value;
+
+        return Container(
+          decoration: BoxDecoration(
+            color: theme.colorScheme.surface, // ✅ deckend
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: Colors.black.withOpacity(0.22), width: 2),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.18),
+                blurRadius: 18,
+                offset: const Offset(0, 12),
+              ),
+            ],
+          ),
+          child: Stack(
+            children: [
+              Positioned.fill(
+                child: CustomPaint(
+                  painter: _RoadPainter(offset: t * 30),
+                ),
+              ),
+              LayoutBuilder(
+                builder: (context, c) {
+                  // ✅ Moped fährt von links (leicht außerhalb) nach rechts (leicht außerhalb)
+                  // + kleiner „Bob“ für Leben.
+                  final ease = Curves.easeInOut.transform(t);
+                  final startX = -36.0;
+                  final endX = c.maxWidth + 8.0;
+                  final x = startX + (endX - startX) * ease;
+
+                  final bob = math.sin(t * math.pi * 2) * 1.6;
+                  final tilt = math.sin(t * math.pi * 2) * 0.06;
+                  return Positioned(
+                    left: x,
+                    top: (c.maxHeight - 28) / 2 + bob,
+                    child: Transform.rotate(
+                      angle: tilt,
+                      child: Icon(
+                        Icons.two_wheeler_rounded,
+                        size: 28,
+                        color: theme.colorScheme.secondary,
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _RoadPainter extends CustomPainter {
+  final double offset;
+  _RoadPainter({required this.offset});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = Colors.black.withOpacity(0.32)
+      ..strokeWidth = 2
+      ..strokeCap = StrokeCap.round;
+
+    const dash = 12.0;
+    const gap = 10.0;
+    final y = size.height / 2;
+
+    double x = -(offset % (dash + gap));
+    while (x < size.width) {
+      canvas.drawLine(Offset(x, y), Offset(x + dash, y), paint);
+      x += dash + gap;
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _RoadPainter oldDelegate) =>
+      oldDelegate.offset != offset;
+}
