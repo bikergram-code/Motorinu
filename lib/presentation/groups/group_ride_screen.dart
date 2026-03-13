@@ -119,6 +119,7 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
   LatLng? _currentGpsPos;
   bool _isNavFollowing = true; // auto-follow with heading rotation
   bool _isProgrammaticMove = false;
+  DateTime _lastProgrammaticMoveTime = DateTime.fromMillisecondsSinceEpoch(0);
   bool _isNavigating = false; // true after user taps "LOS!"
   bool _navUiHidden = false; // true = hide search/buttons during navigation
   Timer? _navUiShowTimer; // auto-hide UI after tap
@@ -725,10 +726,11 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
   }
 
   /// Start heading-follow timer for non-navigation mode.
-  /// Direct compass rotation at 30fps.
+  /// 10fps with 1° threshold — prevents marker rendering issues.
   void _startHeadingFollowTimer() {
+    double lastBearing = -999;
     _headingFollowTimer?.cancel();
-    _headingFollowTimer = Timer.periodic(const Duration(milliseconds: 33), (_) {
+    _headingFollowTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
       if (_isNavigating || _extrapolationTimer != null) return;
       if (!_isNavFollowing || _mapController == null) return;
       if (_currentGpsPos == null) return;
@@ -737,7 +739,14 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
           ? _fusedHeading
           : _currentHeading;
 
+      // Skip if heading barely changed (< 1°)
+      var diff = (heading - lastBearing).abs();
+      if (diff > 180) diff = 360 - diff;
+      if (diff < 1.0 && lastBearing != -999) return;
+      lastBearing = heading;
+
       _isProgrammaticMove = true;
+      _lastProgrammaticMoveTime = DateTime.now();
       _mapController!.moveCamera(
         CameraUpdate.newCameraPosition(gmaps.CameraPosition(
           target: _currentGpsPos!,
@@ -746,7 +755,8 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
           bearing: heading,
         )),
       );
-      _isProgrammaticMove = false;
+      // Don't reset _isProgrammaticMove synchronously — onCameraMoveStarted
+      // fires asynchronously and would see false. Use timestamp instead.
     });
   }
 
@@ -1101,7 +1111,14 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
       },
       // Detect user panning/zooming → pause auto-follow + hide UI
       onCameraMoveStarted: () {
-        if (!_isProgrammaticMove) {
+        // Check both the flag AND the timestamp — the heading follow timer
+        // sets _isProgrammaticMove=true but moveCamera fires onCameraMoveStarted
+        // asynchronously, after the synchronous code path completes.
+        final msSinceLastProgrammatic = DateTime.now()
+            .difference(_lastProgrammaticMoveTime)
+            .inMilliseconds;
+        final isProgrammatic = _isProgrammaticMove || msSinceLastProgrammatic < 200;
+        if (!isProgrammatic) {
           if (_isNavFollowing) setState(() => _isNavFollowing = false);
           // Hide UI during interaction (smooth effect)
           _mapIdleTimer?.cancel();

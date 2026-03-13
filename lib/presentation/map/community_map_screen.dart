@@ -3693,15 +3693,23 @@ class _CommunityMapScreenState extends ConsumerState<CommunityMapScreen> {
       _currentPosition = pos;
     });
 
-    // 30fps camera rotation timer
+    // 10fps camera rotation timer — only updates when heading changed > 1°
+    // Lower frequency prevents marker rendering issues
+    double _lastBearing = -999;
     _headingFollowTimer?.cancel();
-    _headingFollowTimer = Timer.periodic(const Duration(milliseconds: 33), (_) {
+    _headingFollowTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
       if (_disposed || !mounted || !_gpsActive) return;
       if (_mapController == null || _currentPosition == null) return;
 
       final heading = HeadingSensorService.instance.isGyroAvailable
           ? _currentHeading
           : (_currentPosition!.heading >= 0 ? _currentPosition!.heading : _currentHeading);
+
+      // Skip if heading barely changed (< 1°) — saves GPU and lets markers render
+      var diff = (heading - _lastBearing).abs();
+      if (diff > 180) diff = 360 - diff;
+      if (diff < 1.0 && _lastBearing != -999) return;
+      _lastBearing = heading;
 
       _isProgrammaticMove = true;
       _mapController!.moveCamera(CameraUpdate.newCameraPosition(CameraPosition(

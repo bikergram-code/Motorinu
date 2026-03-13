@@ -43,6 +43,7 @@ android/local.properties
 
 # Firebase (empfohlen NICHT zu tracken, wenn Repo evtl. public wird)
 android/app/google-services.json
+web/google-services.json
 
 # ----------------------------
 # iOS (generated / local)

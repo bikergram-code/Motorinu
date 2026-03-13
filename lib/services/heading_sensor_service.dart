@@ -56,15 +56,26 @@ class HeadingSensorService {
 
   // Latest accelerometer values for tilt compensation
   double _accelX = 0, _accelY = 0, _accelZ = 9.81;
-  // Latest magnetometer raw values
+  // Latest magnetometer raw values (after hard-iron correction)
   double _magX = 0, _magY = 0, _magZ = 0;
   bool _hasMagData = false;
 
-  // ── Lifecycle ──
+  // ── Hard-iron auto-calibration ──
+  // Track min/max of each magnetometer axis to estimate bias offset.
+  // Bias = (min + max) / 2 for each axis. Requires device rotation to calibrate.
+  double _magRawMinX = double.infinity, _magRawMaxX = double.negativeInfinity;
+  double _magRawMinY = double.infinity, _magRawMaxY = double.negativeInfinity;
+  double _magRawMinZ = double.infinity, _magRawMaxZ = double.negativeInfinity;
+  int _magSampleCount = 0;
+
+  // ── Lifecycle (reference-counted for multi-screen use) ──
   bool _running = false;
+  int _refCount = 0;
 
   /// Start listening to gyroscope, magnetometer, and accelerometer.
+  /// Reference-counted: multiple callers can call start()/stop() safely.
   void start() {
+    _refCount++;
     if (_running) return;
     _running = true;
 
@@ -122,8 +133,15 @@ class HeadingSensorService {
     }
   }
 
-  /// Stop sensor subscriptions (reusable — call start() again later).
+  /// Stop sensor subscriptions (reference-counted).
+  /// Only actually stops when all callers have called stop().
   void stop() {
+    _refCount--;
+    if (_refCount > 0) {
+      debugPrint('[HeadingSensor] stop() called but $_refCount refs remain — keeping alive');
+      return;
+    }
+    _refCount = 0; // Clamp to 0
     _gyroSub?.cancel();
     _gyroSub = null;
     _magnetSub?.cancel();
@@ -131,12 +149,19 @@ class HeadingSensorService {
     _accelSub?.cancel();
     _accelSub = null;
     _running = false;
-    debugPrint('[HeadingSensor] Stopped');
+    debugPrint('[HeadingSensor] Stopped (all refs released)');
   }
 
-  /// Dispose permanently.
+  /// Dispose permanently (ignores ref count).
   void dispose() {
-    stop();
+    _refCount = 0;
+    _running = false;
+    _gyroSub?.cancel();
+    _gyroSub = null;
+    _magnetSub?.cancel();
+    _magnetSub = null;
+    _accelSub?.cancel();
+    _accelSub = null;
     _controller.close();
   }
 
@@ -231,9 +256,29 @@ class HeadingSensorService {
 
   // ── Magnetometer callback (tilt-compensated via accelerometer) ──
   void _onMagnetEvent(MagnetometerEvent event) {
-    _magX = event.x;
-    _magY = event.y;
-    _magZ = event.z;
+    // ── Hard-iron auto-calibration ──
+    // Track min/max per axis to estimate constant magnetic bias from device hardware.
+    _magSampleCount++;
+    if (event.x < _magRawMinX) _magRawMinX = event.x;
+    if (event.x > _magRawMaxX) _magRawMaxX = event.x;
+    if (event.y < _magRawMinY) _magRawMinY = event.y;
+    if (event.y > _magRawMaxY) _magRawMaxY = event.y;
+    if (event.z < _magRawMinZ) _magRawMinZ = event.z;
+    if (event.z > _magRawMaxZ) _magRawMaxZ = event.z;
+
+    // Apply hard-iron correction once we have enough spread (device has been rotated)
+    final spreadX = _magRawMaxX - _magRawMinX;
+    final spreadY = _magRawMaxY - _magRawMinY;
+    final spreadZ = _magRawMaxZ - _magRawMinZ;
+    if (_magSampleCount > 100 && spreadX > 15 && spreadY > 15) {
+      _magX = event.x - (_magRawMinX + _magRawMaxX) / 2;
+      _magY = event.y - (_magRawMinY + _magRawMaxY) / 2;
+      _magZ = event.z - (_magRawMinZ + _magRawMaxZ) / 2;
+    } else {
+      _magX = event.x;
+      _magY = event.y;
+      _magZ = event.z;
+    }
     _hasMagData = true;
 
     // ── Tilt-compensated heading using rotation matrix ──
@@ -271,10 +316,30 @@ class HeadingSensorService {
     if (nNorm < 0.1) return;
     final nny = ny / nNorm;
 
+    // Normalize North vector components we need
+    final nnx = nx / nNorm;
+
+    // ── Detect device orientation from gravity ──
+    // Portrait:        gravity along -Y → |ay| > |ax| → use Y-axis as forward
+    // Landscape right: gravity along -X → ax < -threshold → Y points right → subtract 90°
+    // Landscape left:  gravity along +X → ax > +threshold → Y points left  → add 90°
+    final gravMag = sqrt(ax * ax + ay * ay + az * az);
+    final axNorm = gravMag > 0.1 ? ax / gravMag : 0.0;
+
     // Heading: angle of device Y-axis projected on horizontal plane
     // dot(East_unit, [0,1,0]) = eny   (how much phone top points East)
     // dot(North_unit, [0,1,0]) = nny  (how much phone top points North)
     var heading = atan2(eny, nny) * (180 / pi);
+    if (heading < 0) heading += 360;
+
+    // Correct for landscape orientation (tablet/phone rotated 90°)
+    if (axNorm < -0.5) {
+      // Landscape right (top of device to right): subtract 90°
+      heading = (heading - 90) % 360;
+    } else if (axNorm > 0.5) {
+      // Landscape left (top of device to left): add 90°
+      heading = (heading + 90) % 360;
+    }
     if (heading < 0) heading += 360;
 
     // EMA smoothing (alpha=0.35) to reduce magnetic noise while staying responsive
