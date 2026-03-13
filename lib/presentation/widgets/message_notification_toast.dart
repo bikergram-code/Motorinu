@@ -135,8 +135,10 @@ class _ToastWrapperState extends State<_ToastWrapper>
         position: _slide,
         child: FadeTransition(
           opacity: _fade,
-          child: GestureDetector(
-            onTap: widget.onTap,
+          child: Material(
+            type: MaterialType.transparency,
+            child: GestureDetector(
+              onTap: widget.onTap,
             onVerticalDragUpdate: (details) {
               if (details.primaryDelta != null && details.primaryDelta! < -5) {
                 widget.onDismiss?.call();
@@ -149,6 +151,7 @@ class _ToastWrapperState extends State<_ToastWrapper>
                 child: widget.child,
               ),
             ),
+          ),
           ),
         ),
       ),

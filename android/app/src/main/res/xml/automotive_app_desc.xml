@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<automotiveApp>
-    <!-- POI / Template app — shows Tracks, Spots, Events on the head unit.
-         Does NOT draw its own map — delegates navigation to Google Maps via Intent.
-         "template" is the correct descriptor for category.POI apps. -->
-    <uses name="template" />
-</automotiveApp>

@@ -1,5 +1,7 @@
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
+import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:share_plus/share_plus.dart';
@@ -13,6 +15,7 @@ import 'fullscreen_image_viewer.dart';
 import 'likers_sheet.dart';
 import 'post_carousel_viewer.dart';
 import 'post_video_player.dart';
+import 'reaction_picker.dart';
 import 'report_sheet.dart';
 import 'repost_sheet.dart';
 import 'user_moderation_sheet.dart';
@@ -39,6 +42,7 @@ class PostCard extends StatelessWidget {
     this.commentPreviews = const [],
     this.onVideoPlay,
     this.onVideoComplete,
+    this.onReaction,
   });
 
   final Post post;
@@ -52,6 +56,8 @@ class PostCard extends StatelessWidget {
   final List<CommentPreview> commentPreviews;
   final VoidCallback? onVideoPlay;
   final VoidCallback? onVideoComplete;
+  /// Called with reaction type when user selects a reaction via long-press.
+  final void Function(String? reactionType)? onReaction;
 
   @override
   Widget build(BuildContext context) {
@@ -60,7 +66,7 @@ class PostCard extends StatelessWidget {
     final textColor = isDark ? Colors.white : const Color(0xFF1A1A1A);
     final mutedColor = isDark
         ? Colors.white.withValues(alpha: 0.45)
-        : const Color(0xFF6C757D);
+        : const Color(0xFF495057);
 
     return Container(
       color: isDark ? Colors.black : Colors.white,
@@ -89,7 +95,7 @@ class PostCard extends StatelessWidget {
                   style: GoogleFonts.inter(
                     fontSize: 14,
                     fontWeight: FontWeight.w600,
-                    color: textColor,
+                    color: Colors.red,
                   ),
                 ),
               ),
@@ -109,6 +115,8 @@ class PostCard extends StatelessWidget {
                         fontWeight: FontWeight.w700,
                         color: textColor,
                       ),
+                      recognizer: TapGestureRecognizer()
+                        ..onTap = () => GoRouter.of(context).push('/profile/${post.userId}'),
                     ),
                     TextSpan(
                       text: post.body!,
@@ -211,7 +219,9 @@ class PostCard extends StatelessWidget {
           Divider(
             height: 0.5,
             thickness: 0.5,
-            color: Colors.white.withValues(alpha: 0.06),
+            color: isDark
+                ? Colors.white.withValues(alpha: 0.09)
+                : Colors.black.withValues(alpha: 0.08),
           ),
         ],
       ),
@@ -237,7 +247,7 @@ class PostCard extends StatelessWidget {
                   colors: [accentColor, accentColor.withValues(alpha: 0.6)],
                 ),
               ),
-              padding: const EdgeInsets.all(2),
+              padding: const EdgeInsets.all(2.5),
               child: Container(
                 decoration: BoxDecoration(
                   shape: BoxShape.circle,
@@ -260,10 +270,10 @@ class PostCard extends StatelessWidget {
           ),
           const SizedBox(width: 12),
 
-          // Username
+          // Username — tap goes directly to profile
           Expanded(
             child: GestureDetector(
-              onTap: () => _showUserActions(context),
+              onTap: () => GoRouter.of(context).push('/profile/${post.userId}'),
               child: Text(
                 post.displayName ?? post.username,
                 style: GoogleFonts.inter(
@@ -410,6 +420,7 @@ class PostCard extends StatelessWidget {
         child: PostVideoPlayer(
           videoUrl: post.videoUrl!,
           postId: post.id,
+          thumbnailUrl: post.thumbnailUrl,
           onDoubleTap: onLike,
           onPlayStarted: onVideoPlay,
           onPlayCompleted: onVideoComplete,
@@ -463,25 +474,50 @@ class PostCard extends StatelessWidget {
   // ── Action Bar (Instagram-style) ──────────────────────────────────────
 
   Widget _buildActionBar(BuildContext context, Color mutedColor) {
+    // Determine like icon based on reaction type
+    final hasReaction = post.likedByMe && post.myReaction != null;
+    final likeIcon = post.likedByMe
+        ? Icons.favorite_rounded
+        : Icons.favorite_border_rounded;
+    final likeColor = hasReaction
+        ? reactionColor(post.myReaction)
+        : (post.likedByMe ? Colors.red : mutedColor);
+
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
       child: Row(
         children: [
-          // Like
-          _ActionIcon(
-            icon: post.likedByMe ? Icons.favorite_rounded : Icons.favorite_border_rounded,
-            color: post.likedByMe ? Colors.red : mutedColor,
+          // Like + Reaction (tap = like, long-press = reaction picker)
+          _ReactionLikeButton(
+            icon: likeIcon,
+            color: likeColor,
+            emoji: hasReaction ? reactionEmoji(post.myReaction) : null,
             onTap: onLike,
+            onLongPress: onReaction != null
+                ? (position) {
+                    HapticFeedback.mediumImpact();
+                    ReactionPicker.show(
+                      context,
+                      anchorPosition: position,
+                      accentColor: accentColor,
+                      currentReaction: post.myReaction,
+                      onSelected: (type) => onReaction!(type),
+                    );
+                  }
+                : null,
           ),
-          const SizedBox(width: 14),
+          const SizedBox(width: 16),
 
-          // Comment
+          // Comment — filled + accent color when there are comments
           _ActionIcon(
-            icon: Icons.chat_bubble_outline_rounded,
-            color: mutedColor,
+            icon: post.commentCount > 0
+                ? Icons.chat_bubble_rounded
+                : Icons.chat_bubble_outline_rounded,
+            color: post.commentCount > 0 ? accentColor : mutedColor,
             onTap: onComment,
+            label: post.commentCount > 0 ? '${post.commentCount}' : null,
           ),
-          const SizedBox(width: 14),
+          const SizedBox(width: 16),
 
           // Repost
           _ActionIcon(
@@ -489,7 +525,7 @@ class PostCard extends StatelessWidget {
             color: mutedColor,
             onTap: () => RepostSheet.show(context, post),
           ),
-          const SizedBox(width: 14),
+          const SizedBox(width: 16),
 
           // Share (paper plane)
           _ActionIcon(
@@ -501,10 +537,11 @@ class PostCard extends StatelessWidget {
 
           const Spacer(),
 
-          // Bookmark
-          _ActionIcon(
-            icon: post.savedByMe ? Icons.bookmark_rounded : Icons.bookmark_border_rounded,
-            color: post.savedByMe ? accentColor : mutedColor,
+          // Bookmark — with bounce animation
+          _AnimatedBookmark(
+            saved: post.savedByMe,
+            activeColor: accentColor,
+            inactiveColor: mutedColor,
             onTap: onSave,
           ),
         ],
@@ -765,7 +802,7 @@ class PostCard extends StatelessWidget {
   }
 }
 
-// ── Action Icon ─────────────────────────────────────────────────────────
+// ── Action Icon with haptic feedback ─────────────────────────────────────
 
 class _ActionIcon extends StatelessWidget {
   const _ActionIcon({
@@ -773,25 +810,202 @@ class _ActionIcon extends StatelessWidget {
     required this.color,
     required this.onTap,
     this.rotationAngle = 0,
+    this.label,
   });
 
   final IconData icon;
   final Color color;
   final VoidCallback onTap;
   final double rotationAngle;
+  final String? label;
+
+  @override
+  Widget build(BuildContext context) {
+    final iconWidget = rotationAngle != 0
+        ? Transform.rotate(
+            angle: rotationAngle,
+            child: Icon(icon, size: 28, color: color),
+          )
+        : Icon(icon, size: 28, color: color);
+
+    return GestureDetector(
+      onTap: () {
+        HapticFeedback.lightImpact();
+        onTap();
+      },
+      child: Padding(
+        padding: const EdgeInsets.all(4),
+        child: label != null
+            ? Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  iconWidget,
+                  const SizedBox(width: 4),
+                  Text(
+                    label!,
+                    style: GoogleFonts.inter(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: color,
+                    ),
+                  ),
+                ],
+              )
+            : iconWidget,
+      ),
+    );
+  }
+}
+
+// ── Reaction Like Button with scale-pop animation ─────────────────────────
+
+class _ReactionLikeButton extends StatefulWidget {
+  const _ReactionLikeButton({
+    required this.icon,
+    required this.color,
+    this.emoji,
+    required this.onTap,
+    this.onLongPress,
+  });
+
+  final IconData icon;
+  final Color color;
+  final String? emoji;
+  final VoidCallback onTap;
+  final void Function(Offset position)? onLongPress;
+
+  @override
+  State<_ReactionLikeButton> createState() => _ReactionLikeButtonState();
+}
+
+class _ReactionLikeButtonState extends State<_ReactionLikeButton>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+  late Animation<double> _scaleAnimation;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 300),
+    );
+    _scaleAnimation = TweenSequence<double>([
+      TweenSequenceItem(tween: Tween(begin: 1.0, end: 1.35), weight: 40),
+      TweenSequenceItem(tween: Tween(begin: 1.35, end: 0.9), weight: 30),
+      TweenSequenceItem(tween: Tween(begin: 0.9, end: 1.0), weight: 30),
+    ]).animate(CurvedAnimation(parent: _controller, curve: Curves.easeOut));
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _handleTap() {
+    HapticFeedback.lightImpact();
+    _controller.forward(from: 0);
+    widget.onTap();
+  }
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
-      onTap: onTap,
+      onTap: _handleTap,
+      onLongPressStart: widget.onLongPress != null
+          ? (details) => widget.onLongPress!(details.globalPosition)
+          : null,
       child: Padding(
         padding: const EdgeInsets.all(4),
-        child: rotationAngle != 0
-            ? Transform.rotate(
-                angle: rotationAngle,
-                child: Icon(icon, size: 26, color: color),
-              )
-            : Icon(icon, size: 26, color: color),
+        child: AnimatedBuilder(
+          animation: _scaleAnimation,
+          builder: (_, child) => Transform.scale(
+            scale: _scaleAnimation.value,
+            child: child,
+          ),
+          child: widget.emoji != null
+              ? Text(widget.emoji!, style: const TextStyle(fontSize: 26))
+              : Icon(widget.icon, size: 28, color: widget.color),
+        ),
+      ),
+    );
+  }
+}
+
+// ── Animated Bookmark with bounce ──────────────────────────────────────────
+
+class _AnimatedBookmark extends StatefulWidget {
+  const _AnimatedBookmark({
+    required this.saved,
+    required this.activeColor,
+    required this.inactiveColor,
+    required this.onTap,
+  });
+
+  final bool saved;
+  final Color activeColor;
+  final Color inactiveColor;
+  final VoidCallback onTap;
+
+  @override
+  State<_AnimatedBookmark> createState() => _AnimatedBookmarkState();
+}
+
+class _AnimatedBookmarkState extends State<_AnimatedBookmark>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+  late Animation<double> _scaleAnimation;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 300),
+    );
+    _scaleAnimation = TweenSequence<double>([
+      TweenSequenceItem(tween: Tween(begin: 1.0, end: 1.3), weight: 40),
+      TweenSequenceItem(tween: Tween(begin: 1.3, end: 0.85), weight: 30),
+      TweenSequenceItem(tween: Tween(begin: 0.85, end: 1.0), weight: 30),
+    ]).animate(CurvedAnimation(parent: _controller, curve: Curves.easeOut));
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didUpdateWidget(covariant _AnimatedBookmark oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.saved != widget.saved) {
+      _controller.forward(from: 0);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: () {
+        HapticFeedback.lightImpact();
+        widget.onTap();
+      },
+      child: Padding(
+        padding: const EdgeInsets.all(4),
+        child: AnimatedBuilder(
+          animation: _scaleAnimation,
+          builder: (_, child) => Transform.scale(
+            scale: _scaleAnimation.value,
+            child: child,
+          ),
+          child: Icon(
+            widget.saved ? Icons.bookmark_rounded : Icons.bookmark_border_rounded,
+            size: 28,
+            color: widget.saved ? widget.activeColor : widget.inactiveColor,
+          ),
+        ),
       ),
     );
   }

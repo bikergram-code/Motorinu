@@ -15,6 +15,7 @@ class MessageBubble extends StatelessWidget {
     this.otherUsername,
     this.onSwipeReply,
     this.onImageTap,
+    this.isGroupChat = false,
   });
 
   final DirectMessage message;
@@ -24,6 +25,7 @@ class MessageBubble extends StatelessWidget {
   final String? otherUsername;
   final VoidCallback? onSwipeReply;
   final VoidCallback? onImageTap;
+  final bool isGroupChat;
 
   @override
   Widget build(BuildContext context) {
@@ -51,12 +53,46 @@ class MessageBubble extends StatelessWidget {
           margin: EdgeInsets.only(
             top: 3,
             bottom: 3,
-            left: isMe ? 48 : 0,
+            left: isMe ? 48 : (isGroupChat ? 0 : 0),
             right: isMe ? 0 : 48,
           ),
-          child: _buildBubbleContent(context),
+          child: isGroupChat && !isMe
+              ? Row(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // Sender mini-avatar
+                    Padding(
+                      padding: const EdgeInsets.only(right: 6, bottom: 2),
+                      child: _buildSenderAvatar(),
+                    ),
+                    Flexible(child: _buildBubbleContent(context)),
+                  ],
+                )
+              : _buildBubbleContent(context),
         ),
       ),
+    );
+  }
+
+  Widget _buildSenderAvatar() {
+    final name = message.senderName ?? '?';
+    final avatar = message.senderAvatar;
+    return CircleAvatar(
+      radius: 14,
+      backgroundImage:
+          avatar != null && avatar.isNotEmpty ? NetworkImage(avatar) : null,
+      backgroundColor: accentColor.withValues(alpha: 0.2),
+      child: avatar == null || avatar.isEmpty
+          ? Text(
+              name.isNotEmpty ? name[0].toUpperCase() : '?',
+              style: GoogleFonts.inter(
+                fontSize: 10,
+                fontWeight: FontWeight.w700,
+                color: accentColor,
+              ),
+            )
+          : null,
     );
   }
 
@@ -77,6 +113,18 @@ class MessageBubble extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          if (isGroupChat && !isMe && message.senderName != null)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Text(
+                message.senderName!,
+                style: GoogleFonts.inter(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  color: accentColor.withValues(alpha: 0.9),
+                ),
+              ),
+            ),
           if (replyToMessage != null) _buildReplyQuote(),
           Text(
             message.body,

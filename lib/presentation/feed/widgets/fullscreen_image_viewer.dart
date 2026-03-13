@@ -42,7 +42,7 @@ class FullscreenImageViewer extends StatefulWidget {
     int initialIndex = 0,
     String? communityName,
   }) {
-    Navigator.of(context).push(
+    Navigator.of(context, rootNavigator: true).push(
       PageRouteBuilder(
         opaque: false,
         barrierColor: Colors.black.withValues(alpha: 0.95),
@@ -72,6 +72,10 @@ class _FullscreenImageViewerState extends State<FullscreenImageViewer> {
   late int _currentIndex;
   bool _showUI = true;
 
+  // Swipe-to-dismiss state
+  double _dragOffset = 0;
+  bool _isDragging = false;
+
   @override
   void initState() {
     super.initState();
@@ -93,6 +97,25 @@ class _FullscreenImageViewerState extends State<FullscreenImageViewer> {
     setState(() => _showUI = !_showUI);
   }
 
+  void _onVerticalDragStart(DragStartDetails details) {
+    setState(() => _isDragging = true);
+  }
+
+  void _onVerticalDragUpdate(DragUpdateDetails details) {
+    setState(() => _dragOffset += details.delta.dy);
+  }
+
+  void _onVerticalDragEnd(DragEndDetails details) {
+    if (_dragOffset.abs() > 100 || details.velocity.pixelsPerSecond.dy.abs() > 800) {
+      Navigator.of(context).pop();
+    } else {
+      setState(() {
+        _dragOffset = 0;
+        _isDragging = false;
+      });
+    }
+  }
+
   void _handleLike() {
     HapticFeedback.lightImpact();
     widget.onLike();
@@ -111,9 +134,24 @@ class _FullscreenImageViewerState extends State<FullscreenImageViewer> {
     final isCarousel = widget.imageUrls.length > 1;
     final post = widget.post;
 
+    // Calculate dismiss progress (0.0 = resting, 1.0 = fully dismissed)
+    final dismissProgress = (_dragOffset.abs() / 300).clamp(0.0, 1.0);
+    final scale = 1.0 - (dismissProgress * 0.2);
+    final bgOpacity = 1.0 - (dismissProgress * 0.6);
+
     return Scaffold(
-      backgroundColor: Colors.black,
-      body: Stack(
+      backgroundColor: Colors.black.withValues(alpha: bgOpacity),
+      body: GestureDetector(
+        onVerticalDragStart: _onVerticalDragStart,
+        onVerticalDragUpdate: _onVerticalDragUpdate,
+        onVerticalDragEnd: _onVerticalDragEnd,
+        child: AnimatedContainer(
+          duration: _isDragging ? Duration.zero : const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+          transform: Matrix4.identity()
+            ..translate(0.0, _dragOffset)
+            ..scale(scale),
+          child: Stack(
         children: [
           // ── Image(s) with pinch-to-zoom ──
           GestureDetector(
@@ -388,6 +426,8 @@ class _FullscreenImageViewerState extends State<FullscreenImageViewer> {
               ),
             ),
         ],
+      ),
+        ),
       ),
     );
   }

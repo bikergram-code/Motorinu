@@ -5,7 +5,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../data/repositories/blitzer_repository.dart';
-import '../providers/blitzer/blitzer_settings_provider.dart';
+import '../providers/map/map_settings_provider.dart';
 
 // ─── Blitzer Alert Service ───────────────────────────────────────────────────
 //
@@ -16,11 +16,11 @@ import '../providers/blitzer/blitzer_settings_provider.dart';
 // - Cooldown per blitzer to prevent spam
 // - Speed-based alert thresholds
 
-/// Alert severity levels.
+/// Alert severity levels — fixed distance thresholds.
 enum AlertStage {
-  early,      // 1000m+ at current speed → ~20s away
-  approach,   // 500m+ at current speed → ~10s away
-  immediate,  // 200m+ → < 5s away
+  early,      // 800m — first warning
+  approach,   // 200m — second warning, slow down!
+  immediate,  // < 50m — blitzer directly ahead (passed through)
 }
 
 /// A single blitzer alert event.
@@ -61,9 +61,9 @@ class BlitzerAlert {
       _ => 'Warnung',
     };
     return switch (stage) {
-      AlertStage.early => '$typeLabel in $distanceText (~$timeText)',
-      AlertStage.approach => '⚠️ $typeLabel in $distanceText!',
-      AlertStage.immediate => '🚨 $typeLabel voraus! $distanceText',
+      AlertStage.early => '⚠️ $typeLabel in $distanceText',
+      AlertStage.approach => '🚨 $typeLabel in $distanceText!',
+      AlertStage.immediate => '🚨 $typeLabel direkt voraus!',
     };
   }
 }
@@ -88,6 +88,12 @@ class BlitzerAlertService {
 
   // Track last stage per blitzer to only fire NEW stage transitions
   final Map<int, AlertStage> _lastStagePerBlitzer = {};
+
+  /// Clear cooldown + stage tracking for a specific blitzer (e.g., newly added report).
+  void clearCooldown(int reportId) {
+    _cooldowns.remove(reportId);
+    _lastStagePerBlitzer.remove(reportId);
+  }
 
   /// Check all reports against current position and heading.
   ///
@@ -122,16 +128,12 @@ class BlitzerAlertService {
         report.latitude, report.longitude,
       );
 
-      // Get max alert distance for this type — SPEED-ADAPTIVE
-      // At 80 km/h: 1.0× base distance (reference speed)
-      // At 40 km/h: 0.5× (less warning needed at low speed)
-      // At 160 km/h: 2.0× (more warning needed at high speed)
-      final baseAlertDist = settings.alertDistanceFor(report.type).toDouble();
-      final speedFactor = (currentSpeedKmh / 80.0).clamp(0.5, 2.5);
-      final maxAlertDist = baseAlertDist * speedFactor;
+      // ── Fixed distance thresholds: 800m first warning, 200m second warning ──
+      const firstWarnDist = 800.0;  // meters — "Achtung, Blitzer in 800 Meter"
+      const secondWarnDist = 200.0; // meters — "Blitzer voraus, 200 Meter!"
 
-      // Skip if too far away (2x alert distance as early warning buffer)
-      if (dist > maxAlertDist * 2.5) {
+      // Skip if too far away (1.5km buffer for early detection)
+      if (dist > 1500) {
         // If we previously tracked this blitzer, it's now passed
         if (_lastStagePerBlitzer.containsKey(report.id)) {
           passedIds.add(report.id);
@@ -153,29 +155,38 @@ class BlitzerAlertService {
       double angleDiff = (bearingToBlitzer - heading).abs();
       if (angleDiff > 180) angleDiff = 360 - angleDiff;
 
-      // Heading tolerance: speed-adaptive
-      // Slower in city (curves, turns) → wider tolerance
-      // Faster on highway → narrower tolerance is fine
-      final headingTolerance = 60.0 + (currentSpeedKmh > 60 ? 0 : (60 - currentSpeedKmh) * 0.5);
-      // At very close range (< 100m), always alert regardless of heading
-      final isHeadingToward = angleDiff < headingTolerance || dist < 100;
+      // At low speed (< 15 km/h): GPS heading is UNRELIABLE (random at standstill)
+      // → Skip heading check entirely, warn based on distance only
+      // At medium/high speed: use direction-sensitive filtering
+      final bool isHeadingToward;
+      if (currentSpeedKmh < 15) {
+        // Standstill/walking: always warn within range (heading meaningless)
+        isHeadingToward = true;
+      } else {
+        // Heading tolerance: speed-adaptive
+        // Slower in city → wider tolerance, faster on highway → narrower
+        final headingTolerance = 60.0 + (currentSpeedKmh > 60 ? 0 : (60 - currentSpeedKmh) * 0.5);
+        // At close range (< 300m), always alert regardless of heading
+        isHeadingToward = angleDiff < headingTolerance || dist < 300;
+      }
 
-      if (!isHeadingToward) continue;
+      if (!isHeadingToward) {
+        debugPrint(
+          '[BlitzerAlert] SKIP ${report.typeLabel} dist=${dist.round()}m '
+          'angle=${angleDiff.round()}° speed=${currentSpeedKmh.round()} — not heading toward',
+        );
+        continue;
+      }
 
       // ── Time-to-camera calculation ──
       final timeToReach = dist / speedMs; // seconds
 
-      // ── Determine alert stage ──
+      // ── Determine alert stage (fixed: 800m + 200m) ──
       AlertStage? stage;
-      if (dist <= 200 && settings.immediateWarningEnabled) {
-        stage = AlertStage.immediate;
-      } else if (dist <= maxAlertDist && settings.approachWarningEnabled) {
-        stage = AlertStage.approach;
-      } else if (dist <= maxAlertDist * 2 && settings.earlyWarningEnabled) {
-        // Early warning only if we'll reach it within ~20 seconds
-        if (timeToReach <= 25) {
-          stage = AlertStage.early;
-        }
+      if (dist <= secondWarnDist && settings.immediateWarningEnabled) {
+        stage = AlertStage.approach;  // 200m — "Blitzer voraus!"
+      } else if (dist <= firstWarnDist && settings.earlyWarningEnabled) {
+        stage = AlertStage.early;     // 800m — "Achtung, Blitzer in 800m"
       }
 
       if (stage == null) continue;

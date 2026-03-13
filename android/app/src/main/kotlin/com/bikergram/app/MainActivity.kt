@@ -2,7 +2,11 @@ package com.bikergram.app
 
 import android.app.Activity
 import android.content.Intent
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
 import android.net.Uri
+import android.util.Log
 import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -13,14 +17,46 @@ class MainActivity : FlutterFragmentActivity() {
     private var pendingResult: MethodChannel.Result? = null
     private val PICK_FILE_REQUEST = 9001
 
+    // ── GPS Bridge (Logcat → Emulator) ───────────────────────────
+    // Loggt GPS damit gps_bridge.py die Koordinaten auslesen kann.
+    private var gpsManager: LocationManager? = null
+    private val gpsListener = LocationListener { loc: Location ->
+        Log.d("GpsBridge", "FIX:${loc.latitude},${loc.longitude}")
+    }
+
+    // onCreate: Standard-Flutter-Verhalten
+
+    override fun onResume() {
+        super.onResume()
+        try {
+            gpsManager = getSystemService(LOCATION_SERVICE) as LocationManager
+            // Sofort letzte bekannte Position loggen (kein Warten auf neuen Fix nötig)
+            listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER).forEach { p ->
+                try {
+                    gpsManager?.getLastKnownLocation(p)?.let { loc ->
+                        Log.d("GpsBridge", "FIX:${loc.latitude},${loc.longitude}")
+                    }
+                } catch (_: Exception) {}
+            }
+            // GPS (präzise, braucht Satellit) + Netzwerk (sofort drinnen via WLAN/Mobilfunk)
+            listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER).forEach { p ->
+                try { gpsManager?.requestLocationUpdates(p, 2000L, 1f, gpsListener) }
+                catch (_: Exception) {}
+            }
+        } catch (_: Exception) {}
+    }
+
+    override fun onPause() {
+        super.onPause()
+        try { gpsManager?.removeUpdates(gpsListener) } catch (_: Exception) {}
+    }
+
+    // Cached Engine verwenden → MainActivity killen zerstört den Engine NICHT
+    override fun getCachedEngineId(): String = BikergramApplication.ENGINE_ID
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-
-        // Initialize Android Auto bridge on the Flutter engine.
-        // This makes MotoBridge available to MotoCarAppService even if
-        // Android Auto was started before the main activity opened.
-        MotoBridge.init(flutterEngine.dartExecutor.binaryMessenger, applicationContext)
-        android.util.Log.d("MainActivity", "MotoBridge initialized from MainActivity")
+        android.util.Log.d("MainActivity", "configureFlutterEngine: cached engine verwendet")
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
             .setMethodCallHandler { call, result ->

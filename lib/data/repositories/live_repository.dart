@@ -39,6 +39,37 @@ class LiveRepository {
     ).toList();
   }
 
+  /// Get ended streams by the current user for a specific month.
+  /// If [year] and [month] are null, returns the most recent streams.
+  Future<List<LiveStream>> getMyStreams({
+    int? year,
+    int? month,
+    int limit = 50,
+  }) async {
+    final userId = _currentUserId;
+    if (userId == null) return [];
+
+    var query = _supabase
+        .from('live_sessions')
+        .select(_profileSelect)
+        .eq('host_user_id', userId)
+        .eq('status', 'ended');
+
+    if (year != null && month != null) {
+      final start = DateTime(year, month, 1).toUtc().toIso8601String();
+      final end = DateTime(year, month + 1, 1).toUtc().toIso8601String();
+      query = query.gte('ended_at', start).lt('ended_at', end);
+    }
+
+    final data = await query
+        .order('ended_at', ascending: false)
+        .limit(limit);
+
+    return data.map<LiveStream>(
+      (d) => LiveStream.fromSupabase(d as Map<String, dynamic>),
+    ).toList();
+  }
+
   /// Get a single live stream by ID.
   Future<LiveStream?> getStreamById(String sessionId) async {
     final data = await _supabase
@@ -107,38 +138,31 @@ class LiveRepository {
   // ═══════════════════════════════════════════════════
 
   /// Join a live session as a viewer.
+  /// Note: viewer_count is managed by the host via LiveKit participant count.
   Future<void> joinSession(String sessionId) async {
     final userId = _currentUserId;
     if (userId == null) return;
 
     try {
+      // Track unique viewer in live_viewer_sessions
       await _supabase.from('live_viewer_sessions').insert({
         'live_session_id': sessionId,
         'user_id': userId,
         'joined_at': DateTime.now().toUtc().toIso8601String(),
       });
 
-      // Increment viewer count
-      await _supabase.rpc('increment_live_viewer_count', params: {
-        'session_id': sessionId,
-      }).catchError((_) async {
-        // Fallback: manual increment
-        final session = await _supabase
-            .from('live_sessions')
-            .select('viewer_count, peak_viewer_count, total_unique_viewers')
-            .eq('id', sessionId)
-            .maybeSingle();
-        if (session != null) {
-          final current = (session['viewer_count'] as num?)?.toInt() ?? 0;
-          final peak = (session['peak_viewer_count'] as num?)?.toInt() ?? 0;
-          final newCount = current + 1;
-          await _supabase.from('live_sessions').update({
-            'viewer_count': newCount,
-            if (newCount > peak) 'peak_viewer_count': newCount,
-            'total_unique_viewers': (session['total_unique_viewers'] as num?)!.toInt() + 1,
-          }).eq('id', sessionId);
-        }
-      });
+      // Increment total_unique_viewers count
+      final session = await _supabase
+          .from('live_sessions')
+          .select('total_unique_viewers')
+          .eq('id', sessionId)
+          .maybeSingle();
+      if (session != null) {
+        final current = (session['total_unique_viewers'] as num?)?.toInt() ?? 0;
+        await _supabase.from('live_sessions').update({
+          'total_unique_viewers': current + 1,
+        }).eq('id', sessionId);
+      }
     } catch (e) {
       debugPrint('[LiveRepo] Join error: $e');
     }
@@ -150,7 +174,6 @@ class LiveRepository {
     if (userId == null) return;
 
     try {
-      // Update viewer session with leave time
       await _supabase
           .from('live_viewer_sessions')
           .update({
@@ -159,19 +182,6 @@ class LiveRepository {
           .eq('live_session_id', sessionId)
           .eq('user_id', userId)
           .isFilter('left_at', null);
-
-      // Decrement viewer count
-      final session = await _supabase
-          .from('live_sessions')
-          .select('viewer_count')
-          .eq('id', sessionId)
-          .maybeSingle();
-      if (session != null) {
-        final current = (session['viewer_count'] as num?)?.toInt() ?? 0;
-        await _supabase.from('live_sessions').update({
-          'viewer_count': (current - 1).clamp(0, 999999),
-        }).eq('id', sessionId);
-      }
     } catch (e) {
       debugPrint('[LiveRepo] Leave error: $e');
     }

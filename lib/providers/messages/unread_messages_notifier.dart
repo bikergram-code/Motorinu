@@ -88,12 +88,14 @@ class UnreadMessagesNotifier extends Notifier<int> {
           .eq('id', convId)
           .maybeSingle();
       final convCommunity = conv?['community'] as String?;
-      if (convCommunity != _community) {
+      // Tolerant: NULL-community (alte Conversations) zählt als Match
+      if (convCommunity != null && convCommunity != _community) {
         debugPrint(
             '[UnreadMsg] Message in conv $convId community=$convCommunity ≠ $_community → SKIP');
         return;
       }
-      // Community matches — increment and show toast
+      // Community matches (or is null) — increment and show toast
+      debugPrint('[UnreadMsg] Community OK (conv=$convCommunity, mine=$_community) → increment');
       _incrementAndEmit(newMessage);
     } catch (e) {
       debugPrint('[UnreadMsg] Community check error: $e');
@@ -161,12 +163,12 @@ class UnreadMessagesNotifier extends Notifier<int> {
           .map<int>((p) => p['conversation_id'] as int)
           .toList();
 
-      // Filter by community
+      // Filter by community (include NULL-community for legacy conversations)
       final convs = await Supabase.instance.client
           .from('conversations')
           .select('id')
           .inFilter('id', allConvIds)
-          .eq('community', _community);
+          .or('community.eq.$_community,community.is.null');
 
       final communityConvIds = convs.map<int>((c) => c['id'] as int).toList();
       if (communityConvIds.isEmpty) return;

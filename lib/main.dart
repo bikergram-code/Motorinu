@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:media_kit/media_kit.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'core/api_config.dart';
@@ -9,7 +10,6 @@ import 'core/dev_http_overrides_stub.dart'
 
 import 'providers/core/providers.dart';
 import 'routes/app_router.dart';
-import 'services/android_auto_service.dart';
 import 'theme/app_theme.dart';
 
 /// App-wide scroll behavior: bouncing physics on all platforms,
@@ -29,6 +29,7 @@ class _MotoScrollBehavior extends ScrollBehavior {
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  MediaKit.ensureInitialized();
 
   if (kDebugMode) {
     installDevHttpOverrides();
@@ -40,10 +41,6 @@ Future<void> main() async {
     anonKey: ApiConfig.supabaseAnonKey,
     debug: kDebugMode,
   );
-
-  // ── Android Auto: Register MethodChannel handler early ──
-  // This ensures fetchPoiData works even before MainShell loads.
-  AndroidAutoService.initChannel();
 
   // ── Error handler: Log ALL Flutter errors to console ──
   FlutterError.onError = (details) {

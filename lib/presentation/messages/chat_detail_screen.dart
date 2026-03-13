@@ -248,7 +248,9 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
               )
             : GestureDetector(
                 onTap: () {
-                  if (chatState.otherUserId != null) {
+                  if (chatState.isGroupChat && chatState.groupId != null) {
+                    context.push('/group/${chatState.groupId}');
+                  } else if (chatState.otherUserId != null) {
                     context.push('/profile/${chatState.otherUserId}');
                   }
                 },
@@ -260,7 +262,7 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
                       height: 34,
                       decoration: BoxDecoration(
                         shape: BoxShape.circle,
-                        gradient: chatState.otherAvatarUrl == null
+                        gradient: chatState.isGroupChat || chatState.otherAvatarUrl == null
                             ? LinearGradient(
                                 colors: [
                                   accentColor,
@@ -270,7 +272,12 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
                             : null,
                       ),
                       child: ClipOval(
-                        child: chatState.otherAvatarUrl != null &&
+                        child: chatState.isGroupChat
+                            ? Center(
+                                child: Icon(Icons.groups_rounded,
+                                    size: 18, color: Colors.white),
+                              )
+                            : chatState.otherAvatarUrl != null &&
                                 chatState.otherAvatarUrl!.isNotEmpty
                             ? Image.network(
                                 chatState.otherAvatarUrl!,
@@ -308,7 +315,9 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            chatState.otherUsername ?? 'Chat',
+                            chatState.isGroupChat
+                                ? (chatState.groupName ?? 'Gruppe')
+                                : (chatState.otherUsername ?? 'Chat'),
                             style: GoogleFonts.inter(
                               fontSize: 17,
                               fontWeight: FontWeight.w700,
@@ -374,6 +383,7 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
                                 accentColor: accentColor,
                                 replyToMessage: replyToMsg,
                                 otherUsername: chatState.otherUsername,
+                                isGroupChat: chatState.isGroupChat,
                                 onSwipeReply: () {
                                   ref
                                       .read(chatNotifierProvider(

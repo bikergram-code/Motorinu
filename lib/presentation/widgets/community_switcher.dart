@@ -21,7 +21,7 @@ class CommunitySwitcher extends ConsumerWidget {
     return GestureDetector(
       onTap: () => _showSwitcher(context, ref, community, brightness),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
         decoration: BoxDecoration(
           color: accentColor.withValues(alpha: 0.12),
           borderRadius: BorderRadius.circular(20),

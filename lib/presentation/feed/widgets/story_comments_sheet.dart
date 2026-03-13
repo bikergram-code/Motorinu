@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../../../data/repositories/story_repository.dart';
@@ -310,21 +311,28 @@ class _StoryCommentsSheetState extends ConsumerState<StoryCommentsSheet> {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Container(
-            width: 32, height: 32,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: accentColor.withValues(alpha: 0.2),
-            ),
-            child: Center(
-              child: Text(
-                comment.username.isNotEmpty
-                    ? comment.username[0].toUpperCase()
-                    : '?',
-                style: GoogleFonts.inter(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    color: accentColor),
+          GestureDetector(
+            onTap: () {
+              final router = GoRouter.of(context);
+              Navigator.pop(context);
+              router.push('/profile/${comment.userId}');
+            },
+            child: Container(
+              width: 32, height: 32,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: accentColor.withValues(alpha: 0.2),
+              ),
+              child: Center(
+                child: Text(
+                  comment.username.isNotEmpty
+                      ? comment.username[0].toUpperCase()
+                      : '?',
+                  style: GoogleFonts.inter(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: accentColor),
+                ),
               ),
             ),
           ),
@@ -336,12 +344,19 @@ class _StoryCommentsSheetState extends ConsumerState<StoryCommentsSheet> {
                 Row(
                   children: [
                     Flexible(
-                      child: Text(comment.username,
-                          style: GoogleFonts.inter(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w600,
-                              color: textOnCard),
-                          overflow: TextOverflow.ellipsis),
+                      child: GestureDetector(
+                        onTap: () {
+                          final router = GoRouter.of(context);
+                          Navigator.pop(context);
+                          router.push('/profile/${comment.userId}');
+                        },
+                        child: Text(comment.username,
+                            style: GoogleFonts.inter(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                                color: textOnCard),
+                            overflow: TextOverflow.ellipsis),
+                      ),
                     ),
                     const SizedBox(width: 8),
                     if (comment.createdAt != null)

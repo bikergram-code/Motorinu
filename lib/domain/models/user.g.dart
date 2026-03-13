@@ -16,6 +16,7 @@ _User _$UserFromJson(Map<String, dynamic> json) => _User(
   avatarUrlCargram: json['avatarUrlCargram'] as String?,
   bio: json['bio'] as String?,
   postalCode: json['postalCode'] as String?,
+  country: json['country'] as String?,
   community: json['community'] as String?,
   language: json['language'] as String?,
   age: (json['age'] as num?)?.toInt(),
@@ -38,6 +39,8 @@ _User _$UserFromJson(Map<String, dynamic> json) => _User(
   isPremium: json['isPremium'] as bool? ?? false,
   isBusiness: json['isBusiness'] as bool? ?? false,
   isVerified: json['isVerified'] as bool? ?? false,
+  homeLat: (json['homeLat'] as num?)?.toDouble(),
+  homeLng: (json['homeLng'] as num?)?.toDouble(),
   stripeCustomerId: json['stripeCustomerId'] as String?,
   lastActiveAt: json['lastActiveAt'] == null
       ? null
@@ -57,6 +60,7 @@ Map<String, dynamic> _$UserToJson(_User instance) => <String, dynamic>{
   'avatarUrlCargram': instance.avatarUrlCargram,
   'bio': instance.bio,
   'postalCode': instance.postalCode,
+  'country': instance.country,
   'community': instance.community,
   'language': instance.language,
   'age': instance.age,
@@ -77,6 +81,8 @@ Map<String, dynamic> _$UserToJson(_User instance) => <String, dynamic>{
   'isPremium': instance.isPremium,
   'isBusiness': instance.isBusiness,
   'isVerified': instance.isVerified,
+  'homeLat': instance.homeLat,
+  'homeLng': instance.homeLng,
   'stripeCustomerId': instance.stripeCustomerId,
   'lastActiveAt': instance.lastActiveAt?.toIso8601String(),
   'createdAt': instance.createdAt?.toIso8601String(),

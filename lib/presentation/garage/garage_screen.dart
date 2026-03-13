@@ -5,9 +5,9 @@ import 'package:google_fonts/google_fonts.dart';
 
 import '../../core/community.dart';
 import '../../providers/core/providers.dart';
+import '../../providers/core/speed_dial_provider.dart';
 import '../../data/repositories/vehicle_repository.dart';
 import '../../providers/garage/garage_notifier.dart';
-import '../../providers/blitzer/navigation_provider.dart';
 import '../../theme/app_theme.dart';
 import 'widgets/add_vehicle_sheet.dart';
 

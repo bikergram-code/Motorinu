@@ -1,14 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../../core/community.dart';
 import '../../domain/badge_calculator.dart';
 import '../../providers/auth/auth_notifier.dart';
 import '../../providers/auth/auth_state.dart';
 import '../../providers/core/providers.dart';
+import '../../services/geocoding_service.dart';
 import '../../theme/app_theme.dart';
 import 'widgets/experience_celebration.dart';
 
@@ -37,8 +40,45 @@ class _CompleteProfileScreenState
   bool _hasTrackExperience = false;
   bool _isSaving = false;
   bool _celebrationShown = false;
+  bool _detectingPlz = false;
 
   int get _currentAge => DateTime.now().year - _birthYear;
+
+  @override
+  void initState() {
+    super.initState();
+    _autoDetectPlz();
+  }
+
+  /// GPS → Reverse Geocode → PLZ automatisch eintragen.
+  Future<void> _autoDetectPlz() async {
+    if (!mounted) return;
+    setState(() => _detectingPlz = true);
+    try {
+      Position? pos = await Geolocator.getLastKnownPosition();
+      pos ??= await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.low,
+          timeLimit: Duration(seconds: 5),
+        ),
+      );
+      if (!mounted) return;
+      final result = await GeocodingService().reverseGeocode(
+        LatLng(pos.latitude, pos.longitude),
+      );
+      if (!mounted) return;
+      if (result?.postcode != null && result!.postcode!.isNotEmpty) {
+        if (_plzController.text.trim().isEmpty) {
+          _plzController.text = result.postcode!;
+          debugPrint('[PLZ] Auto-detected: ${result.postcode}');
+        }
+      }
+    } catch (e) {
+      debugPrint('[PLZ] Auto-detect failed: $e');
+    } finally {
+      if (mounted) setState(() => _detectingPlz = false);
+    }
+  }
 
   @override
   void dispose() {
@@ -305,12 +345,21 @@ class _CompleteProfileScreenState
         autofocus: true,
         style: GoogleFonts.inter(fontSize: 16, color: Colors.white),
         decoration: InputDecoration(
-          hintText: 'z.B. 10115',
+          hintText: _detectingPlz ? 'Wird erkannt...' : 'z.B. 10115',
           hintStyle: GoogleFonts.inter(
               fontSize: 16,
               color: Colors.white.withValues(alpha: 0.25)),
           prefixIcon: Icon(Icons.location_on_outlined,
               color: Colors.white.withValues(alpha: 0.4), size: 20),
+          suffixIcon: _detectingPlz
+            ? const Padding(
+                padding: EdgeInsets.all(12),
+                child: SizedBox(
+                  width: 20, height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white54),
+                ),
+              )
+            : null,
           filled: true,
           fillColor: const Color(0xFF1A1A1A),
           border: OutlineInputBorder(

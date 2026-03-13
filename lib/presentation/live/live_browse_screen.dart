@@ -7,8 +7,8 @@ import 'package:google_fonts/google_fonts.dart';
 import '../../core/community.dart';
 import '../../domain/models/live_stream.dart';
 import '../../providers/core/providers.dart';
+import '../../providers/core/speed_dial_provider.dart';
 import '../../providers/live/live_notifier.dart';
-import '../../providers/blitzer/navigation_provider.dart';
 import '../../theme/app_theme.dart';
 
 /// Browse active live streams in the community.

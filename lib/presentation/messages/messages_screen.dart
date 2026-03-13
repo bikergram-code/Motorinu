@@ -127,11 +127,12 @@ class _MessagesScreenState extends ConsumerState<MessagesScreen> {
       );
     }
 
-    // Filter by search
+    // Filter by search (search in username AND group name)
     final conversations = state.conversations.where((c) {
       if (_searchQuery.isEmpty) return true;
       final name = (c.otherUsername ?? '').toLowerCase();
-      return name.contains(_searchQuery);
+      final groupName = (c.groupName ?? '').toLowerCase();
+      return name.contains(_searchQuery) || groupName.contains(_searchQuery);
     }).toList();
 
     if (conversations.isEmpty) {
@@ -218,7 +219,12 @@ class _ConversationTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final brightness = Theme.of(context).brightness;
     final hasUnread = conversation.unreadCount > 0;
-    final username = conversation.otherUsername ?? 'Unbekannt';
+    final displayName = conversation.isGroupChat
+        ? (conversation.groupName ?? 'Gruppe')
+        : (conversation.otherUsername ?? 'Unbekannt');
+    final avatarUrl = conversation.isGroupChat
+        ? conversation.groupAvatarUrl
+        : conversation.otherAvatarUrl;
 
     return InkWell(
       onTap: onTap,
@@ -227,35 +233,36 @@ class _ConversationTile extends StatelessWidget {
         padding: const EdgeInsets.symmetric(vertical: 12),
         child: Row(
           children: [
-            // Avatar
+            // Avatar — group icon or user avatar
             Container(
               width: 52,
               height: 52,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                gradient: conversation.otherAvatarUrl == null
+                gradient: (avatarUrl == null || avatarUrl.isEmpty)
                     ? LinearGradient(
                         begin: Alignment.topLeft,
                         end: Alignment.bottomRight,
-                        colors: [
-                          accentColor,
-                          accentColor.withValues(alpha: 0.6),
-                        ],
+                        colors: conversation.isGroupChat
+                            ? [Colors.teal, Colors.teal.withValues(alpha: 0.6)]
+                            : [accentColor, accentColor.withValues(alpha: 0.6)],
                       )
                     : null,
               ),
               child: ClipOval(
-                child: conversation.otherAvatarUrl != null &&
-                        conversation.otherAvatarUrl!.isNotEmpty
+                child: avatarUrl != null && avatarUrl.isNotEmpty
                     ? Image.network(
-                        conversation.otherAvatarUrl!,
+                        avatarUrl,
                         width: 52,
                         height: 52,
                         fit: BoxFit.cover,
-                        errorBuilder: (_, __, ___) =>
-                            _buildInitial(username, accentColor),
+                        errorBuilder: (_, __, ___) => conversation.isGroupChat
+                            ? _buildGroupIcon()
+                            : _buildInitial(displayName, accentColor),
                       )
-                    : _buildInitial(username, accentColor),
+                    : conversation.isGroupChat
+                        ? _buildGroupIcon()
+                        : _buildInitial(displayName, accentColor),
               ),
             ),
 
@@ -266,15 +273,29 @@ class _ConversationTile extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
-                    username,
-                    style: GoogleFonts.inter(
-                      fontSize: 15,
-                      fontWeight: hasUnread ? FontWeight.w700 : FontWeight.w600,
-                      color: brightness == Brightness.dark ? Colors.white : const Color(0xFF1A1A1A),
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+                  Row(
+                    children: [
+                      if (conversation.isGroupChat) ...[
+                        Icon(Icons.groups_rounded,
+                            size: 14,
+                            color: brightness == Brightness.dark
+                                ? Colors.white.withValues(alpha: 0.5)
+                                : const Color(0xFF6C757D)),
+                        const SizedBox(width: 4),
+                      ],
+                      Expanded(
+                        child: Text(
+                          displayName,
+                          style: GoogleFonts.inter(
+                            fontSize: 15,
+                            fontWeight: hasUnread ? FontWeight.w700 : FontWeight.w600,
+                            color: brightness == Brightness.dark ? Colors.white : const Color(0xFF1A1A1A),
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 4),
                   Text(
@@ -333,6 +354,23 @@ class _ConversationTile extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildGroupIcon() {
+    return Container(
+      width: 52,
+      height: 52,
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Colors.teal, Colors.teal.withValues(alpha: 0.6)],
+        ),
+      ),
+      child: const Center(
+        child: Icon(Icons.groups_rounded, size: 24, color: Colors.white),
       ),
     );
   }

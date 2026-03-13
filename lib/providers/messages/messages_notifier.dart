@@ -70,6 +70,11 @@ class MessagesNotifier extends Notifier<MessagesState> {
           createdAt: row['created_at'] != null
               ? DateTime.tryParse(row['created_at'] as String)
               : null,
+          // Group chat fields
+          isGroupChat: row['is_group_chat'] == true,
+          groupId: (row['group_id'] as num?)?.toInt(),
+          groupName: row['group_name'] as String?,
+          groupAvatarUrl: row['group_avatar_url'] as String?,
         );
       }).toList();
 

@@ -251,14 +251,29 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                     title: Text(
                       username,
                       style: GoogleFonts.inter(
-                        fontSize: 24,
+                        fontSize: 22,
                         fontWeight: FontWeight.w700,
                         color: community?.textColor(brightness) ?? (brightness == Brightness.dark ? Colors.white : const Color(0xFF1A1A1A)),
                         letterSpacing: -0.5,
                       ),
+                      overflow: TextOverflow.ellipsis,
+                      maxLines: 1,
                     ),
                     actions: [
-                      const SizedBox(width: 8),
+                      if (!_isOwnProfile)
+                        SizedBox(
+                          width: 40,
+                          height: 40,
+                          child: IconButton(
+                            onPressed: _startConversation,
+                            padding: EdgeInsets.zero,
+                            icon: Icon(Icons.chat_bubble_outline_rounded,
+                                size: 22,
+                                color: community?.textColor(brightness) ?? (brightness == Brightness.dark ? Colors.white : const Color(0xFF1A1A1A))),
+                            tooltip: 'Nachricht senden',
+                          ),
+                        ),
+                      const SizedBox(width: 4),
                     ],
                   ),
 
@@ -421,8 +436,9 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                               },
                               style: OutlinedButton.styleFrom(
                                 side: BorderSide(
-                                  color:
-                                      Colors.white.withValues(alpha: 0.12),
+                                  color: brightness == Brightness.dark
+                                      ? Colors.white.withValues(alpha: 0.12)
+                                      : Colors.black.withValues(alpha: 0.15),
                                 ),
                                 shape: RoundedRectangleBorder(
                                   borderRadius: BorderRadius.circular(12),
@@ -454,7 +470,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                             label: 'Gespeicherte Beitr\u00e4ge',
                             color: accentColor,
                             cardColor: community?.cardFor(brightness) ?? (brightness == Brightness.dark ? const Color(0xFF1A1A1A) : Colors.white),
-                            onTap: () {},
+                            onTap: () => context.push('/saved-posts'),
                           ),
                           _MenuItem(
                             icon: Icons.workspace_premium_rounded,
@@ -505,83 +521,88 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                         // ── Other user profile: Follow + Message buttons ──
                         if (!_isOwnProfile) ...[
                           // Action buttons row
-                          Row(
-                            children: [
-                              // Follow/Unfollow button
-                              Expanded(
-                                child: SizedBox(
-                                  height: 46,
-                                  child: ElevatedButton(
-                                    onPressed: _isLoadingFollow
-                                        ? null
-                                        : _toggleFollow,
-                                    style: ElevatedButton.styleFrom(
-                                      backgroundColor: _isFollowing
-                                          ? Colors.white
-                                              .withValues(alpha: 0.08)
-                                          : accentColor,
-                                      foregroundColor: _isFollowing
-                                          ? Colors.white
-                                          : Colors.white,
-                                      shape: RoundedRectangleBorder(
-                                        borderRadius:
-                                            BorderRadius.circular(12),
+                          Builder(builder: (_) {
+                            final isDark = brightness == Brightness.dark;
+                            final textColor = community?.textColor(brightness) ?? (isDark ? Colors.white : const Color(0xFF1A1A1A));
+                            final borderColor = isDark ? Colors.white.withValues(alpha: 0.12) : Colors.black.withValues(alpha: 0.15);
+
+                            return Row(
+                              children: [
+                                // Follow/Unfollow button
+                                Expanded(
+                                  child: SizedBox(
+                                    height: 46,
+                                    child: ElevatedButton(
+                                      onPressed: _isLoadingFollow
+                                          ? null
+                                          : _toggleFollow,
+                                      style: ElevatedButton.styleFrom(
+                                        backgroundColor: _isFollowing
+                                            ? (isDark
+                                                ? Colors.white.withValues(alpha: 0.08)
+                                                : Colors.black.withValues(alpha: 0.06))
+                                            : accentColor,
+                                        foregroundColor: _isFollowing
+                                            ? textColor
+                                            : Colors.white,
+                                        shape: RoundedRectangleBorder(
+                                          borderRadius:
+                                              BorderRadius.circular(12),
+                                        ),
+                                        elevation: 0,
                                       ),
-                                      elevation: 0,
-                                    ),
-                                    child: _isLoadingFollow
-                                        ? const SizedBox(
-                                            width: 18,
-                                            height: 18,
-                                            child:
-                                                CircularProgressIndicator(
-                                                    strokeWidth: 2),
-                                          )
-                                        : Text(
-                                            _isFollowing
-                                                ? 'Entfolgen'
-                                                : 'Folgen',
-                                            style: GoogleFonts.inter(
-                                              fontSize: 14,
-                                              fontWeight: FontWeight.w600,
+                                      child: _isLoadingFollow
+                                          ? const SizedBox(
+                                              width: 18,
+                                              height: 18,
+                                              child:
+                                                  CircularProgressIndicator(
+                                                      strokeWidth: 2),
+                                            )
+                                          : Text(
+                                              _isFollowing
+                                                  ? 'Entfolgen'
+                                                  : 'Folgen',
+                                              style: GoogleFonts.inter(
+                                                fontSize: 14,
+                                                fontWeight: FontWeight.w600,
+                                              ),
                                             ),
-                                          ),
+                                    ),
                                   ),
                                 ),
-                              ),
-                              const SizedBox(width: 10),
-                              // Message button
-                              Expanded(
-                                child: SizedBox(
-                                  height: 46,
-                                  child: OutlinedButton.icon(
-                                    onPressed: _startConversation,
-                                    icon: const Icon(
-                                        Icons.chat_bubble_outline_rounded,
-                                        size: 18),
-                                    label: Text(
-                                      'Nachricht',
-                                      style: GoogleFonts.inter(
-                                        fontSize: 14,
-                                        fontWeight: FontWeight.w600,
+                                const SizedBox(width: 10),
+                                // Message button
+                                Expanded(
+                                  child: SizedBox(
+                                    height: 46,
+                                    child: OutlinedButton.icon(
+                                      onPressed: _startConversation,
+                                      icon: Icon(
+                                          Icons.chat_bubble_outline_rounded,
+                                          size: 18,
+                                          color: textColor),
+                                      label: Text(
+                                        'Nachricht',
+                                        style: GoogleFonts.inter(
+                                          fontSize: 14,
+                                          fontWeight: FontWeight.w600,
+                                        ),
                                       ),
-                                    ),
-                                    style: OutlinedButton.styleFrom(
-                                      foregroundColor: Colors.white,
-                                      side: BorderSide(
-                                        color: Colors.white
-                                            .withValues(alpha: 0.12),
-                                      ),
-                                      shape: RoundedRectangleBorder(
-                                        borderRadius:
-                                            BorderRadius.circular(12),
+                                      style: OutlinedButton.styleFrom(
+                                        foregroundColor: textColor,
+                                        side: BorderSide(color: borderColor),
+                                        shape: RoundedRectangleBorder(
+                                          borderRadius:
+                                              BorderRadius.circular(12),
+                                        ),
                                       ),
                                     ),
                                   ),
                                 ),
-                              ),
-                            ],
-                          ),
+                              ],
+                            );
+                          }),
 
                           const SizedBox(height: 20),
 

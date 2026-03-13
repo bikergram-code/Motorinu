@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
@@ -30,6 +31,7 @@ class DestinationInfo {
   final int? repairShopCount;
   final String? country;
   final String? countryCode; // ISO 2-letter code (e.g. "DE", "AT", "IT")
+  final String? cityName; // City/town name from Nominatim reverse geocoding
   final String? postalCode; // PLZ from Nominatim
   final int? bikerCount; // Registered bikes in the area (from Supabase)
   final int? autoCount; // Registered autos in the area (from Supabase)
@@ -43,6 +45,7 @@ class DestinationInfo {
     this.repairShopCount,
     this.country,
     this.countryCode,
+    this.cityName,
     this.postalCode,
     this.bikerCount,
     this.autoCount,
@@ -77,6 +80,7 @@ class DestinationInfo {
     repairShopCount: other.repairShopCount ?? repairShopCount,
     country: other.country ?? country,
     countryCode: other.countryCode ?? countryCode,
+    cityName: other.cityName ?? cityName,
     postalCode: other.postalCode ?? postalCode,
     bikerCount: other.bikerCount ?? bikerCount,
     autoCount: other.autoCount ?? autoCount,
@@ -121,6 +125,31 @@ class WeatherInfo {
 
   /// Formatted temperature.
   String get tempText => '${tempCelsius.round()}°C';
+}
+
+/// Single POI along a route.
+class RoutePoi {
+  final double lat, lon;
+  final String name;
+  const RoutePoi({required this.lat, required this.lon, required this.name});
+}
+
+/// All POIs found along a route, with positions for map markers.
+class RoutePois {
+  final List<RoutePoi> fuel;
+  final List<RoutePoi> bikerShops;
+  final List<RoutePoi> workshops;
+
+  const RoutePois({
+    required this.fuel,
+    required this.bikerShops,
+    required this.workshops,
+  });
+
+  factory RoutePois.empty() => const RoutePois(fuel: [], bikerShops: [], workshops: []);
+
+  bool get isEmpty => fuel.isEmpty && bikerShops.isEmpty && workshops.isEmpty;
+  int get totalCount => fuel.length + bikerShops.length + workshops.length;
 }
 
 // ─── Service ─────────────────────────────────────────────────────────────────
@@ -171,6 +200,7 @@ class DestinationInfoService {
       population: nominatimInfo?['population'] as int?,
       country: nominatimInfo?['country'] as String?,
       countryCode: nominatimInfo?['countryCode'] as String?,
+      cityName: nominatimInfo?['cityName'] as String?,
       postalCode: postalCode,
       description: wikiInfo?['description'],
       thumbnailUrl: wikiInfo?['thumbnail'],
@@ -251,12 +281,18 @@ class DestinationInfoService {
       final country = address['country'] as String?;
       final countryCode = (address['country_code'] as String?)?.toUpperCase();
       final postalCode = address['postcode'] as String?;
+      // City name — try city, then town, then village
+      final cityName = address['city'] as String? ??
+          address['town'] as String? ??
+          address['village'] as String? ??
+          address['municipality'] as String?;
 
-      debugPrint('[DestInfo] Nominatim: pop=$population, country=$country, cc=$countryCode, plz=$postalCode');
+      debugPrint('[DestInfo] Nominatim: pop=$population, city=$cityName, country=$country, cc=$countryCode, plz=$postalCode');
       return {
         'population': population,
         'country': country,
         'countryCode': countryCode,
+        'cityName': cityName,
         'postalCode': postalCode,
       };
     } catch (e) {
@@ -375,7 +411,8 @@ class DestinationInfoService {
       int countIdx = 0;
       for (final el in elements) {
         if (el is Map<String, dynamic> && el['type'] == 'count') {
-          final total = (el['tags']?['total'] as num?)?.toInt() ?? 0;
+          final rawTotal = el['tags']?['total'];
+          final total = rawTotal is num ? rawTotal.toInt() : int.tryParse('$rawTotal') ?? 0;
           if (countIdx == 0) {
             fuelCount = total;
           } else {
@@ -433,6 +470,273 @@ class DestinationInfoService {
       debugPrint('[DestInfo] Supabase vehicle count error: $e');
       return null;
     }
+  }
+
+  // ─── Along-Route POI Counts ─────────────────────────────────────
+  //
+  // Samples the polyline every ~50km and counts POIs within 5km of
+  // each sample point. Gives a rough count of fuel stations,
+  // biker shops, and workshops ALONG the entire route.
+
+  /// Fetch POIs along a route polyline with positions.
+  /// Returns RoutePois with counts AND locations for map markers.
+  // Google Maps API key (same as in AndroidManifest)
+  static const googleApiKey = 'AIzaSyCDfLYfcdMx1MBVmVJswpRB8MzPO5nLN9U';
+
+  Future<RoutePois> getAlongRoutePoiCounts(List<LatLng> polyline) async {
+    if (polyline.length < 2) return RoutePois.empty();
+
+    // Estimate total route length
+    double totalKm = 0;
+    for (int i = 1; i < polyline.length; i++) {
+      final dx = (polyline[i].latitude - polyline[i - 1].latitude);
+      final dy = (polyline[i].longitude - polyline[i - 1].longitude);
+      totalKm += math.sqrt(dx * dx + dy * dy) * 111;
+    }
+
+    // Sample every 3-60km depending on route length (denser = finds more stations)
+    final intervalKm = (totalKm / 30).clamp(3.0, 60.0);
+    final samples = <LatLng>[polyline.first];
+    double acc = 0;
+    for (int i = 1; i < polyline.length; i++) {
+      final dx = (polyline[i].latitude - polyline[i - 1].latitude);
+      final dy = (polyline[i].longitude - polyline[i - 1].longitude);
+      acc += math.sqrt(dx * dx + dy * dy) * 111;
+      if (acc >= intervalKm) {
+        samples.add(polyline[i]);
+        acc = 0;
+      }
+    }
+    samples.add(polyline.last);
+
+    debugPrint('[DestInfo] Fuel: ${samples.length} sample points, ${totalKm.toStringAsFixed(0)}km route');
+
+    try {
+      // ── Run Google Places + Overpass in PARALLEL for maximum coverage ──
+      final allFuel = <RoutePoi>[];
+
+      // 1) Google Places (parallel requests per sample point)
+      final googleFuture = Future(() async {
+        final googleFuel = <RoutePoi>[];
+        final seen = <String>{};
+        try {
+          final futures = samples.map((pt) async {
+            try {
+              return await http.get(
+                Uri.parse('https://maps.googleapis.com/maps/api/place/nearbysearch/json'
+                    '?location=${pt.latitude},${pt.longitude}'
+                    '&radius=2500&type=gas_station&key=$googleApiKey'),
+              ).timeout(const Duration(seconds: 8));
+            } catch (_) { return null; }
+          }).toList();
+          final responses = await Future.wait(futures);
+          for (final resp in responses) {
+            if (resp == null || resp.statusCode != 200) continue;
+            final json = jsonDecode(resp.body) as Map<String, dynamic>;
+            final status = json['status'] as String? ?? '';
+            if (status == 'REQUEST_DENIED') break;
+            if (status != 'OK' && status != 'ZERO_RESULTS') continue;
+            final results = json['results'] as List<dynamic>? ?? [];
+            for (final r in results) {
+              if (r is! Map<String, dynamic>) continue;
+              final placeId = r['place_id'] as String? ?? '';
+              if (!seen.add(placeId)) continue;
+              final loc = (r['geometry'] as Map?)?['location'] as Map?;
+              if (loc == null) continue;
+              final lat = (loc['lat'] as num?)?.toDouble();
+              final lon = (loc['lng'] as num?)?.toDouble();
+              if (lat == null || lon == null) continue;
+              final name = r['name'] as String? ?? '';
+              googleFuel.add(RoutePoi(lat: lat, lon: lon, name: name));
+            }
+          }
+        } catch (e) {
+          debugPrint('[DestInfo] Google Places error: $e');
+        }
+        return googleFuel;
+      });
+
+      // 2) Overpass / OpenStreetMap (finds small/independent stations Google misses)
+      final overpassFuture = Future(() async {
+        final osmFuel = <RoutePoi>[];
+        try {
+          final buffer = StringBuffer('[out:json][timeout:25];(');
+          for (final pt in samples) {
+            buffer.write('node["amenity"="fuel"](around:2500,${pt.latitude},${pt.longitude});');
+          }
+          buffer.write(');out body;');
+          final response = await http.post(
+            Uri.parse(_overpassUrl),
+            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            body: 'data=${Uri.encodeComponent(buffer.toString())}',
+          ).timeout(const Duration(seconds: 25));
+          if (response.statusCode == 200) {
+            final data = jsonDecode(response.body) as Map<String, dynamic>;
+            _parseFuelElements(data, osmFuel, <int>{});
+          }
+        } catch (e) {
+          debugPrint('[DestInfo] Overpass error: $e');
+        }
+        return osmFuel;
+      });
+
+      // Wait for both
+      final results = await Future.wait([googleFuture, overpassFuture]);
+      allFuel.addAll(results[0]);
+      final osmCount = results[1].length;
+      // Merge Overpass results (dedupe by distance — if <200m from existing, skip)
+      for (final osm in results[1]) {
+        bool duplicate = false;
+        for (final g in allFuel) {
+          final dx = (osm.lat - g.lat) * 111320;
+          final dy = (osm.lon - g.lon) * 111320 * math.cos(osm.lat * math.pi / 180);
+          if (dx * dx + dy * dy < 200 * 200) { duplicate = true; break; }
+        }
+        if (!duplicate && osm.name.isNotEmpty) allFuel.add(osm);
+      }
+
+      debugPrint('[DestInfo] Merged: ${results[0].length} Google + $osmCount OSM → ${allFuel.length} total');
+
+      // Thin out clusters: min distance scales with route length
+      final minDistM = (totalKm * 20).clamp(3000.0, 50000.0);
+      final fuel = <RoutePoi>[];
+      for (final f in allFuel) {
+        bool tooClose = false;
+        for (final existing in fuel) {
+          final dx = (f.lat - existing.lat) * 111320;
+          final dy = (f.lon - existing.lon) * 111320 *
+              math.cos(f.lat * math.pi / 180);
+          if (dx * dx + dy * dy < minDistM * minDistM) {
+            tooClose = true;
+            break;
+          }
+        }
+        if (!tooClose) fuel.add(f);
+      }
+
+      debugPrint('[DestInfo] Final: ${fuel.length} Tankstellen nach Clustering');
+      return RoutePois(fuel: fuel, bikerShops: [], workshops: []);
+    } catch (e) {
+      debugPrint('[DestInfo] Fuel search error: $e');
+      return _getAlongRoutePoiOverpass(polyline, totalKm, samples);
+    }
+  }
+
+  /// Overpass fallback if Google Places fails.
+  Future<RoutePois> _getAlongRoutePoiOverpass(
+      List<LatLng> polyline, double totalKm, List<LatLng> samples) async {
+    try {
+      final buffer = StringBuffer('[out:json][timeout:25];(');
+      for (final pt in samples) {
+        buffer.write('node["amenity"="fuel"](around:2500,${pt.latitude},${pt.longitude});');
+      }
+      buffer.write(');out body;');
+
+      final response = await http.post(
+        Uri.parse(_overpassUrl),
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: 'data=${Uri.encodeComponent(buffer.toString())}',
+      ).timeout(const Duration(seconds: 25));
+
+      if (response.statusCode != 200) return RoutePois.empty();
+
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      final allFuel = <RoutePoi>[];
+      _parseFuelElements(data, allFuel, <int>{});
+
+      final minDistM = (totalKm * 20).clamp(3000.0, 50000.0);
+      final named = allFuel.where((f) => f.name.isNotEmpty).toList();
+      final fuel = <RoutePoi>[];
+      for (final f in named) {
+        bool tooClose = false;
+        for (final existing in fuel) {
+          final dx = (f.lat - existing.lat) * 111320;
+          final dy = (f.lon - existing.lon) * 111320 *
+              math.cos(f.lat * math.pi / 180);
+          if (dx * dx + dy * dy < minDistM * minDistM) {
+            tooClose = true;
+            break;
+          }
+        }
+        if (!tooClose) fuel.add(f);
+      }
+      debugPrint('[DestInfo] Overpass fallback: ${fuel.length} Tankstellen');
+      return RoutePois(fuel: fuel, bikerShops: [], workshops: []);
+    } catch (e) {
+      debugPrint('[DestInfo] Overpass fallback error: $e');
+      return RoutePois.empty();
+    }
+  }
+
+  /// Parse fuel station elements from Overpass response.
+  void _parseFuelElements(Map<String, dynamic> data, List<RoutePoi> fuel, Set<int> seen) {
+    final elements = data['elements'] as List<dynamic>? ?? [];
+    for (final el in elements) {
+      if (el is! Map<String, dynamic>) continue;
+      final id = (el['id'] as num?)?.toInt() ?? 0;
+      if (!seen.add(id)) continue;
+      final lat = (el['lat'] as num?)?.toDouble();
+      final lon = (el['lon'] as num?)?.toDouble();
+      if (lat == null || lon == null) continue;
+      final tags = el['tags'] as Map<String, dynamic>? ?? {};
+      final name = tags['name'] as String? ?? '';
+      fuel.add(RoutePoi(lat: lat, lon: lon, name: name));
+    }
+  }
+
+  /// Check if a point is within radiusM of any point on the polyline.
+  bool _isNearPolyline(LatLng point, List<LatLng> polyline, double radiusM) {
+    // Check every 10th point (tighter radius needs finer sampling)
+    for (int i = 0; i < polyline.length; i += 10) {
+      final dx = (point.latitude - polyline[i].latitude) * 111320;
+      final dy = (point.longitude - polyline[i].longitude) * 111320 *
+          math.cos(polyline[i].latitude * math.pi / 180);
+      if (dx * dx + dy * dy < radiusM * radiusM) return true;
+    }
+    return false;
+  }
+
+  /// Sample a polyline at regular km intervals.
+  List<LatLng> _samplePolyline(List<LatLng> polyline, {double intervalKm = 50}) {
+    final samples = <LatLng>[polyline.first];
+    double accumulated = 0;
+
+    for (int i = 1; i < polyline.length; i++) {
+      final prev = polyline[i - 1];
+      final curr = polyline[i];
+      final segDist = _haversineKm(prev, curr);
+      accumulated += segDist;
+
+      if (accumulated >= intervalKm) {
+        samples.add(curr);
+        accumulated = 0;
+      }
+    }
+
+    // Always include endpoint
+    if (samples.last != polyline.last) {
+      samples.add(polyline.last);
+    }
+
+    // Limit to 20 sample points to keep Overpass query reasonable
+    if (samples.length > 20) {
+      final step = samples.length / 20;
+      return List.generate(20, (i) => samples[(i * step).floor()]);
+    }
+
+    return samples;
+  }
+
+  /// Haversine distance in km between two LatLng points.
+  static double _haversineKm(LatLng a, LatLng b) {
+    const r = 6371.0; // Earth radius km
+    final dLat = (b.latitude - a.latitude) * math.pi / 180;
+    final dLon = (b.longitude - a.longitude) * math.pi / 180;
+    final lat1 = a.latitude * math.pi / 180;
+    final lat2 = b.latitude * math.pi / 180;
+    final h = math.pow(math.sin(dLat / 2), 2).toDouble() +
+        math.pow(math.sin(dLon / 2), 2).toDouble() * math.cos(lat1) * math.cos(lat2);
+    return 2 * r * math.asin(math.sqrt(h));
   }
 
   /// Clear the cache (e.g. on memory pressure).

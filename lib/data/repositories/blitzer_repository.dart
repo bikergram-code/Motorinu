@@ -3,7 +3,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../services/osm_blitzer_service.dart';
-import '../../providers/blitzer/country_policy_provider.dart';
+import '../../providers/map/country_policy_provider.dart';
 
 /// Source of a blitzer report.
 enum BlitzerSource { community, osm }
@@ -367,42 +367,42 @@ class BlitzerRepository {
     await _addDeletedId(reportId);
     debugPrint('[Blitzer] Report $reportId added to local blacklist');
 
-    // ── Then try server-side cleanup (best-effort, all strategies) ──
+    // ── Then try server-side cleanup (best-effort, multiple strategies) ──
 
-    // Strategy 1: Use existing RPC to set dismissals very high
-    // (this works because confirmReport/dismissReport already use RPC)
+    // Strategy 1: RPC deactivate_blitzer (SECURITY DEFINER, bypasses RLS)
     try {
-      await _supabase.rpc('increment_field', params: {
-        'table_name': 'blitzer_reports',
-        'field_name': 'dismissals',
-        'row_id': reportId,
+      await _supabase.rpc('deactivate_blitzer', params: {
+        'report_id': reportId,
       });
-      // Call it multiple times to push dismissals above the trust threshold
-      for (int i = 0; i < 10; i++) {
-        await _supabase.rpc('increment_field', params: {
-          'table_name': 'blitzer_reports',
-          'field_name': 'dismissals',
-          'row_id': reportId,
-        });
-      }
-      debugPrint('[Blitzer] Report $reportId dismissals incremented via RPC');
+      debugPrint('[Blitzer] Report $reportId deactivated via RPC (global)');
+      return; // Success — no need for fallback strategies
     } catch (e) {
-      debugPrint('[Blitzer] RPC dismiss failed: $e');
+      debugPrint('[Blitzer] RPC deactivate failed: $e');
     }
 
-    // Strategy 2: Try deactivate (is_active = false)
+    // Strategy 2: Direct update (requires permissive UPDATE RLS policy)
     try {
       await _supabase
           .from('blitzer_reports')
-          .update({'is_active': false})
-          .eq('id', reportId)
-          .eq('user_id', userId);
-      debugPrint('[Blitzer] Report $reportId deactivated');
+          .update({'is_active': false, 'dismissals': 99})
+          .eq('id', reportId);
+      debugPrint('[Blitzer] Report $reportId deactivated via direct update');
+      return;
     } catch (e) {
-      debugPrint('[Blitzer] Deactivate failed: $e');
+      debugPrint('[Blitzer] Direct update failed: $e');
     }
 
-    // Strategy 3: Try direct delete
+    // Strategy 3: Owner-only update + delete (RLS restricted)
+    try {
+      await _supabase
+          .from('blitzer_reports')
+          .update({'is_active': false, 'dismissals': 99})
+          .eq('id', reportId)
+          .eq('user_id', userId);
+      debugPrint('[Blitzer] Report $reportId deactivated (owner)');
+    } catch (e) {
+      debugPrint('[Blitzer] Owner update failed: $e');
+    }
     try {
       await _supabase
           .from('blitzer_reports')
@@ -412,6 +412,20 @@ class BlitzerRepository {
       debugPrint('[Blitzer] Report $reportId deleted from DB');
     } catch (e) {
       debugPrint('[Blitzer] Direct delete failed: $e');
+    }
+
+    // Strategy 4: Increment dismissals via RPC (if available)
+    try {
+      for (int i = 0; i < 10; i++) {
+        await _supabase.rpc('increment_field', params: {
+          'table_name': 'blitzer_reports',
+          'field_name': 'dismissals',
+          'row_id': reportId,
+        });
+      }
+      debugPrint('[Blitzer] Report $reportId dismissals set high via RPC');
+    } catch (e) {
+      debugPrint('[Blitzer] RPC increment failed: $e');
     }
 
     // Even if all server strategies fail, the local blacklist ensures

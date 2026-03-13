@@ -1,12 +1,18 @@
+import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:file_picker/file_picker.dart';
+import 'package:http/http.dart' as http;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:video_compress/video_compress.dart';
 
+import '../../../core/api_config.dart';
 import '../../../core/community.dart';
 import '../../../providers/auth/auth_notifier.dart';
 import '../../../providers/auth/auth_state.dart';
@@ -14,10 +20,11 @@ import '../../../providers/core/providers.dart';
 import '../../../providers/feed/feed_notifier.dart';
 import '../../../theme/app_theme.dart';
 import 'topic_picker.dart';
+import 'video_trim_screen.dart';
 
 // Max file sizes
 const _maxImageSizeMB = 10;
-const _maxVideoSizeMB = 50;
+const _maxVideoSizeMB = 100;
 
 // Allowed video extensions
 const _allowedVideoTypes = ['mp4', 'mov', 'avi', 'mkv', 'webm'];
@@ -77,10 +84,15 @@ class _CreatePostScreenState extends ConsumerState<CreatePostScreen> {
   // Video
   Uint8List? _pickedVideoBytes;
   String? _pickedVideoName;
+  String? _pickedVideoFilePath; // File path for efficient upload
   double? _pickedVideoSizeMB;
+  Uint8List? _videoThumbnailBytes; // Auto-generated thumbnail from first frame
 
   // Topics
   List<int> _selectedTopicIds = [];
+
+  // Visibility: 'public', 'followers', 'private'
+  String _visibility = 'public';
 
   bool _isSubmitting = false;
   String? _error;
@@ -211,48 +223,104 @@ class _CreatePostScreenState extends ConsumerState<CreatePostScreen> {
     }
   }
 
-  // ── Video Picker ──
+  // ── Video Picker (FilePicker — sieht ALLE Dateien inkl. Downloads) ──
 
   Future<void> _pickVideo() async {
     try {
-      final picker = ImagePicker();
-      final file = await picker.pickVideo(
-        source: ImageSource.gallery,
-        maxDuration: const Duration(minutes: 3),
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.video,
+        allowMultiple: false,
       );
-      if (file == null) return;
+      if (result == null || result.files.isEmpty) return;
 
-      final bytes = await file.readAsBytes();
-      if (bytes.isEmpty) return;
+      final pickedFile = result.files.first;
+      final filePath = pickedFile.path;
+      if (filePath == null) return;
 
-      final ext = file.name.split('.').last.toLowerCase();
+      final file = File(filePath);
+      final fileName = pickedFile.name;
+      final ext = fileName.split('.').last.toLowerCase();
+
       if (!_allowedVideoTypes.contains(ext)) {
         setState(() => _error =
             'Nicht unterst\u00fctztes Format. Erlaubt: ${_allowedVideoTypes.join(', ')}');
         return;
       }
 
-      final sizeMB = bytes.length / (1024 * 1024);
+      // ── Optional: Video trimmen ──
+      if (!mounted) return;
+      final community = ref.read(communityProvider);
+      final accentColor = community?.accentColor ?? AppTheme.accentDark;
+
+      final trimmedFile = await VideoTrimScreen.show(
+        context,
+        videoFile: file,
+        accentColor: accentColor,
+      );
+      // User cancelled trim screen
+      if (trimmedFile == null) return;
+
+      var bytes = await trimmedFile.readAsBytes();
+      if (bytes.isEmpty) return;
+
+      var sizeMB = bytes.length / (1024 * 1024);
+      var finalName = fileName;
+
+      var finalFilePath = trimmedFile.path;
+
+      // If too large → offer compression
       if (sizeMB > _maxVideoSizeMB) {
-        setState(
-            () => _error = 'Video zu gro\u00df (max. ${_maxVideoSizeMB}MB)');
-        return;
+        if (!mounted) return;
+        final shouldCompress = await _showCompressDialog(sizeMB);
+        if (shouldCompress != true) return;
+
+        // Compress with progress
+        if (!mounted) return;
+        final compressed = await _compressVideo(filePath, sizeMB);
+        if (compressed == null) return;
+
+        bytes = compressed.$1;
+        sizeMB = compressed.$2;
+        finalFilePath = compressed.$3;
+        finalName = 'compressed_$fileName';
+
+        // Still too big after compression?
+        if (sizeMB > _maxVideoSizeMB) {
+          setState(() => _error =
+              'Video ist nach Komprimierung noch ${sizeMB.toStringAsFixed(1)} MB (max. ${_maxVideoSizeMB}MB)');
+          return;
+        }
       }
 
       // Security confirmation
       if (!mounted) return;
       final confirmed = await _showUploadConfirmation(
         title: 'Video hochladen?',
-        fileName: file.name,
+        fileName: finalName,
         sizeMB: sizeMB,
         icon: Icons.videocam_rounded,
       );
       if (confirmed != true) return;
 
+      // Generate video thumbnail (first frame) for preview & upload
+      Uint8List? thumbBytes;
+      try {
+        final thumbFile = await VideoCompress.getFileThumbnail(
+          finalFilePath,
+          quality: 50,
+          position: -1, // first frame
+        );
+        thumbBytes = await thumbFile.readAsBytes();
+      } catch (_) {
+        // Thumbnail generation is optional — continue without it
+      }
+
       setState(() {
         _pickedVideoBytes = bytes;
-        _pickedVideoName = file.name;
+        _pickedVideoName = finalName;
+        _pickedVideoFilePath = finalFilePath;
         _pickedVideoSizeMB = sizeMB;
+        _videoThumbnailBytes = thumbBytes;
         _pickedImageBytes = null;
         _pickedImageName = null;
         _error = null;
@@ -260,6 +328,140 @@ class _CreatePostScreenState extends ConsumerState<CreatePostScreen> {
       });
     } catch (e) {
       setState(() => _error = e.toString());
+    }
+  }
+
+  // ── Compress Dialog (fragt ob komprimiert werden soll) ──
+
+  Future<bool?> _showCompressDialog(double sizeMB) {
+    final community = ref.read(communityProvider);
+    final accentColor = community?.accentColor ?? AppTheme.accentDark;
+
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF222222),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Row(
+          children: [
+            Icon(Icons.compress_rounded, color: accentColor, size: 24),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text('Video zu gro\u00df',
+                  style: GoogleFonts.inter(
+                      fontSize: 17,
+                      fontWeight: FontWeight.w700,
+                      color: Colors.white)),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.orange.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: Colors.orange.withValues(alpha: 0.2)),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.warning_amber_rounded,
+                      color: Colors.orange.shade300, size: 20),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Das Video ist ${sizeMB.toStringAsFixed(1)} MB gro\u00df '
+                      '(max. ${_maxVideoSizeMB}MB).\n\n'
+                      'Soll es automatisch komprimiert werden?',
+                      style: GoogleFonts.inter(
+                          fontSize: 13,
+                          color: Colors.orange.shade200,
+                          height: 1.4),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text('Abbrechen',
+                style: GoogleFonts.inter(
+                    color: Colors.white.withValues(alpha: 0.5))),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            style: FilledButton.styleFrom(backgroundColor: accentColor),
+            icon: const Icon(Icons.compress_rounded, size: 18, color: Colors.white),
+            label: Text('Komprimieren',
+                style: GoogleFonts.inter(
+                    fontWeight: FontWeight.w600, color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── Video Compression mit Progress-Overlay ──
+
+  /// Returns (bytes, sizeMB, compressedFilePath) or null on failure
+  Future<(Uint8List, double, String)?> _compressVideo(String filePath, double originalMB) async {
+    // Pick quality based on file size.
+    // IMPORTANT: Always use MediumQuality as minimum to cap resolution
+    // at ~1280x720. DefaultQuality does NOT resize, which can produce
+    // videos (e.g. 2288x1080) that exceed device decoder capabilities.
+    VideoQuality quality;
+    if (originalMB > 200) {
+      quality = VideoQuality.LowQuality;
+    } else {
+      quality = VideoQuality.MediumQuality;
+    }
+
+    // Show progress overlay
+    final progressNotifier = ValueNotifier<double>(0.0);
+    final overlayEntry = OverlayEntry(
+      builder: (context) => _CompressProgressOverlay(progress: progressNotifier),
+    );
+
+    Overlay.of(context).insert(overlayEntry);
+
+    // Listen to compression progress (store subscription for proper cleanup)
+    final subscription = VideoCompress.compressProgress$.subscribe((progress) {
+      progressNotifier.value = progress / 100.0;
+    });
+
+    try {
+      final info = await VideoCompress.compressVideo(
+        filePath,
+        quality: quality,
+        deleteOrigin: false,
+        includeAudio: true,
+      );
+
+      subscription.unsubscribe();
+      overlayEntry.remove();
+      progressNotifier.dispose();
+
+      if (info == null || info.file == null) {
+        setState(() => _error = 'Komprimierung fehlgeschlagen');
+        return null;
+      }
+
+      final compressedFile = info.file!;
+      final compressedBytes = await compressedFile.readAsBytes();
+      final compressedMB = compressedBytes.length / (1024 * 1024);
+
+      return (compressedBytes, compressedMB, compressedFile.path);
+    } catch (e) {
+      subscription.unsubscribe();
+      overlayEntry.remove();
+      progressNotifier.dispose();
+      setState(() => _error = 'Komprimierung fehlgeschlagen: $e');
+      return null;
     }
   }
 
@@ -379,6 +581,106 @@ class _CreatePostScreenState extends ConsumerState<CreatePostScreen> {
     );
   }
 
+  // ── TUS Resumable Upload (6MB chunks — bypasses 413 payload limit) ──
+
+  /// Map video extension to a valid MIME type with fallback.
+  static String _videoContentType(String ext) {
+    const types = {
+      'mp4': 'video/mp4',
+      'mov': 'video/quicktime',
+      'avi': 'video/x-msvideo',
+      'mkv': 'video/x-matroska',
+      'webm': 'video/webm',
+      '3gp': 'video/3gpp',
+    };
+    return types[ext.toLowerCase()] ?? 'video/mp4';
+  }
+
+  Future<void> _tusUploadFile({
+    required String bucketName,
+    required String objectPath,
+    required File file,
+    required String contentType,
+    void Function(double progress)? onProgress,
+  }) async {
+    final supabase = Supabase.instance.client;
+    final accessToken = supabase.auth.currentSession?.accessToken;
+    if (accessToken == null) throw Exception('Nicht eingeloggt');
+
+    final baseUrl = ApiConfig.supabaseUrl;
+    final fileSize = await file.length();
+
+    // Step 1: Create the resumable upload
+    final createUri = Uri.parse('$baseUrl/storage/v1/upload/resumable');
+    // Base64 encode metadata values (TUS spec: no padding issues with standard base64)
+    final metaBucket = base64.encode(utf8.encode(bucketName));
+    final metaObject = base64.encode(utf8.encode(objectPath));
+    final metaType = base64.encode(utf8.encode(contentType));
+    final metaCache = base64.encode(utf8.encode('3600'));
+
+    // TUS spec: key value pairs separated by comma, NO spaces after commas
+    final metadata =
+        'bucketName $metaBucket,objectName $metaObject,contentType $metaType,cacheControl $metaCache';
+
+    final createRes = await http.post(
+      createUri,
+      headers: {
+        'Authorization': 'Bearer $accessToken',
+        'x-upsert': 'false',
+        'Upload-Length': '$fileSize',
+        'Upload-Metadata': metadata,
+        'Tus-Resumable': '1.0.0',
+      },
+    );
+
+    if (createRes.statusCode != 201) {
+      throw Exception(
+          'Upload-Erstellung fehlgeschlagen (${createRes.statusCode}): ${createRes.body}');
+    }
+
+    final uploadUrl = createRes.headers['location'];
+    if (uploadUrl == null) {
+      throw Exception('Kein Upload-URL vom Server erhalten');
+    }
+
+    // Step 2: Upload in 6MB chunks
+    const chunkSize = 6 * 1024 * 1024; // 6MB per Supabase spec
+    int offset = 0;
+    final raf = file.openSync(mode: FileMode.read);
+
+    try {
+      while (offset < fileSize) {
+        final remaining = fileSize - offset;
+        final currentSize = remaining < chunkSize ? remaining : chunkSize;
+
+        raf.setPositionSync(offset);
+        final chunk = raf.readSync(currentSize);
+
+        final patchRes = await http.patch(
+          Uri.parse(uploadUrl),
+          headers: {
+            'Authorization': 'Bearer $accessToken',
+            'Upload-Offset': '$offset',
+            'Content-Type': 'application/offset+octet-stream',
+            'Tus-Resumable': '1.0.0',
+          },
+          body: chunk,
+        );
+
+        if (patchRes.statusCode != 204) {
+          throw Exception(
+              'Chunk-Upload fehlgeschlagen bei ${(offset / 1024 / 1024).toStringAsFixed(1)}MB '
+              '(${patchRes.statusCode}): ${patchRes.body}');
+        }
+
+        offset += currentSize;
+        onProgress?.call(offset / fileSize);
+      }
+    } finally {
+      raf.closeSync();
+    }
+  }
+
   // ── Submit Post ──
 
   Future<void> _handlePost() async {
@@ -418,17 +720,67 @@ class _CreatePostScreenState extends ConsumerState<CreatePostScreen> {
         imageUrl = supabase.storage.from('posts').getPublicUrl(path);
       }
 
-      // Upload video
+      // Upload video via TUS resumable upload (6MB chunks — avoids 413)
+      // Shows a progress overlay so the user knows what's happening.
+      String? thumbnailUrl;
       if (_pickedVideoBytes != null) {
         final ext = _pickedVideoName?.split('.').last ?? 'mp4';
         final path = '$userId/${timestamp}_vid.$ext';
-        await supabase.storage.from('posts').uploadBinary(
-              path,
-              _pickedVideoBytes!,
-              fileOptions:
-                  const FileOptions(cacheControl: '3600', upsert: false),
+        final contentType = _videoContentType(ext);
+
+        // ── Upload progress overlay ──
+        final uploadProgress = ValueNotifier<double>(0.0);
+        final uploadOverlay = OverlayEntry(
+          builder: (_) => _UploadProgressOverlay(
+            progress: uploadProgress,
+            sizeMB: _pickedVideoSizeMB ?? 0,
+          ),
+        );
+        Overlay.of(context).insert(uploadOverlay);
+
+        try {
+          if (_pickedVideoFilePath != null) {
+            await _tusUploadFile(
+              bucketName: 'posts',
+              objectPath: path,
+              file: File(_pickedVideoFilePath!),
+              contentType: contentType,
+              onProgress: (p) => uploadProgress.value = p,
             );
+          } else {
+            // Fallback: write bytes to temp file, then TUS upload
+            final tempDir = Directory.systemTemp;
+            final tempFile = File('${tempDir.path}/upload_${timestamp}_vid.$ext');
+            await tempFile.writeAsBytes(_pickedVideoBytes!);
+            await _tusUploadFile(
+              bucketName: 'posts',
+              objectPath: path,
+              file: tempFile,
+              contentType: contentType,
+              onProgress: (p) => uploadProgress.value = p,
+            );
+            await tempFile.delete().catchError((_) {});
+          }
+        } finally {
+          uploadOverlay.remove();
+          uploadProgress.dispose();
+        }
         videoUrl = supabase.storage.from('posts').getPublicUrl(path);
+
+        // ── Upload video thumbnail ──
+        if (_videoThumbnailBytes != null) {
+          try {
+            final thumbPath = '$userId/${timestamp}_thumb.jpg';
+            await supabase.storage.from('posts').uploadBinary(
+              thumbPath,
+              _videoThumbnailBytes!,
+              fileOptions: const FileOptions(cacheControl: '3600', upsert: false),
+            );
+            thumbnailUrl = supabase.storage.from('posts').getPublicUrl(thumbPath);
+          } catch (_) {
+            // Thumbnail upload is optional
+          }
+        }
       }
 
       // Upload carousel images
@@ -466,10 +818,12 @@ class _CreatePostScreenState extends ConsumerState<CreatePostScreen> {
         body: body.isNotEmpty ? body : null,
         imageUrl: imageUrl,
         videoUrl: videoUrl,
+        thumbnailUrl: thumbnailUrl,
         community: community?.name,
         mediaType: mediaType,
         topicIds: _selectedTopicIds.isNotEmpty ? _selectedTopicIds : null,
         attachmentUrls: carouselUrls.length > 1 ? carouselUrls : null,
+        visibility: _visibility,
       );
 
       ref.read(feedNotifierProvider.notifier).addPost(post);
@@ -591,33 +945,36 @@ class _CreatePostScreenState extends ConsumerState<CreatePostScreen> {
           padding: const EdgeInsets.symmetric(horizontal: 24),
           child: Column(
             children: [
-              _MediaCard(
-                icon: Icons.photo_library_rounded,
-                title: 'Foto',
-                subtitle: 'Aus der Galerie w\u00e4hlen',
-                gradient: [accentColor, accentColor.withValues(alpha: 0.6)],
-                cardColor: cardBg,
-                textColor: textOnBg,
-                onTap: () => _pickImage(ImageSource.gallery),
-              ),
-              const SizedBox(height: 14),
-              _MediaCard(
-                icon: Icons.collections_rounded,
-                title: 'Carousel',
-                subtitle: 'Mehrere Bilder w\u00e4hlen (\u2264 10)',
-                gradient: [
-                  const Color(0xFF42A5F5),
-                  const Color(0xFF42A5F5).withValues(alpha: 0.6),
-                ],
-                cardColor: cardBg,
-                textColor: textOnBg,
-                onTap: _pickMultipleImages,
-              ),
-              const SizedBox(height: 14),
+              // Foto + Carousel only when NOT opened from Reels (video source)
+              if (widget.initialSource != PostMediaSource.video) ...[
+                _MediaCard(
+                  icon: Icons.photo_library_rounded,
+                  title: 'Foto',
+                  subtitle: 'Aus der Galerie w\u00e4hlen',
+                  gradient: [accentColor, accentColor.withValues(alpha: 0.6)],
+                  cardColor: cardBg,
+                  textColor: textOnBg,
+                  onTap: () => _pickImage(ImageSource.gallery),
+                ),
+                const SizedBox(height: 14),
+                _MediaCard(
+                  icon: Icons.collections_rounded,
+                  title: 'Carousel',
+                  subtitle: 'Mehrere Bilder w\u00e4hlen (\u2264 10)',
+                  gradient: [
+                    const Color(0xFF42A5F5),
+                    const Color(0xFF42A5F5).withValues(alpha: 0.6),
+                  ],
+                  cardColor: cardBg,
+                  textColor: textOnBg,
+                  onTap: _pickMultipleImages,
+                ),
+                const SizedBox(height: 14),
+              ],
               _MediaCard(
                 icon: Icons.videocam_rounded,
                 title: 'Video',
-                subtitle: 'Bis zu 3 Minuten, max. 50 MB',
+                subtitle: 'Bis zu 3 Minuten, max. 100 MB',
                 gradient: [
                   const Color(0xFFE040FB),
                   const Color(0xFFE040FB).withValues(alpha: 0.6),
@@ -646,23 +1003,24 @@ class _CreatePostScreenState extends ConsumerState<CreatePostScreen> {
 
         const Spacer(),
 
-        // ── Text-only link ──
-        Padding(
-          padding: const EdgeInsets.only(bottom: 32),
-          child: TextButton.icon(
-            onPressed: () => setState(() => _currentStep = 1),
-            icon: Icon(Icons.edit_note_rounded,
-                color: textOnBg.withValues(alpha: 0.5), size: 20),
-            label: Text(
-              'Nur Text posten',
-              style: GoogleFonts.inter(
-                fontSize: 15,
-                color: textOnBg.withValues(alpha: 0.5),
-                fontWeight: FontWeight.w500,
+        // ── Text-only link (hide when opened from Reels) ──
+        if (widget.initialSource != PostMediaSource.video)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 32),
+            child: TextButton.icon(
+              onPressed: () => setState(() => _currentStep = 1),
+              icon: Icon(Icons.edit_note_rounded,
+                  color: textOnBg.withValues(alpha: 0.5), size: 20),
+              label: Text(
+                'Nur Text posten',
+                style: GoogleFonts.inter(
+                  fontSize: 15,
+                  color: textOnBg.withValues(alpha: 0.5),
+                  fontWeight: FontWeight.w500,
+                ),
               ),
             ),
           ),
-        ),
       ],
     );
   }
@@ -874,6 +1232,10 @@ class _CreatePostScreenState extends ConsumerState<CreatePostScreen> {
                       selectedTopicIds: _selectedTopicIds,
                       onChanged: (ids) => setState(() => _selectedTopicIds = ids),
                     ),
+
+                    // ── Visibility Picker ──
+                    const SizedBox(height: 16),
+                    _buildVisibilityPicker(accentColor, textOnBg),
                   ],
                 ),
               ),
@@ -881,6 +1243,59 @@ class _CreatePostScreenState extends ConsumerState<CreatePostScreen> {
           ),
         ],
       ),
+    );
+  }
+
+  // ── Visibility Picker ──
+
+  Widget _buildVisibilityPicker(Color accentColor, Color textColor) {
+    const options = [
+      ('public', Icons.public_rounded, 'Alle'),
+      ('followers', Icons.people_rounded, 'Follower'),
+      ('private', Icons.lock_rounded, 'Privat'),
+    ];
+
+    return Row(
+      children: options.map((opt) {
+        final (value, icon, label) = opt;
+        final isSelected = _visibility == value;
+        return Padding(
+          padding: const EdgeInsets.only(right: 8),
+          child: GestureDetector(
+            onTap: () => setState(() => _visibility = value),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: isSelected
+                    ? accentColor.withValues(alpha: 0.15)
+                    : Colors.transparent,
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(
+                  color: isSelected
+                      ? accentColor
+                      : textColor.withValues(alpha: 0.15),
+                  width: 1.5,
+                ),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(icon,
+                      size: 16,
+                      color: isSelected ? accentColor : textColor.withValues(alpha: 0.4)),
+                  const SizedBox(width: 6),
+                  Text(label,
+                      style: GoogleFonts.inter(
+                        fontSize: 13,
+                        fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
+                        color: isSelected ? accentColor : textColor.withValues(alpha: 0.5),
+                      )),
+                ],
+              ),
+            ),
+          ),
+        );
+      }).toList(),
     );
   }
 
@@ -1061,6 +1476,100 @@ class _CreatePostScreenState extends ConsumerState<CreatePostScreen> {
     final community = ref.watch(communityProvider);
     final textOnBg = community?.textColor(brightness) ??
         (brightness == Brightness.dark ? Colors.white : const Color(0xFF1A1A1A));
+
+    // If we have a thumbnail, show it as a larger visual preview
+    if (_videoThumbnailBytes != null) {
+      final screenH = MediaQuery.of(context).size.height;
+      final previewHeight = (screenH * 0.25).clamp(140.0, 280.0);
+
+      return Stack(
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(16),
+            child: SizedBox(
+              width: double.infinity,
+              height: previewHeight,
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  Image.memory(_videoThumbnailBytes!, fit: BoxFit.cover),
+                  // Video overlay icon + info
+                  Container(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [
+                          Colors.transparent,
+                          Colors.black.withValues(alpha: 0.7),
+                        ],
+                      ),
+                    ),
+                  ),
+                  Positioned(
+                    bottom: 12,
+                    left: 14,
+                    child: Row(
+                      children: [
+                        Icon(Icons.videocam_rounded,
+                            color: Colors.white.withValues(alpha: 0.8), size: 18),
+                        const SizedBox(width: 6),
+                        Text(
+                          '${_pickedVideoSizeMB?.toStringAsFixed(1) ?? '?'} MB',
+                          style: GoogleFonts.inter(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.white.withValues(alpha: 0.8),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  // Play icon
+                  Center(
+                    child: Container(
+                      width: 48,
+                      height: 48,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Colors.black.withValues(alpha: 0.4),
+                      ),
+                      child: const Icon(Icons.play_arrow_rounded,
+                          color: Colors.white, size: 32),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (!_isSubmitting)
+            Positioned(
+              top: 10,
+              right: 10,
+              child: GestureDetector(
+                onTap: () => setState(() {
+                  _pickedVideoBytes = null;
+                  _pickedVideoName = null;
+                  _pickedVideoSizeMB = null;
+                  _videoThumbnailBytes = null;
+                }),
+                child: Container(
+                  width: 32,
+                  height: 32,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Colors.black.withValues(alpha: 0.6),
+                  ),
+                  child: const Icon(Icons.close_rounded,
+                      color: Colors.white, size: 18),
+                ),
+              ),
+            ),
+        ],
+      );
+    }
+
+    // Fallback: simple card without thumbnail
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
@@ -1111,6 +1620,7 @@ class _CreatePostScreenState extends ConsumerState<CreatePostScreen> {
                 _pickedVideoBytes = null;
                 _pickedVideoName = null;
                 _pickedVideoSizeMB = null;
+                _videoThumbnailBytes = null;
               }),
               child: Container(
                 width: 32,
@@ -1228,6 +1738,179 @@ class _MediaCardState extends State<_MediaCard>
                 Icons.arrow_forward_ios_rounded,
                 color: (widget.textColor ?? Colors.white).withValues(alpha: 0.25),
                 size: 18,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════
+//  Compress Progress Overlay
+// ═══════════════════════════════════════════════════
+
+class _CompressProgressOverlay extends StatelessWidget {
+  const _CompressProgressOverlay({required this.progress});
+
+  final ValueNotifier<double> progress;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.black.withValues(alpha: 0.85),
+      child: Center(
+        child: Container(
+          margin: const EdgeInsets.symmetric(horizontal: 48),
+          padding: const EdgeInsets.all(32),
+          decoration: BoxDecoration(
+            color: const Color(0xFF1E1E1E),
+            borderRadius: BorderRadius.circular(20),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.compress_rounded,
+                  color: Color(0xFFE040FB), size: 40),
+              const SizedBox(height: 16),
+              Text(
+                'Video wird komprimiert\u2026',
+                style: GoogleFonts.inter(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.white,
+                ),
+              ),
+              const SizedBox(height: 20),
+              ValueListenableBuilder<double>(
+                valueListenable: progress,
+                builder: (_, value, __) {
+                  return Column(
+                    children: [
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(6),
+                        child: LinearProgressIndicator(
+                          value: value > 0 ? value : null,
+                          minHeight: 8,
+                          backgroundColor: Colors.white.withValues(alpha: 0.1),
+                          valueColor: const AlwaysStoppedAnimation<Color>(
+                              Color(0xFFE040FB)),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        value > 0
+                            ? '${(value * 100).toInt()}%'
+                            : 'Wird vorbereitet\u2026',
+                        style: GoogleFonts.inter(
+                          fontSize: 13,
+                          color: Colors.white.withValues(alpha: 0.5),
+                        ),
+                      ),
+                    ],
+                  );
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════
+//  Upload Progress Overlay (TUS chunked upload)
+// ═══════════════════════════════════════════════════
+
+class _UploadProgressOverlay extends StatelessWidget {
+  const _UploadProgressOverlay({
+    required this.progress,
+    required this.sizeMB,
+  });
+
+  final ValueNotifier<double> progress;
+  final double sizeMB;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.black.withValues(alpha: 0.85),
+      child: Center(
+        child: Container(
+          margin: const EdgeInsets.symmetric(horizontal: 48),
+          padding: const EdgeInsets.all(32),
+          decoration: BoxDecoration(
+            color: const Color(0xFF1E1E1E),
+            borderRadius: BorderRadius.circular(20),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.cloud_upload_rounded,
+                  color: Color(0xFF42A5F5), size: 40),
+              const SizedBox(height: 16),
+              Text(
+                'Video wird hochgeladen\u2026',
+                style: GoogleFonts.inter(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.white,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                '${sizeMB.toStringAsFixed(1)} MB',
+                style: GoogleFonts.inter(
+                  fontSize: 13,
+                  color: Colors.white.withValues(alpha: 0.4),
+                ),
+              ),
+              const SizedBox(height: 20),
+              ValueListenableBuilder<double>(
+                valueListenable: progress,
+                builder: (_, value, __) {
+                  final uploadedMB = value * sizeMB;
+                  return Column(
+                    children: [
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(6),
+                        child: LinearProgressIndicator(
+                          value: value > 0 ? value : null,
+                          minHeight: 10,
+                          backgroundColor: Colors.white.withValues(alpha: 0.1),
+                          valueColor: const AlwaysStoppedAnimation<Color>(
+                              Color(0xFF42A5F5)),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            value > 0
+                                ? '${(value * 100).toInt()}%'
+                                : 'Verbinde\u2026',
+                            style: GoogleFonts.inter(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                              color: const Color(0xFF42A5F5),
+                            ),
+                          ),
+                          if (value > 0)
+                            Text(
+                              '${uploadedMB.toStringAsFixed(1)} / ${sizeMB.toStringAsFixed(1)} MB',
+                              style: GoogleFonts.inter(
+                                fontSize: 12,
+                                color: Colors.white.withValues(alpha: 0.4),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ],
+                  );
+                },
               ),
             ],
           ),

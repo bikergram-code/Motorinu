@@ -23,6 +23,7 @@ class AlertAudioService {
 
   final _blitzerPlayer = AudioPlayer();
   final _navPlayer = AudioPlayer();
+  final _sosPlayer = AudioPlayer();
   bool _initialized = false;
 
   // Separate throttle timers for blitzer vs nav sounds
@@ -38,12 +39,14 @@ class AlertAudioService {
   Uint8List? _navRecalcTone;
   Uint8List? _navOffRouteTone;
   Uint8List? _warningTone;
+  Uint8List? _sosTone;
 
   Future<void> init() async {
     if (_initialized) return;
     _initialized = true;
     await _blitzerPlayer.setReleaseMode(ReleaseMode.stop);
     await _navPlayer.setReleaseMode(ReleaseMode.stop);
+    await _sosPlayer.setReleaseMode(ReleaseMode.stop);
 
     // Load real camera shutter sound from assets
     try {
@@ -62,6 +65,7 @@ class AlertAudioService {
     _navRecalcTone = _buildNavRecalcTone();
     _navOffRouteTone = _buildNavOffRouteTone();
     _warningTone = _buildWarningTone();
+    _sosTone = _buildSosTone();
 
     debugPrint('[AlertAudio] Initialized');
   }
@@ -254,6 +258,21 @@ class AlertAudioService {
     return _samplesToWav(samples);
   }
 
+  /// SOS alarm: angenehmer, tiefer Dreiklang-Alarm.
+  /// Drei aufsteigende Töne (C5→E5→G5) — Dur-Akkord klingt weniger aggressiv
+  /// als typische Sirenen, ist aber klar erkennbar.
+  Uint8List _buildSosTone() {
+    final samples = _concat([
+      // Drei aufsteigende Töne (C5-E5-G5 Dur-Dreiklang)
+      _sineTone(523, 0.25),   // C5
+      _silence(0.08),
+      _sineTone(659, 0.25),   // E5
+      _silence(0.08),
+      _sineTone(784, 0.35),   // G5 (etwas länger für Abschluss)
+    ]);
+    return _samplesToWav(samples);
+  }
+
   // ═══════════════════════════════════════════════════════════════════════
   //  Blitzer Alert Sound + Haptic
   // ═══════════════════════════════════════════════════════════════════════
@@ -436,15 +455,39 @@ class AlertAudioService {
     }
   }
 
+  // ─── SOS Alarm ───────────────────────────────────────────────────────
+
+  /// Play the SOS alarm tone once. Angenehmer Dreiklang.
+  Future<void> playSosAlarm({double volume = 0.9}) async {
+    try {
+      if (_sosTone == null) return;
+      HapticFeedback.heavyImpact();
+      await _sosPlayer.stop();
+      await _sosPlayer.setVolume(volume.clamp(0.0, 1.0));
+      await _sosPlayer.play(BytesSource(_sosTone!));
+      debugPrint('[AlertAudio] SOS alarm played');
+    } catch (e) {
+      debugPrint('[AlertAudio] SOS alarm error: $e');
+      SystemSound.play(SystemSoundType.alert);
+    }
+  }
+
+  /// Stop the SOS alarm.
+  Future<void> stopSosAlarm() async {
+    await _sosPlayer.stop();
+  }
+
   /// Stop any playing sound.
   Future<void> stop() async {
     await _blitzerPlayer.stop();
     await _navPlayer.stop();
+    await _sosPlayer.stop();
   }
 
   void dispose() {
     _blitzerPlayer.dispose();
     _navPlayer.dispose();
+    _sosPlayer.dispose();
     _initialized = false;
   }
 }

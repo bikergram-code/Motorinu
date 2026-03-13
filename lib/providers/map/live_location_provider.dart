@@ -17,7 +17,8 @@ import '../../services/live_location_service.dart';
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// The one and only LiveLocationService instance for the entire app.
-final LiveLocationService _globalLiveLocationService = LiveLocationService();
+/// Public singleton so any service can access nearby users without Riverpod.
+final LiveLocationService globalLiveLocationService = LiveLocationService();
 
 /// Riverpod provider that exposes the singleton.
 /// It NEVER creates a new instance — always returns the same one.
@@ -25,7 +26,7 @@ final LiveLocationService _globalLiveLocationService = LiveLocationService();
 final liveLocationServiceProvider = Provider<LiveLocationService>((ref) {
   // Always return the same singleton. Do NOT dispose it — it must survive
   // all provider chain re-evaluations, widget rebuilds, and tab switches.
-  return _globalLiveLocationService;
+  return globalLiveLocationService;
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -41,8 +42,8 @@ final liveLocationServiceProvider = Provider<LiveLocationService>((ref) {
 // which does NOT trigger framework-level rebuilds of the surrounding tree.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Global singleton holding online users the current user follows.
-/// Only users in the current user's following list are shown (badge + map).
+/// Global singleton holding online users in the current community.
+/// Shows ALL online users (not just followed) for badge + map.
 /// Lives forever — never reset by provider rebuilds.
 final onlineUsersNotifier = ValueNotifier<Map<String, LiveUserPosition>>({});
 
@@ -91,34 +92,33 @@ Future<void> initOnlineUsers({
   debugPrint('[OnlineUsers] Initial snapshot: ${snapshot.length} users');
   _lastAllUsers = Map.from(snapshot);
   if (snapshot.isNotEmpty) {
-    onlineUsersNotifier.value = _filterByFollowing(snapshot);
+    onlineUsersNotifier.value = _filterByCommunity(snapshot);
   }
 
-  // 3. Subscribe to stream (only once — guarded by null check)
-  if (_liveStreamSub == null) {
-    debugPrint('[OnlineUsers] Creating stream subscription');
-    _liveStreamSub = service.nearbyUsersStream.listen(
-      (allUsers) {
+  // 3. Cancel old subscription before re-subscribing (community may have changed)
+  await _liveStreamSub?.cancel();
+  debugPrint('[OnlineUsers] Creating stream subscription');
+  _liveStreamSub = service.nearbyUsersStream.listen(
+    (allUsers) {
+      _lastAllUsers = Map.from(allUsers);
+      _applyFilter(allUsers);
+    },
+    onError: (e) {
+      debugPrint('[OnlineUsers] Stream error: $e');
+    },
+    onDone: () {
+      debugPrint('[OnlineUsers] ⚠️ Stream DONE — this should never happen!');
+      _liveStreamSub = null;
+      _liveStreamSub = service.nearbyUsersStream.listen((allUsers) {
         _lastAllUsers = Map.from(allUsers);
         _applyFilter(allUsers);
-      },
-      onError: (e) {
-        debugPrint('[OnlineUsers] Stream error: $e');
-      },
-      onDone: () {
-        debugPrint('[OnlineUsers] ⚠️ Stream DONE — this should never happen!');
-        _liveStreamSub = null;
-        _liveStreamSub = service.nearbyUsersStream.listen((allUsers) {
-          _lastAllUsers = Map.from(allUsers);
-          _applyFilter(allUsers);
-        });
-      },
-    );
-  }
+      });
+    },
+  );
 
-  // 4. Subscribe to intentional logout events (only once).
-  // When a user sends going_offline=true, bypass the 30s debounce.
-  _goingOfflineSub ??= service.userGoingOfflineStream.listen((uid) {
+  // 4. Cancel old logout subscription before re-subscribing.
+  await _goingOfflineSub?.cancel();
+  _goingOfflineSub = service.userGoingOfflineStream.listen((uid) {
     debugPrint('[OnlineUsers] User $uid intentionally went offline — clearing immediately');
     _zeroBadgeDebounce?.cancel();
     _zeroBadgeDebounce = null;
@@ -142,9 +142,18 @@ Future<void> refreshFollowingIds(ProfileRepository profileRepo) async {
   }
 }
 
-/// Keep only users that:
-///   1. Are in the same community as the current user
-///   2. Are in the current user's following list
+/// Keep only users that are in the same community as the current user.
+/// Shows ALL online users (not just followed) so the badge count is accurate.
+Map<String, LiveUserPosition> _filterByCommunity(
+    Map<String, LiveUserPosition> allUsers) {
+  return Map.fromEntries(
+    allUsers.entries.where((e) =>
+        e.value.community == _currentCommunity),
+  );
+}
+
+/// Keep only users that are followed AND in the same community.
+/// Used by the online users sheet (detailed list).
 Map<String, LiveUserPosition> _filterByFollowing(
     Map<String, LiveUserPosition> allUsers) {
   if (_followingIds.isEmpty) return {};
@@ -157,19 +166,19 @@ Map<String, LiveUserPosition> _filterByFollowing(
 
 /// Apply immediately — no debounce, for intentional logouts and filter changes.
 void _applyFilterImmediate(Map<String, LiveUserPosition> allUsers) {
-  final filtered = _filterByFollowing(allUsers);
-  debugPrint('[OnlineUsers] _applyFilterImmediate: ${allUsers.length} total → ${filtered.length} followed');
+  final filtered = _filterByCommunity(allUsers);
+  debugPrint('[OnlineUsers] _applyFilterImmediate: ${allUsers.length} total → ${filtered.length} in community');
   onlineUsersNotifier.value = filtered;
 }
 
-/// Update the badge with followed online users, with debounce for network flickers.
+/// Update the badge with all online users in community, with debounce for network flickers.
 void _applyFilter(Map<String, LiveUserPosition> allUsers) {
-  final filtered = _filterByFollowing(allUsers);
+  final filtered = _filterByCommunity(allUsers);
   final oldCount = onlineUsersNotifier.value.length;
   final newCount = filtered.length;
 
   if (oldCount != newCount) {
-    debugPrint('[OnlineUsers] _applyFilter: $oldCount→$newCount followed users online');
+    debugPrint('[OnlineUsers] _applyFilter: $oldCount→$newCount users online in community');
   }
 
   if (oldCount > 0 && newCount == 0) {
@@ -178,7 +187,7 @@ void _applyFilter(Map<String, LiveUserPosition> allUsers) {
     debugPrint('[OnlineUsers] ⚠️ count→0, debouncing 30s before hiding badge');
     _zeroBadgeDebounce = Timer(const Duration(seconds: 30), () {
       debugPrint('[OnlineUsers] Debounce fired: recheck=${_lastAllUsers.length} users');
-      onlineUsersNotifier.value = _filterByFollowing(_lastAllUsers);
+      onlineUsersNotifier.value = _filterByCommunity(_lastAllUsers);
     });
     return;
   }
@@ -193,7 +202,7 @@ void _applyFilter(Map<String, LiveUserPosition> allUsers) {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Riverpod providers that are still needed by other screens
-// (isLiveProvider is used by blitzer_map_screen, navigation_settings, etc.)
+// (isLiveProvider is used by community_map_screen, settings, etc.)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Whether the current user is broadcasting live GPS.
@@ -213,7 +222,7 @@ class IsLiveNotifier extends Notifier<bool> {
 }
 
 /// Reactive provider for nearby live users count + data.
-/// Used by blitzer_map_screen for map markers — filtered to following list.
+/// Used by community_map_screen for map markers — filtered to following list.
 /// Uses the global singleton service — ref.read (not watch) to avoid re-evaluation.
 final liveUsersProvider =
     NotifierProvider<LiveUsersNotifier, Map<String, LiveUserPosition>>(
@@ -226,16 +235,16 @@ class LiveUsersNotifier extends Notifier<Map<String, LiveUserPosition>> {
   Map<String, LiveUserPosition> build() {
     // Use the global singleton directly — NOT ref.watch which would cause
     // re-evaluation and lose the subscription.
-    final service = _globalLiveLocationService;
+    final service = globalLiveLocationService;
 
-    // Start with whatever the service currently has (filtered to following)
-    final initial = _filterByFollowing(
+    // Start with whatever the service currently has (all community users)
+    final initial = _filterByCommunity(
         Map<String, LiveUserPosition>.from(service.nearbyUsers));
 
     // Subscribe to future changes
     _sub?.cancel();
     _sub = service.nearbyUsersStream.listen((users) {
-      state = _filterByFollowing(Map<String, LiveUserPosition>.from(users));
+      state = _filterByCommunity(Map<String, LiveUserPosition>.from(users));
     });
 
     ref.onDispose(() {

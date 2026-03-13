@@ -14,6 +14,11 @@ abstract class Conversation with _$Conversation {
     DateTime? lastMessageAt,
     @Default(0) int unreadCount,
     DateTime? createdAt,
+    // Group chat fields
+    @Default(false) bool isGroupChat,
+    int? groupId,
+    String? groupName,
+    String? groupAvatarUrl,
   }) = _Conversation;
 
   factory Conversation.fromJson(Map<String, dynamic> json) =>
@@ -37,6 +42,9 @@ abstract class DirectMessage with _$DirectMessage {
     @Default('text') String messageType, // text, image, audio, location
     @Default(false) bool isRead,
     DateTime? createdAt,
+    // Group chat enrichment
+    String? senderName,
+    String? senderAvatar,
   }) = _DirectMessage;
 
   factory DirectMessage.fromJson(Map<String, dynamic> json) =>

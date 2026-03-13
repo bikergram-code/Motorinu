@@ -15,7 +15,12 @@ T _$identity<T>(T value) => value;
 /// @nodoc
 mixin _$BikerEvent {
 
- int get id; int get creatorId; String get title; String? get description; String? get imageUrl; String? get location; double? get latitude; double? get longitude; DateTime get startsAt; DateTime? get endsAt; int? get maxParticipants; int get participantCount; bool get isFeatured; String? get creatorName; String? get creatorAvatarUrl; String? get myStatus; DateTime? get createdAt; DateTime? get updatedAt;
+ int get id; String get userId;// UUID from auth.users
+ String get title; String? get description; String? get imageUrl; String? get location;// location_text in DB
+ double? get latitude; double? get longitude; DateTime get startsAt; DateTime? get endsAt; int? get maxParticipants; int get participantCount; bool get isFeatured; String get category;// meetup, trackday, ride, fair, race
+ String get community; String? get creatorName; String? get creatorAvatarUrl; String? get myStatus;// going, interested, null
+ String? get ticketUrl;// Affiliate ticket link
+ DateTime? get createdAt; DateTime? get updatedAt;
 /// Create a copy of BikerEvent
 /// with the given fields replaced by the non-null parameter values.
 @JsonKey(includeFromJson: false, includeToJson: false)
@@ -28,16 +33,16 @@ $BikerEventCopyWith<BikerEvent> get copyWith => _$BikerEventCopyWithImpl<BikerEv
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is BikerEvent&&(identical(other.id, id) || other.id == id)&&(identical(other.creatorId, creatorId) || other.creatorId == creatorId)&&(identical(other.title, title) || other.title == title)&&(identical(other.description, description) || other.description == description)&&(identical(other.imageUrl, imageUrl) || other.imageUrl == imageUrl)&&(identical(other.location, location) || other.location == location)&&(identical(other.latitude, latitude) || other.latitude == latitude)&&(identical(other.longitude, longitude) || other.longitude == longitude)&&(identical(other.startsAt, startsAt) || other.startsAt == startsAt)&&(identical(other.endsAt, endsAt) || other.endsAt == endsAt)&&(identical(other.maxParticipants, maxParticipants) || other.maxParticipants == maxParticipants)&&(identical(other.participantCount, participantCount) || other.participantCount == participantCount)&&(identical(other.isFeatured, isFeatured) || other.isFeatured == isFeatured)&&(identical(other.creatorName, creatorName) || other.creatorName == creatorName)&&(identical(other.creatorAvatarUrl, creatorAvatarUrl) || other.creatorAvatarUrl == creatorAvatarUrl)&&(identical(other.myStatus, myStatus) || other.myStatus == myStatus)&&(identical(other.createdAt, createdAt) || other.createdAt == createdAt)&&(identical(other.updatedAt, updatedAt) || other.updatedAt == updatedAt));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is BikerEvent&&(identical(other.id, id) || other.id == id)&&(identical(other.userId, userId) || other.userId == userId)&&(identical(other.title, title) || other.title == title)&&(identical(other.description, description) || other.description == description)&&(identical(other.imageUrl, imageUrl) || other.imageUrl == imageUrl)&&(identical(other.location, location) || other.location == location)&&(identical(other.latitude, latitude) || other.latitude == latitude)&&(identical(other.longitude, longitude) || other.longitude == longitude)&&(identical(other.startsAt, startsAt) || other.startsAt == startsAt)&&(identical(other.endsAt, endsAt) || other.endsAt == endsAt)&&(identical(other.maxParticipants, maxParticipants) || other.maxParticipants == maxParticipants)&&(identical(other.participantCount, participantCount) || other.participantCount == participantCount)&&(identical(other.isFeatured, isFeatured) || other.isFeatured == isFeatured)&&(identical(other.category, category) || other.category == category)&&(identical(other.community, community) || other.community == community)&&(identical(other.creatorName, creatorName) || other.creatorName == creatorName)&&(identical(other.creatorAvatarUrl, creatorAvatarUrl) || other.creatorAvatarUrl == creatorAvatarUrl)&&(identical(other.myStatus, myStatus) || other.myStatus == myStatus)&&(identical(other.ticketUrl, ticketUrl) || other.ticketUrl == ticketUrl)&&(identical(other.createdAt, createdAt) || other.createdAt == createdAt)&&(identical(other.updatedAt, updatedAt) || other.updatedAt == updatedAt));
 }
 
 @JsonKey(includeFromJson: false, includeToJson: false)
 @override
-int get hashCode => Object.hash(runtimeType,id,creatorId,title,description,imageUrl,location,latitude,longitude,startsAt,endsAt,maxParticipants,participantCount,isFeatured,creatorName,creatorAvatarUrl,myStatus,createdAt,updatedAt);
+int get hashCode => Object.hashAll([runtimeType,id,userId,title,description,imageUrl,location,latitude,longitude,startsAt,endsAt,maxParticipants,participantCount,isFeatured,category,community,creatorName,creatorAvatarUrl,myStatus,ticketUrl,createdAt,updatedAt]);
 
 @override
 String toString() {
-  return 'BikerEvent(id: $id, creatorId: $creatorId, title: $title, description: $description, imageUrl: $imageUrl, location: $location, latitude: $latitude, longitude: $longitude, startsAt: $startsAt, endsAt: $endsAt, maxParticipants: $maxParticipants, participantCount: $participantCount, isFeatured: $isFeatured, creatorName: $creatorName, creatorAvatarUrl: $creatorAvatarUrl, myStatus: $myStatus, createdAt: $createdAt, updatedAt: $updatedAt)';
+  return 'BikerEvent(id: $id, userId: $userId, title: $title, description: $description, imageUrl: $imageUrl, location: $location, latitude: $latitude, longitude: $longitude, startsAt: $startsAt, endsAt: $endsAt, maxParticipants: $maxParticipants, participantCount: $participantCount, isFeatured: $isFeatured, category: $category, community: $community, creatorName: $creatorName, creatorAvatarUrl: $creatorAvatarUrl, myStatus: $myStatus, ticketUrl: $ticketUrl, createdAt: $createdAt, updatedAt: $updatedAt)';
 }
 
 
@@ -48,7 +53,7 @@ abstract mixin class $BikerEventCopyWith<$Res>  {
   factory $BikerEventCopyWith(BikerEvent value, $Res Function(BikerEvent) _then) = _$BikerEventCopyWithImpl;
 @useResult
 $Res call({
- int id, int creatorId, String title, String? description, String? imageUrl, String? location, double? latitude, double? longitude, DateTime startsAt, DateTime? endsAt, int? maxParticipants, int participantCount, bool isFeatured, String? creatorName, String? creatorAvatarUrl, String? myStatus, DateTime? createdAt, DateTime? updatedAt
+ int id, String userId, String title, String? description, String? imageUrl, String? location, double? latitude, double? longitude, DateTime startsAt, DateTime? endsAt, int? maxParticipants, int participantCount, bool isFeatured, String category, String community, String? creatorName, String? creatorAvatarUrl, String? myStatus, String? ticketUrl, DateTime? createdAt, DateTime? updatedAt
 });
 
 
@@ -65,11 +70,11 @@ class _$BikerEventCopyWithImpl<$Res>
 
 /// Create a copy of BikerEvent
 /// with the given fields replaced by the non-null parameter values.
-@pragma('vm:prefer-inline') @override $Res call({Object? id = null,Object? creatorId = null,Object? title = null,Object? description = freezed,Object? imageUrl = freezed,Object? location = freezed,Object? latitude = freezed,Object? longitude = freezed,Object? startsAt = null,Object? endsAt = freezed,Object? maxParticipants = freezed,Object? participantCount = null,Object? isFeatured = null,Object? creatorName = freezed,Object? creatorAvatarUrl = freezed,Object? myStatus = freezed,Object? createdAt = freezed,Object? updatedAt = freezed,}) {
+@pragma('vm:prefer-inline') @override $Res call({Object? id = null,Object? userId = null,Object? title = null,Object? description = freezed,Object? imageUrl = freezed,Object? location = freezed,Object? latitude = freezed,Object? longitude = freezed,Object? startsAt = null,Object? endsAt = freezed,Object? maxParticipants = freezed,Object? participantCount = null,Object? isFeatured = null,Object? category = null,Object? community = null,Object? creatorName = freezed,Object? creatorAvatarUrl = freezed,Object? myStatus = freezed,Object? ticketUrl = freezed,Object? createdAt = freezed,Object? updatedAt = freezed,}) {
   return _then(_self.copyWith(
 id: null == id ? _self.id : id // ignore: cast_nullable_to_non_nullable
-as int,creatorId: null == creatorId ? _self.creatorId : creatorId // ignore: cast_nullable_to_non_nullable
-as int,title: null == title ? _self.title : title // ignore: cast_nullable_to_non_nullable
+as int,userId: null == userId ? _self.userId : userId // ignore: cast_nullable_to_non_nullable
+as String,title: null == title ? _self.title : title // ignore: cast_nullable_to_non_nullable
 as String,description: freezed == description ? _self.description : description // ignore: cast_nullable_to_non_nullable
 as String?,imageUrl: freezed == imageUrl ? _self.imageUrl : imageUrl // ignore: cast_nullable_to_non_nullable
 as String?,location: freezed == location ? _self.location : location // ignore: cast_nullable_to_non_nullable
@@ -80,9 +85,12 @@ as DateTime,endsAt: freezed == endsAt ? _self.endsAt : endsAt // ignore: cast_nu
 as DateTime?,maxParticipants: freezed == maxParticipants ? _self.maxParticipants : maxParticipants // ignore: cast_nullable_to_non_nullable
 as int?,participantCount: null == participantCount ? _self.participantCount : participantCount // ignore: cast_nullable_to_non_nullable
 as int,isFeatured: null == isFeatured ? _self.isFeatured : isFeatured // ignore: cast_nullable_to_non_nullable
-as bool,creatorName: freezed == creatorName ? _self.creatorName : creatorName // ignore: cast_nullable_to_non_nullable
+as bool,category: null == category ? _self.category : category // ignore: cast_nullable_to_non_nullable
+as String,community: null == community ? _self.community : community // ignore: cast_nullable_to_non_nullable
+as String,creatorName: freezed == creatorName ? _self.creatorName : creatorName // ignore: cast_nullable_to_non_nullable
 as String?,creatorAvatarUrl: freezed == creatorAvatarUrl ? _self.creatorAvatarUrl : creatorAvatarUrl // ignore: cast_nullable_to_non_nullable
 as String?,myStatus: freezed == myStatus ? _self.myStatus : myStatus // ignore: cast_nullable_to_non_nullable
+as String?,ticketUrl: freezed == ticketUrl ? _self.ticketUrl : ticketUrl // ignore: cast_nullable_to_non_nullable
 as String?,createdAt: freezed == createdAt ? _self.createdAt : createdAt // ignore: cast_nullable_to_non_nullable
 as DateTime?,updatedAt: freezed == updatedAt ? _self.updatedAt : updatedAt // ignore: cast_nullable_to_non_nullable
 as DateTime?,
@@ -170,10 +178,10 @@ return $default(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( int id,  int creatorId,  String title,  String? description,  String? imageUrl,  String? location,  double? latitude,  double? longitude,  DateTime startsAt,  DateTime? endsAt,  int? maxParticipants,  int participantCount,  bool isFeatured,  String? creatorName,  String? creatorAvatarUrl,  String? myStatus,  DateTime? createdAt,  DateTime? updatedAt)?  $default,{required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( int id,  String userId,  String title,  String? description,  String? imageUrl,  String? location,  double? latitude,  double? longitude,  DateTime startsAt,  DateTime? endsAt,  int? maxParticipants,  int participantCount,  bool isFeatured,  String category,  String community,  String? creatorName,  String? creatorAvatarUrl,  String? myStatus,  String? ticketUrl,  DateTime? createdAt,  DateTime? updatedAt)?  $default,{required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case _BikerEvent() when $default != null:
-return $default(_that.id,_that.creatorId,_that.title,_that.description,_that.imageUrl,_that.location,_that.latitude,_that.longitude,_that.startsAt,_that.endsAt,_that.maxParticipants,_that.participantCount,_that.isFeatured,_that.creatorName,_that.creatorAvatarUrl,_that.myStatus,_that.createdAt,_that.updatedAt);case _:
+return $default(_that.id,_that.userId,_that.title,_that.description,_that.imageUrl,_that.location,_that.latitude,_that.longitude,_that.startsAt,_that.endsAt,_that.maxParticipants,_that.participantCount,_that.isFeatured,_that.category,_that.community,_that.creatorName,_that.creatorAvatarUrl,_that.myStatus,_that.ticketUrl,_that.createdAt,_that.updatedAt);case _:
   return orElse();
 
 }
@@ -191,10 +199,10 @@ return $default(_that.id,_that.creatorId,_that.title,_that.description,_that.ima
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( int id,  int creatorId,  String title,  String? description,  String? imageUrl,  String? location,  double? latitude,  double? longitude,  DateTime startsAt,  DateTime? endsAt,  int? maxParticipants,  int participantCount,  bool isFeatured,  String? creatorName,  String? creatorAvatarUrl,  String? myStatus,  DateTime? createdAt,  DateTime? updatedAt)  $default,) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( int id,  String userId,  String title,  String? description,  String? imageUrl,  String? location,  double? latitude,  double? longitude,  DateTime startsAt,  DateTime? endsAt,  int? maxParticipants,  int participantCount,  bool isFeatured,  String category,  String community,  String? creatorName,  String? creatorAvatarUrl,  String? myStatus,  String? ticketUrl,  DateTime? createdAt,  DateTime? updatedAt)  $default,) {final _that = this;
 switch (_that) {
 case _BikerEvent():
-return $default(_that.id,_that.creatorId,_that.title,_that.description,_that.imageUrl,_that.location,_that.latitude,_that.longitude,_that.startsAt,_that.endsAt,_that.maxParticipants,_that.participantCount,_that.isFeatured,_that.creatorName,_that.creatorAvatarUrl,_that.myStatus,_that.createdAt,_that.updatedAt);case _:
+return $default(_that.id,_that.userId,_that.title,_that.description,_that.imageUrl,_that.location,_that.latitude,_that.longitude,_that.startsAt,_that.endsAt,_that.maxParticipants,_that.participantCount,_that.isFeatured,_that.category,_that.community,_that.creatorName,_that.creatorAvatarUrl,_that.myStatus,_that.ticketUrl,_that.createdAt,_that.updatedAt);case _:
   throw StateError('Unexpected subclass');
 
 }
@@ -211,10 +219,10 @@ return $default(_that.id,_that.creatorId,_that.title,_that.description,_that.ima
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( int id,  int creatorId,  String title,  String? description,  String? imageUrl,  String? location,  double? latitude,  double? longitude,  DateTime startsAt,  DateTime? endsAt,  int? maxParticipants,  int participantCount,  bool isFeatured,  String? creatorName,  String? creatorAvatarUrl,  String? myStatus,  DateTime? createdAt,  DateTime? updatedAt)?  $default,) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( int id,  String userId,  String title,  String? description,  String? imageUrl,  String? location,  double? latitude,  double? longitude,  DateTime startsAt,  DateTime? endsAt,  int? maxParticipants,  int participantCount,  bool isFeatured,  String category,  String community,  String? creatorName,  String? creatorAvatarUrl,  String? myStatus,  String? ticketUrl,  DateTime? createdAt,  DateTime? updatedAt)?  $default,) {final _that = this;
 switch (_that) {
 case _BikerEvent() when $default != null:
-return $default(_that.id,_that.creatorId,_that.title,_that.description,_that.imageUrl,_that.location,_that.latitude,_that.longitude,_that.startsAt,_that.endsAt,_that.maxParticipants,_that.participantCount,_that.isFeatured,_that.creatorName,_that.creatorAvatarUrl,_that.myStatus,_that.createdAt,_that.updatedAt);case _:
+return $default(_that.id,_that.userId,_that.title,_that.description,_that.imageUrl,_that.location,_that.latitude,_that.longitude,_that.startsAt,_that.endsAt,_that.maxParticipants,_that.participantCount,_that.isFeatured,_that.category,_that.community,_that.creatorName,_that.creatorAvatarUrl,_that.myStatus,_that.ticketUrl,_that.createdAt,_that.updatedAt);case _:
   return null;
 
 }
@@ -226,15 +234,17 @@ return $default(_that.id,_that.creatorId,_that.title,_that.description,_that.ima
 @JsonSerializable()
 
 class _BikerEvent implements BikerEvent {
-  const _BikerEvent({required this.id, required this.creatorId, required this.title, this.description, this.imageUrl, this.location, this.latitude, this.longitude, required this.startsAt, this.endsAt, this.maxParticipants, this.participantCount = 0, this.isFeatured = false, this.creatorName, this.creatorAvatarUrl, this.myStatus, this.createdAt, this.updatedAt});
+  const _BikerEvent({required this.id, required this.userId, required this.title, this.description, this.imageUrl, this.location, this.latitude, this.longitude, required this.startsAt, this.endsAt, this.maxParticipants, this.participantCount = 0, this.isFeatured = false, this.category = 'meetup', this.community = 'bikergram', this.creatorName, this.creatorAvatarUrl, this.myStatus, this.ticketUrl, this.createdAt, this.updatedAt});
   factory _BikerEvent.fromJson(Map<String, dynamic> json) => _$BikerEventFromJson(json);
 
 @override final  int id;
-@override final  int creatorId;
+@override final  String userId;
+// UUID from auth.users
 @override final  String title;
 @override final  String? description;
 @override final  String? imageUrl;
 @override final  String? location;
+// location_text in DB
 @override final  double? latitude;
 @override final  double? longitude;
 @override final  DateTime startsAt;
@@ -242,9 +252,15 @@ class _BikerEvent implements BikerEvent {
 @override final  int? maxParticipants;
 @override@JsonKey() final  int participantCount;
 @override@JsonKey() final  bool isFeatured;
+@override@JsonKey() final  String category;
+// meetup, trackday, ride, fair, race
+@override@JsonKey() final  String community;
 @override final  String? creatorName;
 @override final  String? creatorAvatarUrl;
 @override final  String? myStatus;
+// going, interested, null
+@override final  String? ticketUrl;
+// Affiliate ticket link
 @override final  DateTime? createdAt;
 @override final  DateTime? updatedAt;
 
@@ -261,16 +277,16 @@ Map<String, dynamic> toJson() {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is _BikerEvent&&(identical(other.id, id) || other.id == id)&&(identical(other.creatorId, creatorId) || other.creatorId == creatorId)&&(identical(other.title, title) || other.title == title)&&(identical(other.description, description) || other.description == description)&&(identical(other.imageUrl, imageUrl) || other.imageUrl == imageUrl)&&(identical(other.location, location) || other.location == location)&&(identical(other.latitude, latitude) || other.latitude == latitude)&&(identical(other.longitude, longitude) || other.longitude == longitude)&&(identical(other.startsAt, startsAt) || other.startsAt == startsAt)&&(identical(other.endsAt, endsAt) || other.endsAt == endsAt)&&(identical(other.maxParticipants, maxParticipants) || other.maxParticipants == maxParticipants)&&(identical(other.participantCount, participantCount) || other.participantCount == participantCount)&&(identical(other.isFeatured, isFeatured) || other.isFeatured == isFeatured)&&(identical(other.creatorName, creatorName) || other.creatorName == creatorName)&&(identical(other.creatorAvatarUrl, creatorAvatarUrl) || other.creatorAvatarUrl == creatorAvatarUrl)&&(identical(other.myStatus, myStatus) || other.myStatus == myStatus)&&(identical(other.createdAt, createdAt) || other.createdAt == createdAt)&&(identical(other.updatedAt, updatedAt) || other.updatedAt == updatedAt));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is _BikerEvent&&(identical(other.id, id) || other.id == id)&&(identical(other.userId, userId) || other.userId == userId)&&(identical(other.title, title) || other.title == title)&&(identical(other.description, description) || other.description == description)&&(identical(other.imageUrl, imageUrl) || other.imageUrl == imageUrl)&&(identical(other.location, location) || other.location == location)&&(identical(other.latitude, latitude) || other.latitude == latitude)&&(identical(other.longitude, longitude) || other.longitude == longitude)&&(identical(other.startsAt, startsAt) || other.startsAt == startsAt)&&(identical(other.endsAt, endsAt) || other.endsAt == endsAt)&&(identical(other.maxParticipants, maxParticipants) || other.maxParticipants == maxParticipants)&&(identical(other.participantCount, participantCount) || other.participantCount == participantCount)&&(identical(other.isFeatured, isFeatured) || other.isFeatured == isFeatured)&&(identical(other.category, category) || other.category == category)&&(identical(other.community, community) || other.community == community)&&(identical(other.creatorName, creatorName) || other.creatorName == creatorName)&&(identical(other.creatorAvatarUrl, creatorAvatarUrl) || other.creatorAvatarUrl == creatorAvatarUrl)&&(identical(other.myStatus, myStatus) || other.myStatus == myStatus)&&(identical(other.ticketUrl, ticketUrl) || other.ticketUrl == ticketUrl)&&(identical(other.createdAt, createdAt) || other.createdAt == createdAt)&&(identical(other.updatedAt, updatedAt) || other.updatedAt == updatedAt));
 }
 
 @JsonKey(includeFromJson: false, includeToJson: false)
 @override
-int get hashCode => Object.hash(runtimeType,id,creatorId,title,description,imageUrl,location,latitude,longitude,startsAt,endsAt,maxParticipants,participantCount,isFeatured,creatorName,creatorAvatarUrl,myStatus,createdAt,updatedAt);
+int get hashCode => Object.hashAll([runtimeType,id,userId,title,description,imageUrl,location,latitude,longitude,startsAt,endsAt,maxParticipants,participantCount,isFeatured,category,community,creatorName,creatorAvatarUrl,myStatus,ticketUrl,createdAt,updatedAt]);
 
 @override
 String toString() {
-  return 'BikerEvent(id: $id, creatorId: $creatorId, title: $title, description: $description, imageUrl: $imageUrl, location: $location, latitude: $latitude, longitude: $longitude, startsAt: $startsAt, endsAt: $endsAt, maxParticipants: $maxParticipants, participantCount: $participantCount, isFeatured: $isFeatured, creatorName: $creatorName, creatorAvatarUrl: $creatorAvatarUrl, myStatus: $myStatus, createdAt: $createdAt, updatedAt: $updatedAt)';
+  return 'BikerEvent(id: $id, userId: $userId, title: $title, description: $description, imageUrl: $imageUrl, location: $location, latitude: $latitude, longitude: $longitude, startsAt: $startsAt, endsAt: $endsAt, maxParticipants: $maxParticipants, participantCount: $participantCount, isFeatured: $isFeatured, category: $category, community: $community, creatorName: $creatorName, creatorAvatarUrl: $creatorAvatarUrl, myStatus: $myStatus, ticketUrl: $ticketUrl, createdAt: $createdAt, updatedAt: $updatedAt)';
 }
 
 
@@ -281,7 +297,7 @@ abstract mixin class _$BikerEventCopyWith<$Res> implements $BikerEventCopyWith<$
   factory _$BikerEventCopyWith(_BikerEvent value, $Res Function(_BikerEvent) _then) = __$BikerEventCopyWithImpl;
 @override @useResult
 $Res call({
- int id, int creatorId, String title, String? description, String? imageUrl, String? location, double? latitude, double? longitude, DateTime startsAt, DateTime? endsAt, int? maxParticipants, int participantCount, bool isFeatured, String? creatorName, String? creatorAvatarUrl, String? myStatus, DateTime? createdAt, DateTime? updatedAt
+ int id, String userId, String title, String? description, String? imageUrl, String? location, double? latitude, double? longitude, DateTime startsAt, DateTime? endsAt, int? maxParticipants, int participantCount, bool isFeatured, String category, String community, String? creatorName, String? creatorAvatarUrl, String? myStatus, String? ticketUrl, DateTime? createdAt, DateTime? updatedAt
 });
 
 
@@ -298,11 +314,11 @@ class __$BikerEventCopyWithImpl<$Res>
 
 /// Create a copy of BikerEvent
 /// with the given fields replaced by the non-null parameter values.
-@override @pragma('vm:prefer-inline') $Res call({Object? id = null,Object? creatorId = null,Object? title = null,Object? description = freezed,Object? imageUrl = freezed,Object? location = freezed,Object? latitude = freezed,Object? longitude = freezed,Object? startsAt = null,Object? endsAt = freezed,Object? maxParticipants = freezed,Object? participantCount = null,Object? isFeatured = null,Object? creatorName = freezed,Object? creatorAvatarUrl = freezed,Object? myStatus = freezed,Object? createdAt = freezed,Object? updatedAt = freezed,}) {
+@override @pragma('vm:prefer-inline') $Res call({Object? id = null,Object? userId = null,Object? title = null,Object? description = freezed,Object? imageUrl = freezed,Object? location = freezed,Object? latitude = freezed,Object? longitude = freezed,Object? startsAt = null,Object? endsAt = freezed,Object? maxParticipants = freezed,Object? participantCount = null,Object? isFeatured = null,Object? category = null,Object? community = null,Object? creatorName = freezed,Object? creatorAvatarUrl = freezed,Object? myStatus = freezed,Object? ticketUrl = freezed,Object? createdAt = freezed,Object? updatedAt = freezed,}) {
   return _then(_BikerEvent(
 id: null == id ? _self.id : id // ignore: cast_nullable_to_non_nullable
-as int,creatorId: null == creatorId ? _self.creatorId : creatorId // ignore: cast_nullable_to_non_nullable
-as int,title: null == title ? _self.title : title // ignore: cast_nullable_to_non_nullable
+as int,userId: null == userId ? _self.userId : userId // ignore: cast_nullable_to_non_nullable
+as String,title: null == title ? _self.title : title // ignore: cast_nullable_to_non_nullable
 as String,description: freezed == description ? _self.description : description // ignore: cast_nullable_to_non_nullable
 as String?,imageUrl: freezed == imageUrl ? _self.imageUrl : imageUrl // ignore: cast_nullable_to_non_nullable
 as String?,location: freezed == location ? _self.location : location // ignore: cast_nullable_to_non_nullable
@@ -313,9 +329,12 @@ as DateTime,endsAt: freezed == endsAt ? _self.endsAt : endsAt // ignore: cast_nu
 as DateTime?,maxParticipants: freezed == maxParticipants ? _self.maxParticipants : maxParticipants // ignore: cast_nullable_to_non_nullable
 as int?,participantCount: null == participantCount ? _self.participantCount : participantCount // ignore: cast_nullable_to_non_nullable
 as int,isFeatured: null == isFeatured ? _self.isFeatured : isFeatured // ignore: cast_nullable_to_non_nullable
-as bool,creatorName: freezed == creatorName ? _self.creatorName : creatorName // ignore: cast_nullable_to_non_nullable
+as bool,category: null == category ? _self.category : category // ignore: cast_nullable_to_non_nullable
+as String,community: null == community ? _self.community : community // ignore: cast_nullable_to_non_nullable
+as String,creatorName: freezed == creatorName ? _self.creatorName : creatorName // ignore: cast_nullable_to_non_nullable
 as String?,creatorAvatarUrl: freezed == creatorAvatarUrl ? _self.creatorAvatarUrl : creatorAvatarUrl // ignore: cast_nullable_to_non_nullable
 as String?,myStatus: freezed == myStatus ? _self.myStatus : myStatus // ignore: cast_nullable_to_non_nullable
+as String?,ticketUrl: freezed == ticketUrl ? _self.ticketUrl : ticketUrl // ignore: cast_nullable_to_non_nullable
 as String?,createdAt: freezed == createdAt ? _self.createdAt : createdAt // ignore: cast_nullable_to_non_nullable
 as DateTime?,updatedAt: freezed == updatedAt ? _self.updatedAt : updatedAt // ignore: cast_nullable_to_non_nullable
 as DateTime?,

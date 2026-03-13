@@ -67,7 +67,14 @@ class FeedRepository {
         .order('created_at', ascending: false)
         .range(offset, offset + limit - 1);
 
-    return _buildFeedPage(data, limit);
+    // Following feed: show public + followers posts (you follow them, so you see 'followers')
+    // Also always show own posts
+    final filteredData = data.where((p) {
+      final vis = p['visibility'] as String? ?? 'public';
+      return vis == 'public' || vis == 'followers' || p['user_id'] == userId;
+    }).toList();
+
+    return _buildFeedPage(filteredData, limit);
   }
 
   // ═══════════════════════════════════════════════════
@@ -98,22 +105,130 @@ class FeedRepository {
 
     final excludeIds = {...blockedIds, ...mutedIds}.toList();
 
-    // Query all community posts, excluding blocked/muted users
-    var query = _supabase
+    // Query posts für aktuelle Community (bikergram ODER cargram).
+    // Inkludiert auch Posts mit community=null (alte Posts, fehlender Wert).
+    // Erkunden = jeder sieht alle Posts der eigenen Community.
+    final data = await _supabase
         .from('posts')
-        .select('*, profiles!inner(username, display_name, avatar_url, bikername)');
-
-    query = query.eq('community', communityFilter);
-
-    final data = await query
+        .select('*, profiles(username, display_name, avatar_url, bikername)')
+        .or('community.eq.$communityFilter,community.is.null')
         .order('created_at', ascending: false)
         .range(offset, offset + limit - 1);
 
-    // Filter out blocked/muted users client-side
-    // (Supabase doesn't support NOT IN directly on queries easily)
-    final filteredData = excludeIds.isEmpty
-        ? data
-        : data.where((p) => !excludeIds.contains(p['user_id'])).toList();
+    // Client-side filter: only exclude blocked/muted users.
+    // Erkunden zeigt ALLE Posts (kein Visibility-Filter).
+    final filteredData = data.where((p) {
+      return !excludeIds.contains(p['user_id']);
+    }).toList();
+
+    return _buildFeedPage(filteredData, limit);
+  }
+
+  // ═══════════════════════════════════════════════════
+  //  REELS FEED — video-only posts for TikTok-style view
+  // ═══════════════════════════════════════════════════
+
+  /// Fetch paginated Reels feed: only video posts from the community.
+  /// Smaller page size since videos are heavier.
+  Future<FeedPage> getReelsFeed({
+    int page = 1,
+    int limit = 10,
+    String? community,
+  }) async {
+    final userId = _currentUserId;
+    final offset = (page - 1) * limit;
+    final communityFilter = community ?? 'bikergram';
+
+    final blockedIds = userId != null
+        ? await _getBlockedUserIds(userId)
+        : <String>{};
+
+    final mutedIds = userId != null
+        ? await _getMutedUserIds(userId, communityFilter)
+        : <String>{};
+
+    final excludeIds = {...blockedIds, ...mutedIds}.toList();
+
+    final data = await _supabase
+        .from('posts')
+        .select('*, profiles!inner(username, display_name, avatar_url, bikername)')
+        .eq('community', communityFilter)
+        .eq('media_type', 'video')
+        .order('created_at', ascending: false)
+        .range(offset, offset + limit - 1);
+
+    // Reels: blocked/muted + visibility (public + own)
+    final filteredData = data.where((p) {
+      if (excludeIds.contains(p['user_id'])) return false;
+      final vis = p['visibility'] as String? ?? 'public';
+      return vis == 'public' || p['user_id'] == userId;
+    }).toList();
+
+    return _buildFeedPage(filteredData, limit);
+  }
+
+  // ═══════════════════════════════════════════════════
+  //  FOLLOWING REELS — video-only from followed users
+  // ═══════════════════════════════════════════════════
+
+  /// Fetch paginated Reels feed from followed users only.
+  Future<FeedPage> getFollowingReelsFeed({
+    int page = 1,
+    int limit = 10,
+    String? community,
+  }) async {
+    final userId = _currentUserId;
+    if (userId == null) {
+      return const FeedPage(posts: [], hasMore: false);
+    }
+
+    final offset = (page - 1) * limit;
+    final communityFilter = community ?? 'bikergram';
+
+    // Step 1: Get the list of user IDs the viewer follows
+    final followData = await _supabase
+        .from('follows')
+        .select('following_id')
+        .eq('follower_id', userId)
+        .eq('community', communityFilter);
+
+    final followingIds = followData
+        .map<String>((f) => f['following_id'] as String)
+        .toList();
+
+    // Include own posts
+    followingIds.add(userId);
+
+    if (followingIds.isEmpty) {
+      return const FeedPage(posts: [], hasMore: false);
+    }
+
+    // Step 2: Get blocked user IDs
+    final blockedIds = await _getBlockedUserIds(userId);
+
+    final effectiveIds = followingIds
+        .where((id) => !blockedIds.contains(id))
+        .toList();
+
+    if (effectiveIds.isEmpty) {
+      return const FeedPage(posts: [], hasMore: false);
+    }
+
+    // Step 3: Query video-only posts from followed users
+    final data = await _supabase
+        .from('posts')
+        .select('*, profiles!inner(username, display_name, avatar_url, bikername)')
+        .inFilter('user_id', effectiveIds)
+        .eq('community', communityFilter)
+        .eq('media_type', 'video')
+        .order('created_at', ascending: false)
+        .range(offset, offset + limit - 1);
+
+    // Show public + followers-visibility posts (you follow them)
+    final filteredData = data.where((p) {
+      final vis = p['visibility'] as String? ?? 'public';
+      return vis == 'public' || vis == 'followers' || p['user_id'] == userId;
+    }).toList();
 
     return _buildFeedPage(filteredData, limit);
   }
@@ -135,16 +250,28 @@ class FeedRepository {
   Future<FeedPage> _buildFeedPage(List<dynamic> data, int limit) async {
     final postIds = data.map<int>((p) => p['id'] as int).toList();
 
-    // Batch-check likes + saves
+    // Batch-check likes + saves + actual comment counts
     Set<int> likedPostIds = {};
     Set<int> savedPostIds = {};
+    Map<int, String?> reactionByPost = {};
+    Map<int, int> commentCounts = {};
 
     if (_currentUserId != null && postIds.isNotEmpty) {
+      // Likes query: try with reaction_type first, fallback to post_id only
+      // (reaction_type column may not exist until migration is run)
       final likesFuture = _supabase
           .from('post_likes')
-          .select('post_id')
+          .select('post_id, reaction_type')
           .eq('user_id', _currentUserId!)
-          .inFilter('post_id', postIds);
+          .inFilter('post_id', postIds)
+          .catchError((_) async {
+        // Fallback: reaction_type column doesn't exist yet
+        return await _supabase
+            .from('post_likes')
+            .select('post_id')
+            .eq('user_id', _currentUserId!)
+            .inFilter('post_id', postIds);
+      });
 
       final savesFuture = _supabase
           .from('post_saves')
@@ -152,21 +279,58 @@ class FeedRepository {
           .eq('user_id', _currentUserId!)
           .inFilter('post_id', postIds);
 
-      // Run in parallel
+      // Batch-count actual comments per post
+      // (comment_count column in posts may be stale/unset for older posts)
+      final commentsFuture = _supabase
+          .from('comments')
+          .select('post_id')
+          .inFilter('post_id', postIds);
+
+      // Run all three in parallel
       final results = await Future.wait([
         likesFuture,
         savesFuture.catchError((_) => <Map<String, dynamic>>[]),
+        commentsFuture.catchError((_) => <Map<String, dynamic>>[]),
       ]);
 
-      likedPostIds = (results[0] as List).map<int>((l) => l['post_id'] as int).toSet();
+      for (final like in results[0] as List) {
+        final postId = like['post_id'] as int;
+        likedPostIds.add(postId);
+        // reaction_type may not be present in fallback query
+        if (like is Map && like.containsKey('reaction_type')) {
+          reactionByPost[postId] = like['reaction_type'] as String?;
+        }
+      }
       savedPostIds = (results[1] as List).map<int>((s) => s['post_id'] as int).toSet();
+
+      // Count comments per post from actual comments table
+      for (final row in results[2] as List) {
+        final pid = row['post_id'] as int;
+        commentCounts[pid] = (commentCounts[pid] ?? 0) + 1;
+      }
+    } else if (postIds.isNotEmpty) {
+      // Not logged in — still count comments for display
+      try {
+        final commentData = await _supabase
+            .from('comments')
+            .select('post_id')
+            .inFilter('post_id', postIds);
+        for (final row in commentData) {
+          final pid = row['post_id'] as int;
+          commentCounts[pid] = (commentCounts[pid] ?? 0) + 1;
+        }
+      } catch (_) {}
     }
 
     final posts = data.map<Post>((json) {
       final post = Post.fromSupabase(json as Map<String, dynamic>, currentUserId: _currentUserId);
       return post.copyWith(
         likedByMe: likedPostIds.contains(post.id),
+        myReaction: reactionByPost[post.id],
         savedByMe: savedPostIds.contains(post.id),
+        commentCount: commentCounts.containsKey(post.id)
+            ? commentCounts[post.id]!
+            : post.commentCount,
       );
     }).toList();
 
@@ -219,15 +383,31 @@ class FeedRepository {
 
     bool likedByMe = false;
     bool savedByMe = false;
+    String? myReaction;
 
     if (_currentUserId != null) {
-      final like = await _supabase
-          .from('post_likes')
-          .select('id')
-          .eq('user_id', _currentUserId!)
-          .eq('post_id', postId)
-          .maybeSingle();
-      likedByMe = like != null;
+      // Fetch like with reaction_type (fallback to id-only if column missing)
+      try {
+        final like = await _supabase
+            .from('post_likes')
+            .select('id, reaction_type')
+            .eq('user_id', _currentUserId!)
+            .eq('post_id', postId)
+            .maybeSingle();
+        likedByMe = like != null;
+        if (like != null && like.containsKey('reaction_type')) {
+          myReaction = like['reaction_type'] as String?;
+        }
+      } catch (_) {
+        // Fallback: reaction_type column may not exist
+        final like = await _supabase
+            .from('post_likes')
+            .select('id')
+            .eq('user_id', _currentUserId!)
+            .eq('post_id', postId)
+            .maybeSingle();
+        likedByMe = like != null;
+      }
 
       try {
         final save = await _supabase
@@ -242,6 +422,7 @@ class FeedRepository {
 
     return Post.fromSupabase(data, currentUserId: _currentUserId).copyWith(
       likedByMe: likedByMe,
+      myReaction: myReaction,
       savedByMe: savedByMe,
     );
   }
@@ -255,10 +436,12 @@ class FeedRepository {
     String? body,
     String? imageUrl,
     String? videoUrl,
+    String? thumbnailUrl,
     String? community,
     String? mediaType,
     List<int>? topicIds,
     List<String>? attachmentUrls,
+    String visibility = 'public',
   }) async {
     final userId = _currentUserId;
     if (userId == null) throw Exception('Not authenticated');
@@ -270,9 +453,11 @@ class FeedRepository {
           if (body != null) 'body': body,
           if (imageUrl != null) 'image_url': imageUrl,
           if (videoUrl != null) 'video_url': videoUrl,
+          if (thumbnailUrl != null) 'thumbnail_url': thumbnailUrl,
           if (community != null) 'community': community,
           if (mediaType != null) 'media_type': mediaType,
           if (attachmentUrls != null) 'attachment_urls': attachmentUrls,
+          'visibility': visibility,
         })
         .select('*, profiles!inner(username, display_name, avatar_url, bikername)')
         .single();
@@ -327,6 +512,22 @@ class FeedRepository {
     });
 
     return result['liked'] == true;
+  }
+
+  /// Toggle a reaction on a post. Returns {liked: bool, reaction: String?}.
+  /// Pass null reactionType for regular like.
+  Future<Map<String, dynamic>> toggleReaction(int postId, {String? reactionType}) async {
+    try {
+      final result = await _supabase.rpc('toggle_reaction', params: {
+        'p_post_id': postId,
+        'p_reaction': reactionType,
+      });
+      return Map<String, dynamic>.from(result as Map);
+    } catch (_) {
+      // Fallback: toggle_reaction RPC may not exist yet → use toggle_like
+      final liked = await toggleLike(postId);
+      return {'liked': liked, 'reaction': null};
+    }
   }
 
   /// Toggle save/bookmark on a post.
@@ -444,6 +645,52 @@ class FeedRepository {
   // ═══════════════════════════════════════════════════
   //  STORAGE
   // ═══════════════════════════════════════════════════
+
+  // ═══════════════════════════════════════════════════
+  //  SAVED POSTS
+  // ═══════════════════════════════════════════════════
+
+  /// Fetch all posts saved/bookmarked by the current user.
+  Future<FeedPage> getSavedPosts({int page = 1, int limit = 20}) async {
+    final userId = _currentUserId;
+    if (userId == null) return const FeedPage(posts: [], hasMore: false);
+
+    final offset = (page - 1) * limit;
+
+    // 1. Get saved post IDs (newest saves first)
+    final savesData = await _supabase
+        .from('post_saves')
+        .select('post_id')
+        .eq('user_id', userId)
+        .order('created_at', ascending: false)
+        .range(offset, offset + limit - 1);
+
+    if (savesData.isEmpty) {
+      return const FeedPage(posts: [], hasMore: false);
+    }
+
+    final savedPostIds =
+        savesData.map<int>((s) => s['post_id'] as int).toList();
+
+    // 2. Fetch full post data for those IDs
+    final data = await _supabase
+        .from('posts')
+        .select('*, profiles!inner(username, display_name, avatar_url, bikername)')
+        .inFilter('id', savedPostIds);
+
+    // 3. Build feed page with like/save status
+    final page_ = await _buildFeedPage(data, limit);
+
+    // 4. Re-sort to match save order (newest save first)
+    final orderMap = {for (var i = 0; i < savedPostIds.length; i++) savedPostIds[i]: i};
+    final sorted = List<Post>.from(page_.posts)
+      ..sort((a, b) => (orderMap[a.id] ?? 999).compareTo(orderMap[b.id] ?? 999));
+
+    return FeedPage(
+      posts: sorted,
+      hasMore: savesData.length >= limit,
+    );
+  }
 
   /// Upload an image to Supabase Storage.
   Future<String> uploadImage(List<int> imageBytes, String fileName) async {

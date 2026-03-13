@@ -10,6 +10,12 @@ import '../../data/repositories/message_repository.dart';
 import '../core/providers.dart';
 import 'unread_messages_notifier.dart';
 
+/// Max messages kept in memory per chat to prevent unbounded growth.
+const _kMaxMessages = 200;
+
+List<DirectMessage> _trimMessages(List<DirectMessage> msgs) =>
+    msgs.length > _kMaxMessages ? msgs.sublist(msgs.length - _kMaxMessages) : msgs;
+
 /// State for a single chat conversation.
 class ChatState {
   const ChatState({
@@ -22,6 +28,9 @@ class ChatState {
     this.replyTo,
     this.isOtherTyping = false,
     this.error,
+    this.isGroupChat = false,
+    this.groupName,
+    this.groupId,
   });
 
   final List<DirectMessage> messages;
@@ -33,6 +42,9 @@ class ChatState {
   final DirectMessage? replyTo;
   final bool isOtherTyping;
   final String? error;
+  final bool isGroupChat;
+  final String? groupName;
+  final int? groupId;
 
   ChatState copyWith({
     List<DirectMessage>? messages,
@@ -45,6 +57,9 @@ class ChatState {
     bool clearReplyTo = false,
     bool? isOtherTyping,
     String? error,
+    bool? isGroupChat,
+    String? groupName,
+    int? groupId,
   }) {
     return ChatState(
       messages: messages ?? this.messages,
@@ -56,6 +71,9 @@ class ChatState {
       replyTo: clearReplyTo ? null : (replyTo ?? this.replyTo),
       isOtherTyping: isOtherTyping ?? this.isOtherTyping,
       error: error,
+      isGroupChat: isGroupChat ?? this.isGroupChat,
+      groupName: groupName ?? this.groupName,
+      groupId: groupId ?? this.groupId,
     );
   }
 }
@@ -90,21 +108,62 @@ class ChatNotifier extends Notifier<ChatState> {
     return const ChatState(isLoading: true);
   }
 
+  /// Sender profile cache for group chats.
+  final Map<String, Map<String, String?>> _senderCache = {};
+
   Future<void> _loadChat(int conversationId) async {
     try {
-      final otherUser = await _repo.getOtherParticipant(conversationId);
+      // Check if this is a group conversation
+      bool isGroupChat = false;
+      String? groupName;
+      int? groupId;
+      try {
+        final conv = await Supabase.instance.client
+            .from('conversations')
+            .select('group_id')
+            .eq('id', conversationId)
+            .maybeSingle();
+        if (conv != null && conv['group_id'] != null) {
+          isGroupChat = true;
+          groupId = (conv['group_id'] as num).toInt();
+          final groupData = await Supabase.instance.client
+              .from('groups')
+              .select('name')
+              .eq('id', groupId)
+              .maybeSingle();
+          groupName = groupData?['name'] as String?;
+        }
+      } catch (e) {
+        debugPrint('[ChatNotifier] Group check error: $e');
+      }
+
+      final otherUser = isGroupChat
+          ? null
+          : await _repo.getOtherParticipant(conversationId);
 
       final data = await _repo.getMessages(conversationId);
-      final messages = data.map((row) => _parseMessage(row)).toList();
+
+      // For group chats, enrich messages with sender info
+      List<DirectMessage> messages;
+      if (isGroupChat) {
+        messages = await _enrichGroupMessages(data);
+      } else {
+        messages = data.map((row) => _parseMessage(row)).toList();
+      }
 
       state = state.copyWith(
         messages: messages,
         isLoading: false,
-        otherUsername: otherUser?['display_name'] as String? ??
-            otherUser?['username'] as String? ??
-            'Unbekannt',
-        otherAvatarUrl: otherUser?['avatar_url'] as String?,
-        otherUserId: otherUser?['id'] as String?,
+        isGroupChat: isGroupChat,
+        groupName: groupName,
+        groupId: groupId,
+        otherUsername: isGroupChat
+            ? groupName
+            : (otherUser?['display_name'] as String? ??
+                otherUser?['username'] as String? ??
+                'Unbekannt'),
+        otherAvatarUrl: isGroupChat ? null : otherUser?['avatar_url'] as String?,
+        otherUserId: isGroupChat ? null : otherUser?['id'] as String?,
       );
 
       await _repo.markAsRead(conversationId);
@@ -118,16 +177,59 @@ class ChatNotifier extends Notifier<ChatState> {
     }
   }
 
+  Future<List<DirectMessage>> _enrichGroupMessages(
+      List<dynamic> data) async {
+    final messages = <DirectMessage>[];
+    for (final row in data) {
+      final msg = _parseMessage(row as Map<String, dynamic>);
+      final sender = await _getSenderInfo(msg.senderId);
+      messages.add(msg.copyWith(
+        senderName: sender['display_name'] ?? sender['username'],
+        senderAvatar: sender['avatar_url'],
+      ));
+    }
+    return messages;
+  }
+
+  Future<Map<String, String?>> _getSenderInfo(String userId) async {
+    if (_senderCache.containsKey(userId)) return _senderCache[userId]!;
+    try {
+      final profile = await Supabase.instance.client
+          .from('profiles')
+          .select('username, display_name, avatar_url')
+          .eq('id', userId)
+          .maybeSingle();
+      final info = <String, String?>{
+        'username': profile?['username'] as String?,
+        'display_name': profile?['display_name'] as String?,
+        'avatar_url': profile?['avatar_url'] as String?,
+      };
+      _senderCache[userId] = info;
+      return info;
+    } catch (_) {
+      return {'username': null, 'display_name': null, 'avatar_url': null};
+    }
+  }
+
   void _subscribeToMessages(int conversationId) {
     _channel?.unsubscribe();
-    _channel = _repo.subscribeToMessages(conversationId, (newRecord) {
-      final message = _parseMessage(newRecord);
+    _channel = _repo.subscribeToMessages(conversationId, (newRecord) async {
+      var message = _parseMessage(newRecord);
       final currentUserId = Supabase.instance.client.auth.currentUser?.id;
+
+      // Enrich with sender info for group chats
+      if (state.isGroupChat) {
+        final sender = await _getSenderInfo(message.senderId);
+        message = message.copyWith(
+          senderName: sender['display_name'] ?? sender['username'],
+          senderAvatar: sender['avatar_url'],
+        );
+      }
 
       final exists = state.messages.any((m) => m.id == message.id);
       if (!exists) {
         state = state.copyWith(
-          messages: [...state.messages, message],
+          messages: _trimMessages([...state.messages, message]),
         );
       }
 
@@ -213,7 +315,7 @@ class ChatNotifier extends Notifier<ChatState> {
       final exists = state.messages.any((m) => m.id == message.id);
       if (!exists) {
         state = state.copyWith(
-          messages: [...state.messages, message],
+          messages: _trimMessages([...state.messages, message]),
           isSending: false,
           clearReplyTo: true,
         );
@@ -250,7 +352,7 @@ class ChatNotifier extends Notifier<ChatState> {
       final exists = state.messages.any((m) => m.id == message.id);
       if (!exists) {
         state = state.copyWith(
-          messages: [...state.messages, message],
+          messages: _trimMessages([...state.messages, message]),
           isSending: false,
           clearReplyTo: true,
         );
@@ -284,7 +386,7 @@ class ChatNotifier extends Notifier<ChatState> {
       final exists = state.messages.any((m) => m.id == message.id);
       if (!exists) {
         state = state.copyWith(
-          messages: [...state.messages, message],
+          messages: _trimMessages([...state.messages, message]),
           isSending: false,
           clearReplyTo: true,
         );
@@ -319,7 +421,7 @@ class ChatNotifier extends Notifier<ChatState> {
       final exists = state.messages.any((m) => m.id == message.id);
       if (!exists) {
         state = state.copyWith(
-          messages: [...state.messages, message],
+          messages: _trimMessages([...state.messages, message]),
           isSending: false,
           clearReplyTo: true,
         );

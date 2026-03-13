@@ -215,8 +215,16 @@ class NotificationsScreen extends ConsumerWidget {
         }
         break;
       case 'xp':
+        break;
       case 'system':
-        // System notifications — no navigation
+        final groupId = data['group_id'];
+        if (groupId != null) {
+          final id = groupId is int ? groupId : int.tryParse('$groupId');
+          if (id != null) {
+            context.push('/group/$id');
+            return;
+          }
+        }
         break;
     }
   }

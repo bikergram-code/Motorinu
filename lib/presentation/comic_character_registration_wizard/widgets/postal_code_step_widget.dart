@@ -1,8 +1,11 @@
 import 'dart:ui';
 
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:sizer/sizer.dart';
 
+import '../../../services/geocoding_service.dart';
 import 'comic_speech_bubble.dart';
 import 'mini_keyboard.dart';
 
@@ -36,6 +39,7 @@ class _PostalCodeStepWidgetState extends State<PostalCodeStepWidget> {
   int _lastSubmitAttempt = 0;
   bool _showError = false;
   bool _settingText = false;
+  bool _detectingLocation = false;
 
   @override
   void initState() {
@@ -62,7 +66,56 @@ class _PostalCodeStepWidgetState extends State<PostalCodeStepWidget> {
       if (mounted) setState(() {});
       widget.onChanged?.call(_c.text);
     });
+
+    // PLZ automatisch per GPS erkennen wenn Feld leer
+    if (widget.postalCode.isEmpty) {
+      _autoDetectPlz();
+    }
 }
+
+  /// GPS → Reverse Geocode → PLZ automatisch eintragen.
+  Future<void> _autoDetectPlz() async {
+    if (!mounted) return;
+    setState(() => _detectingLocation = true);
+
+    try {
+      // Schnell: letzte bekannte Position
+      Position? pos = await Geolocator.getLastKnownPosition();
+      // Falls keine bekannte Position → frische Position (max 5s)
+      pos ??= await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.low,
+          timeLimit: Duration(seconds: 5),
+        ),
+      );
+
+      if (!mounted) return;
+
+      // Reverse Geocode → PLZ ermitteln
+      final geocoding = GeocodingService();
+      final result = await geocoding.reverseGeocode(
+        LatLng(pos.latitude, pos.longitude),
+      );
+
+      if (!mounted) return;
+      if (result?.postcode != null && result!.postcode!.isNotEmpty) {
+        final plz = result.postcode!;
+        // Nur eintragen wenn User noch nichts eingegeben hat
+        if (_c.text.trim().isEmpty) {
+          _settingText = true;
+          _c.text = plz;
+          _c.selection = TextSelection.collapsed(offset: plz.length);
+          _settingText = false;
+          widget.onChanged?.call(plz);
+          debugPrint('[PLZ] Auto-detected: $plz');
+        }
+      }
+    } catch (e) {
+      debugPrint('[PLZ] Auto-detect failed: $e');
+    } finally {
+      if (mounted) setState(() => _detectingLocation = false);
+    }
+  }
 
   String _sanitizePlz(String raw) {
     final digits = raw.replaceAll(RegExp(r'\D'), '');
@@ -227,7 +280,7 @@ class _PostalCodeStepWidgetState extends State<PostalCodeStepWidget> {
                         maxLength: 10,
                         style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900),
                         decoration: InputDecoration(
-                          hintText: 'z.B. 80331',
+                          hintText: _detectingLocation ? 'Wird erkannt...' : 'z.B. 80331',
                           counterText: '',
                           filled: true,
                           fillColor: theme.colorScheme.surface.withOpacity(0.95),
@@ -243,8 +296,38 @@ class _PostalCodeStepWidgetState extends State<PostalCodeStepWidget> {
                             borderRadius: BorderRadius.circular(16),
                             borderSide: BorderSide(color: theme.colorScheme.primary, width: 2),
                           ),
+                          suffixIcon: _detectingLocation
+                            ? const Padding(
+                                padding: EdgeInsets.all(12),
+                                child: SizedBox(
+                                  width: 20, height: 20,
+                                  child: CircularProgressIndicator(strokeWidth: 2),
+                                ),
+                              )
+                            : null,
                         ),
                       ),
+
+                      // GPS-Hinweis unter dem Feld
+                      if (_detectingLocation)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 4, bottom: 4),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(Icons.my_location, size: 14,
+                                color: theme.colorScheme.primary.withOpacity(0.7)),
+                              const SizedBox(width: 6),
+                              Text(
+                                'Standort wird erkannt...',
+                                style: theme.textTheme.bodySmall?.copyWith(
+                                  color: theme.colorScheme.primary.withOpacity(0.7),
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
 
                       SizedBox(height: 1.2.h),
 

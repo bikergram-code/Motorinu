@@ -31,10 +31,12 @@ _Post _$PostFromJson(Map<String, dynamic> json) => _Post(
   repostCount: (json['repostCount'] as num?)?.toInt() ?? 0,
   saveCount: (json['saveCount'] as num?)?.toInt() ?? 0,
   likedByMe: json['likedByMe'] as bool? ?? false,
+  myReaction: json['myReaction'] as String?,
   savedByMe: json['savedByMe'] as bool? ?? false,
   isMine: json['isMine'] as bool? ?? false,
   isPromoted: json['isPromoted'] as bool? ?? false,
   promotionId: (json['promotionId'] as num?)?.toInt(),
+  visibility: json['visibility'] as String? ?? 'public',
   topicIds:
       (json['topicIds'] as List<dynamic>?)
           ?.map((e) => (e as num).toInt())
@@ -69,10 +71,12 @@ Map<String, dynamic> _$PostToJson(_Post instance) => <String, dynamic>{
   'repostCount': instance.repostCount,
   'saveCount': instance.saveCount,
   'likedByMe': instance.likedByMe,
+  'myReaction': instance.myReaction,
   'savedByMe': instance.savedByMe,
   'isMine': instance.isMine,
   'isPromoted': instance.isPromoted,
   'promotionId': instance.promotionId,
+  'visibility': instance.visibility,
   'topicIds': instance.topicIds,
   'createdAt': instance.createdAt?.toIso8601String(),
   'editedAt': instance.editedAt?.toIso8601String(),

@@ -14,6 +14,9 @@ enum RouteMode {
 
   /// Auto-friendly: fastest route including motorways.
   auto,
+
+  /// Pedestrian: walking routes, no motorways.
+  pedestrian,
 }
 
 // ─── Data Models ────────────────────────────────────────────────────────────
@@ -108,7 +111,12 @@ class OsrmRoute {
 
 /// OSRM routing service — 100% kostenlos, kein API-Key noetig.
 class OsrmService {
-  static const _baseUrl = 'https://router.project-osrm.org';
+  // Own OSRM server with motorcycle profile (NRW data, Autobahn penalty, Landstrassen bonus)
+  static const _ownUrl = 'http://152.53.255.4';
+  // Public fallback for routes outside NRW
+  static const _publicUrl = 'https://router.project-osrm.org';
+  // Active base URL — tries own server first, falls back to public
+  static String _baseUrl = _ownUrl;
 
   /// Calculate route from origin to destination.
   Future<OsrmRoute?> getRoute(
@@ -119,11 +127,62 @@ class OsrmService {
     return getRouteWithWaypoints([origin, destination], mode: mode);
   }
 
-  /// OSRM profile name for each route mode.
-  /// Both modes use 'driving' profile since OSRM public server has no motorcycle profile.
-  /// The Biker mode requests alternative routes and picks the longest (scenic) one,
-  /// while Auto mode picks the shortest (fastest) route.
-  static String _profileForMode(RouteMode mode) => 'driving';
+  /// OSRM profile name — our own server runs a motorcycle-tuned profile
+  /// (Autobahn penalty, Landstraßen bonus) under the 'driving' endpoint.
+  static String _profileForMode(RouteMode mode) {
+    switch (mode) {
+      case RouteMode.pedestrian:
+        return 'foot';
+      default:
+        return 'driving';
+    }
+  }
+
+  /// Try own OSRM server first; on any error or waypoint snap >30km, fallback to public.
+  /// For foot profile, skip own server (no foot data) and go directly to public.
+  Future<http.Response> _getWithFallback(String path, {bool publicOnly = false}) async {
+    if (publicOnly) {
+      return http.get(
+        Uri.parse('$_publicUrl$path'),
+        headers: {'User-Agent': 'Bikergram/1.0'},
+      ).timeout(const Duration(seconds: 15));
+    }
+    // Try own server first (motorcycle profile, NRW data)
+    try {
+      final resp = await http.get(
+        Uri.parse('$_ownUrl$path'),
+        headers: {'User-Agent': 'Bikergram/1.0'},
+      ).timeout(const Duration(seconds: 4));
+      if (resp.statusCode == 200) {
+        final json = jsonDecode(resp.body) as Map<String, dynamic>;
+        if (json['code'] == 'Ok') {
+          // Check if OSRM snapped waypoints far from requested coordinates.
+          // This happens when destination is outside loaded map data (e.g. NRW only).
+          final waypoints = json['waypoints'] as List?;
+          if (waypoints != null && waypoints.isNotEmpty) {
+            final lastWp = waypoints.last as Map<String, dynamic>;
+            final snapDist = (lastWp['distance'] as num?)?.toDouble() ?? 0;
+            if (snapDist > 30000) {
+              // Waypoint snapped >30km from requested location = outside map data
+              debugPrint('[OSRM] Destination snapped ${(snapDist/1000).toStringAsFixed(0)}km — outside NRW, using public fallback');
+            } else {
+              return resp;
+            }
+          } else {
+            return resp;
+          }
+        }
+      }
+      debugPrint('[OSRM] Own server failed (${resp.statusCode}), trying public...');
+    } catch (e) {
+      debugPrint('[OSRM] Own server error: $e — trying public fallback...');
+    }
+    // Fallback to public OSRM
+    return http.get(
+      Uri.parse('$_publicUrl$path'),
+      headers: {'User-Agent': 'Bikergram/1.0'},
+    ).timeout(const Duration(seconds: 15));
+  }
 
   /// Calculate route through multiple waypoints.
   Future<OsrmRoute?> getRouteWithWaypoints(
@@ -133,6 +192,101 @@ class OsrmService {
     if (waypoints.length < 2) return null;
 
     return _fetchRoute(waypoints, mode);
+  }
+
+  /// Get all route alternatives (up to 3), sorted by duration.
+  /// Returns primary + alternatives for Waze-style multi-route display.
+  Future<List<OsrmRoute>> getAllRoutes(
+    LatLng origin,
+    LatLng destination, {
+    RouteMode mode = RouteMode.auto,
+  }) async {
+    if (origin == destination) return [];
+
+    final coords = '${origin.longitude},${origin.latitude};'
+        '${destination.longitude},${destination.latitude}';
+
+    final profile = _profileForMode(mode);
+    final usePublicOnly = mode == RouteMode.pedestrian;
+    final path = '/route/v1/$profile/$coords'
+        '?overview=full&geometries=polyline&steps=true&alternatives=3';
+
+    try {
+      final response = await _getWithFallback(path, publicOnly: usePublicOnly);
+      if (response.statusCode != 200) return [];
+
+      final json = jsonDecode(response.body) as Map<String, dynamic>;
+      if (json['code'] != 'Ok') return [];
+
+      final routes = json['routes'] as List?;
+      if (routes == null || routes.isEmpty) return [];
+
+      final result = <OsrmRoute>[];
+      for (final routeData in routes) {
+        final r = routeData as Map<String, dynamic>;
+        final parsed = _parseRouteJson(r);
+        if (parsed != null) result.add(parsed);
+      }
+
+      // Sort by duration (fastest first)
+      result.sort((a, b) => a.durationSeconds.compareTo(b.durationSeconds));
+      return result;
+    } catch (e) {
+      debugPrint('[OSRM] getAllRoutes error: $e');
+      return [];
+    }
+  }
+
+  /// Parse a single route JSON object into OsrmRoute.
+  OsrmRoute? _parseRouteJson(Map<String, dynamic> route) {
+    try {
+      final geometry = route['geometry'] as String;
+      final distanceMeters = (route['distance'] as num).toDouble();
+      final durationSecs = (route['duration'] as num).toInt();
+      final points = _decodePolyline(geometry);
+
+      final steps = <OsrmStep>[];
+      final legs = route['legs'] as List?;
+      if (legs != null) {
+        for (final leg in legs) {
+          final legSteps = (leg as Map<String, dynamic>)['steps'] as List?;
+          if (legSteps == null) continue;
+          for (final step in legSteps) {
+            final s = step as Map<String, dynamic>;
+            final maneuverData = s['maneuver'] as Map<String, dynamic>?;
+            if (maneuverData == null) continue;
+            final type = maneuverData['type'] as String? ?? 'straight';
+            final modifier = maneuverData['modifier'] as String?;
+            final maneuverKey = modifier != null ? '$type-$modifier' : type;
+            final loc = maneuverData['location'] as List;
+            final name = s['name'] as String?;
+            final ref = s['ref'] as String?;
+            // Use ref (e.g. "A 3", "B 42") when name is empty — common for Autobahnen
+            final roadName = (name != null && name.isNotEmpty)
+                ? (ref != null && ref.isNotEmpty ? '$ref / $name' : name)
+                : ref;
+            steps.add(OsrmStep(
+              instruction: OsrmStep.buildInstruction(maneuverKey, roadName),
+              maneuver: maneuverKey,
+              roadName: roadName,
+              distanceMeters: (s['distance'] as num?)?.toDouble() ?? 0,
+              durationSeconds: (s['duration'] as num?)?.toInt() ?? 0,
+              location: LatLng((loc[1] as num).toDouble(), (loc[0] as num).toDouble()),
+            ));
+          }
+        }
+      }
+
+      return OsrmRoute(
+        polylinePoints: points,
+        distanceKm: distanceMeters / 1000,
+        durationSeconds: durationSecs,
+        steps: steps,
+      );
+    } catch (e) {
+      debugPrint('[OSRM] Parse route error: $e');
+      return null;
+    }
   }
 
   /// Internal: fetch route with a specific profile.
@@ -146,17 +300,14 @@ class OsrmService {
     final profile = _profileForMode(mode);
     // Biker mode: request alternative routes to find scenic/longer options
     final alternativesParam = mode == RouteMode.biker ? '&alternatives=3' : '';
-    final url = Uri.parse(
-      '$_baseUrl/route/v1/$profile/$coords'
-      '?overview=full&geometries=polyline&steps=true$alternativesParam',
-    );
+    final path = '/route/v1/$profile/$coords'
+        '?overview=full&geometries=polyline&steps=true$alternativesParam';
 
     try {
-      final modeLabel = mode == RouteMode.biker ? 'Biker' : 'Auto';
-      debugPrint('[OSRM] Requesting route ($modeLabel/$profile): $url');
-      final response = await http.get(url, headers: {
-        'User-Agent': 'Bikergram/1.0',
-      });
+      final modeLabel = mode == RouteMode.biker ? 'Biker' : (mode == RouteMode.pedestrian ? 'Fußgänger' : 'Auto');
+      final usePublicOnly = mode == RouteMode.pedestrian;
+      debugPrint('[OSRM] Requesting route ($modeLabel/$profile): ${usePublicOnly ? _publicUrl : _ownUrl}$path');
+      final response = await _getWithFallback(path, publicOnly: usePublicOnly);
 
       if (response.statusCode != 200) {
         debugPrint('[OSRM] HTTP ${response.statusCode}');
@@ -216,7 +367,11 @@ class OsrmService {
                 modifier != null ? '$type-$modifier' : type;
 
             final loc = maneuverData['location'] as List;
-            final roadName = s['name'] as String?;
+            final name = s['name'] as String?;
+            final ref = s['ref'] as String?;
+            final roadName = (name != null && name.isNotEmpty)
+                ? (ref != null && ref.isNotEmpty ? '$ref / $name' : name)
+                : ref;
             final instruction =
                 OsrmStep.buildInstruction(maneuverKey, roadName);
 

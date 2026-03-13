@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 class ProfileRepository {
@@ -57,12 +58,15 @@ class ProfileRepository {
     String? bikername,
     String? bio,
     String? postalCode,
+    String? country,
     String? avatarUrl,
     String? avatarUrlCargram,
     int? birthYear,
     int? motoStartAge,
     int? carStartAge,
     bool? hasTrackExperience,
+    double? homeLat,
+    double? homeLng,
   }) async {
     final userId = _currentUserId;
     if (userId == null) throw Exception('Nicht eingeloggt');
@@ -87,6 +91,29 @@ class ProfileRepository {
     }
 
     await _supabase.from('profiles').update(updates).eq('id', userId);
+
+    // country separat — Spalte existiert evtl. noch nicht
+    if (country != null) {
+      try {
+        await _supabase.from('profiles').update({
+          'country': country,
+        }).eq('id', userId);
+      } catch (e) {
+        debugPrint('[Profile] country update failed (migration pending?): $e');
+      }
+    }
+
+    // home_lat / home_lng separat — Spalten existieren evtl. noch nicht
+    if (homeLat != null && homeLng != null) {
+      try {
+        await _supabase.from('profiles').update({
+          'home_lat': homeLat,
+          'home_lng': homeLng,
+        }).eq('id', userId);
+      } catch (e) {
+        debugPrint('[Profile] home_lat/home_lng update failed (migration pending?): $e');
+      }
+    }
   }
 
   Future<int> getPostCount(String userId) async {
@@ -125,7 +152,7 @@ class ProfileRepository {
         .eq('follower_id', userId);
 
     if (community != null) {
-      query = query.eq('community', community);
+      query = query.or('community.eq.$community,community.is.null');
     }
 
     final data = await query;

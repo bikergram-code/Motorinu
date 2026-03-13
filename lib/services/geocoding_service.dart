@@ -26,6 +26,9 @@ class GeocodingResult {
   final String? road;
   final String? houseNumber;
 
+  /// Postal code (PLZ) from reverse geocoding.
+  final String? postcode;
+
   const GeocodingResult({
     required this.displayName,
     this.name,
@@ -37,6 +40,7 @@ class GeocodingResult {
     this.osmType,
     this.road,
     this.houseNumber,
+    this.postcode,
   });
 
   /// Short name for display — prefers POI name, then address, then city.
@@ -202,7 +206,10 @@ class GeocodingService {
           name: poiName,
           city: address['city'] as String? ??
               address['town'] as String? ??
-              address['village'] as String?,
+              address['village'] as String? ??
+              address['municipality'] as String? ??
+              address['city_district'] as String? ??
+              address['suburb'] as String?,
           state: address['state'] as String?,
           country: address['country'] as String?,
           location: LatLng(
@@ -213,6 +220,7 @@ class GeocodingService {
           osmType: map['type'] as String?,
           road: address['road'] as String?,
           houseNumber: address['house_number'] as String?,
+          postcode: address['postcode'] as String?,
         );
       }).toList();
     } catch (e) {
@@ -286,6 +294,7 @@ class GeocodingService {
         osmType: map['type'] as String?,
         road: address['road'] as String?,
         houseNumber: address['house_number'] as String?,
+        postcode: address['postcode'] as String?,
       );
     } catch (e) {
       debugPrint('[Geocoding] Reverse error: $e');

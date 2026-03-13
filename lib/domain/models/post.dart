@@ -29,10 +29,14 @@ abstract class Post with _$Post {
     @Default(0) int repostCount,
     @Default(0) int saveCount,
     @Default(false) bool likedByMe,
+    /// Reaction type if user reacted ('fire', 'love', etc.) — null = regular like
+    String? myReaction,
     @Default(false) bool savedByMe,
     @Default(false) bool isMine,
     @Default(false) bool isPromoted,
     int? promotionId,
+    /// Visibility: 'public', 'followers', 'private'
+    @Default('public') String visibility,
     /// Topic IDs attached to this post (≤3)
     @Default([]) List<int> topicIds,
     DateTime? createdAt,
@@ -95,6 +99,7 @@ abstract class Post with _$Post {
       savedByMe: _toBool(json['saved_by_me']),
       isMine: currentUserId != null && '$userId' == currentUserId,
       isPromoted: _toBool(json['is_promoted']),
+      visibility: json['visibility'] as String? ?? 'public',
       topicIds: topicIds,
       createdAt: _tryParseDate(json['created_at']),
       editedAt: _tryParseDate(json['updated_at'] ?? json['edited_at']),

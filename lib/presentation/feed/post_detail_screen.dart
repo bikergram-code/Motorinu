@@ -308,9 +308,21 @@ class _PostDetailScreenState extends ConsumerState<PostDetailScreen> {
     );
   }
 
-  void _toggleLike(Post post) {
+  void _toggleLike(Post post) async {
     HapticFeedback.lightImpact();
-    ref.read(feedNotifierProvider.notifier).toggleLike(post.id);
+    final lockSecs = await ref.read(feedNotifierProvider.notifier).toggleLike(post.id);
+    if (lockSecs != null && mounted) {
+      ScaffoldMessenger.of(context).clearSnackBars();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Bitte warte $lockSecs Sekunden bevor du erneut likest'),
+          backgroundColor: Colors.orange.shade700,
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 3),
+        ),
+      );
+      return;
+    }
     // Reload to get fresh state
     Future.delayed(const Duration(milliseconds: 500), _loadPost);
   }

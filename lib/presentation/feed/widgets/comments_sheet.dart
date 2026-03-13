@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../../../core/community.dart';
@@ -11,17 +12,32 @@ import '../../../providers/feed/feed_notifier.dart';
 import '../../../theme/app_theme.dart';
 
 class CommentsSheet extends ConsumerStatefulWidget {
-  const CommentsSheet({super.key, required this.postId, this.postUserId});
+  const CommentsSheet({
+    super.key,
+    required this.postId,
+    this.postUserId,
+    this.onCommentPosted,
+  });
 
   final int postId;
   final String? postUserId;
+  final VoidCallback? onCommentPosted;
 
-  static Future<void> show(BuildContext context, int postId, {String? postUserId}) {
+  static Future<void> show(
+    BuildContext context,
+    int postId, {
+    String? postUserId,
+    VoidCallback? onCommentPosted,
+  }) {
     return showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => CommentsSheet(postId: postId, postUserId: postUserId),
+      builder: (_) => CommentsSheet(
+        postId: postId,
+        postUserId: postUserId,
+        onCommentPosted: onCommentPosted,
+      ),
     );
   }
 
@@ -314,21 +330,28 @@ class _CommentsSheetState extends ConsumerState<CommentsSheet> {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Container(
-            width: 32, height: 32,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: accentColor.withValues(alpha: 0.2),
-            ),
-            child: Center(
-              child: Text(
-                comment.username.isNotEmpty
-                    ? comment.username[0].toUpperCase()
-                    : '?',
-                style: GoogleFonts.inter(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    color: accentColor),
+          GestureDetector(
+            onTap: () {
+              final router = GoRouter.of(context);
+              Navigator.pop(context);
+              router.push('/profile/${comment.userId}');
+            },
+            child: Container(
+              width: 32, height: 32,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: accentColor.withValues(alpha: 0.2),
+              ),
+              child: Center(
+                child: Text(
+                  comment.username.isNotEmpty
+                      ? comment.username[0].toUpperCase()
+                      : '?',
+                  style: GoogleFonts.inter(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: accentColor),
+                ),
               ),
             ),
           ),
@@ -340,12 +363,19 @@ class _CommentsSheetState extends ConsumerState<CommentsSheet> {
                 Row(
                   children: [
                     Flexible(
-                      child: Text(comment.username,
-                          style: GoogleFonts.inter(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w600,
-                              color: textOnCard),
-                          overflow: TextOverflow.ellipsis),
+                      child: GestureDetector(
+                        onTap: () {
+                          final router = GoRouter.of(context);
+                          Navigator.pop(context);
+                          router.push('/profile/${comment.userId}');
+                        },
+                        child: Text(comment.username,
+                            style: GoogleFonts.inter(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                                color: textOnCard),
+                            overflow: TextOverflow.ellipsis),
+                      ),
                     ),
                     const SizedBox(width: 8),
                     if (comment.createdAt != null)

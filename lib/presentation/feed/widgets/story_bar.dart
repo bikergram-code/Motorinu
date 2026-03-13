@@ -336,16 +336,135 @@ class StoryBar extends ConsumerWidget {
   }
 
   Future<void> _createStory(BuildContext context, WidgetRef ref, Color accentColor) async {
-    final picker = ImagePicker();
+    // Show media type picker: Foto, Video, Kamera
+    final mediaChoice = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => SafeArea(
+        child: Container(
+          decoration: const BoxDecoration(
+            color: Color(0xFF1A1A1A),
+            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                margin: const EdgeInsets.only(top: 12),
+                width: 36, height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              const SizedBox(height: 16),
+              Text(
+                'Story erstellen',
+                style: GoogleFonts.inter(
+                  fontSize: 18,
+                  fontWeight: FontWeight.w700,
+                  color: Colors.white,
+                ),
+              ),
+              const SizedBox(height: 16),
+              _StoryMediaOption(
+                icon: Icons.photo_library_rounded,
+                label: 'Foto aus Galerie',
+                color: accentColor,
+                onTap: () => Navigator.pop(ctx, 'photo'),
+              ),
+              _StoryMediaOption(
+                icon: Icons.videocam_rounded,
+                label: 'Video aus Galerie',
+                color: const Color(0xFFE040FB),
+                onTap: () => Navigator.pop(ctx, 'video'),
+              ),
+              _StoryMediaOption(
+                icon: Icons.camera_alt_rounded,
+                label: 'Kamera',
+                color: const Color(0xFF00E676),
+                onTap: () => Navigator.pop(ctx, 'camera'),
+              ),
+              const SizedBox(height: 16),
+            ],
+          ),
+        ),
+      ),
+    );
 
-    // Allow multiple image selection
-    final files = await picker.pickMultiImage(imageQuality: 85, limit: 10);
-    if (files.isEmpty) return;
+    if (mediaChoice == null || !context.mounted) return;
+
+    final picker = ImagePicker();
+    List<XFile> files = [];
+
+    switch (mediaChoice) {
+      case 'photo':
+        final picked = await picker.pickMultiImage(imageQuality: 85, limit: 10);
+        files = picked;
+        break;
+      case 'video':
+        final video = await picker.pickVideo(
+          source: ImageSource.gallery,
+          maxDuration: const Duration(seconds: 30),
+        );
+        if (video != null) files = [video];
+        break;
+      case 'camera':
+        final photo = await picker.pickImage(source: ImageSource.camera, imageQuality: 85);
+        if (photo != null) files = [photo];
+        break;
+    }
+
+    if (files.isEmpty || !context.mounted) return;
+
+    // Ask for optional caption
+    String? caption;
+    final captionController = TextEditingController();
+    caption = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF222222),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text('Story-Text',
+            style: GoogleFonts.inter(
+                fontSize: 17, fontWeight: FontWeight.w700, color: Colors.white)),
+        content: TextField(
+          controller: captionController,
+          autofocus: true,
+          maxLength: 200,
+          maxLines: 3,
+          style: GoogleFonts.inter(fontSize: 15, color: Colors.white),
+          decoration: InputDecoration(
+            hintText: 'Text hinzuf\u00fcgen (optional)',
+            hintStyle: GoogleFonts.inter(
+                fontSize: 15, color: Colors.white.withValues(alpha: 0.3)),
+            border: InputBorder.none,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, ''),
+            child: Text('\u00dcberspringen',
+                style: GoogleFonts.inter(color: Colors.white.withValues(alpha: 0.5))),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, captionController.text.trim()),
+            style: FilledButton.styleFrom(backgroundColor: accentColor),
+            child: Text('Weiter',
+                style: GoogleFonts.inter(fontWeight: FontWeight.w600, color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+    captionController.dispose();
 
     if (!context.mounted) return;
+    // null = dialog dismissed entirely
+    if (caption == null) return;
+    if (caption.isEmpty) caption = null;
 
     final count = files.length;
-    final label = count == 1 ? 'Story wird hochgeladen...' : '$count Stories werden hochgeladen...';
+    final label = count == 1 ? 'Story wird hochgeladen\u2026' : '$count Stories werden hochgeladen\u2026';
 
     // Show uploading indicator
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -356,7 +475,7 @@ class StoryBar extends ConsumerWidget {
               height: 18,
               child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)),
           const SizedBox(width: 12),
-          Text(label),
+          Expanded(child: Text(label)),
         ],
       ),
       backgroundColor: accentColor,
@@ -374,8 +493,8 @@ class StoryBar extends ConsumerWidget {
         final bytes = await file.readAsBytes();
         if (bytes.isEmpty) continue;
 
-        // Upload image to storage
-        final ext = file.name.split('.').last;
+        final ext = file.name.split('.').last.toLowerCase();
+        final isVideo = ['mp4', 'mov', 'avi', 'mkv', 'webm'].contains(ext);
         final path = 'stories/$userId/${DateTime.now().millisecondsSinceEpoch}_$uploaded.$ext';
 
         await supabase.storage.from('posts').uploadBinary(
@@ -384,19 +503,18 @@ class StoryBar extends ConsumerWidget {
           fileOptions: const FileOptions(cacheControl: '3600', upsert: false),
         );
 
-        final imageUrl = supabase.storage.from('posts').getPublicUrl(path);
+        final mediaUrl = supabase.storage.from('posts').getPublicUrl(path);
 
-        // Save story to stories table (each image = one story entry)
         await supabase.from('stories').insert({
           'user_id': userId,
-          'media_url': imageUrl,
-          'media_type': 'image',
+          'media_url': mediaUrl,
+          'media_type': isVideo ? 'video' : 'image',
+          if (caption != null) 'caption': caption,
         });
 
         uploaded++;
       }
 
-      // Refresh story bar so new stories show immediately
       ref.invalidate(storyUsersProvider);
 
       if (!context.mounted) return;
@@ -476,14 +594,15 @@ class _StoryItem extends StatelessWidget {
               padding: const EdgeInsets.all(2.5),
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                gradient: data.hasUnread
-                    ? LinearGradient(
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
+                gradient: data.hasUnread && !data.isOwn
+                    ? SweepGradient(
                         colors: [
                           accentColor,
-                          accentColor.withValues(alpha: 0.6),
+                          const Color(0xFFE040FB),
+                          const Color(0xFFFF6B35),
+                          accentColor,
                         ],
+                        stops: const [0.0, 0.33, 0.66, 1.0],
                       )
                     : data.isOwn
                         ? LinearGradient(
@@ -493,9 +612,10 @@ class _StoryItem extends StatelessWidget {
                             ],
                           )
                         : LinearGradient(
+                            // Seen: subtle grey ring
                             colors: [
-                              Colors.white.withValues(alpha: 0.1),
-                              Colors.white.withValues(alpha: 0.05),
+                              Colors.white.withValues(alpha: 0.12),
+                              Colors.white.withValues(alpha: 0.06),
                             ],
                           ),
               ),
@@ -617,6 +737,61 @@ class _StoryItem extends StatelessWidget {
         color: Color(0xFF2A2A2A),
       ),
       child: Center(child: child),
+    );
+  }
+}
+
+class _StoryMediaOption extends StatelessWidget {
+  const _StoryMediaOption({
+    required this.icon,
+    required this.label,
+    required this.color,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String label;
+  final Color color;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+          child: Row(
+            children: [
+              Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(12),
+                  color: color.withValues(alpha: 0.15),
+                ),
+                child: Icon(icon, color: color, size: 22),
+              ),
+              const SizedBox(width: 14),
+              Text(
+                label,
+                style: GoogleFonts.inter(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w500,
+                  color: Colors.white,
+                ),
+              ),
+              const Spacer(),
+              Icon(
+                Icons.chevron_right_rounded,
+                color: Colors.white.withValues(alpha: 0.2),
+                size: 22,
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

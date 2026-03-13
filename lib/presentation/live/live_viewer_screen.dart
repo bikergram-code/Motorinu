@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:livekit_client/livekit_client.dart' as lk;
 
 import '../../core/community.dart';
 import '../../domain/models/live_stream.dart';
@@ -134,38 +135,104 @@ class _LiveViewerScreenState extends ConsumerState<LiveViewerScreen> {
   }
 
   Widget _buildVideoSurface(LiveViewerState state, Color accentColor) {
-    // Placeholder for actual IVS/HLS player
-    // When IVS SDK is integrated, this becomes the video player surface
+    // Show remote video track from host via LiveKit
+    if (state.remoteVideoTrack != null) {
+      return Stack(
+        children: [
+          // Remote video (fullscreen)
+          Positioned.fill(
+            child: lk.VideoTrackRenderer(
+              state.remoteVideoTrack!,
+              fit: lk.VideoViewFit.cover,
+            ),
+          ),
+
+          // Reconnecting indicator
+          if (state.isReconnecting)
+            Positioned.fill(
+              child: Container(
+                color: Colors.black.withValues(alpha: 0.5),
+                child: Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const SizedBox(
+                        width: 32,
+                        height: 32,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2.5,
+                          color: Colors.white70,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        'Verbindung wird wiederhergestellt...',
+                        style: GoogleFonts.inter(
+                          fontSize: 13,
+                          color: Colors.white70,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+        ],
+      );
+    }
+
+    // No video track yet — show waiting state
     return Container(
       color: Colors.black,
       child: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(
-              Icons.live_tv_rounded,
-              size: 64,
-              color: accentColor.withValues(alpha: 0.3),
-            ),
-            const SizedBox(height: 12),
-            if (state.session != null)
-              Text(
-                state.session!.title,
-                style: GoogleFonts.inter(
-                  fontSize: 18,
-                  fontWeight: FontWeight.w700,
-                  color: Colors.white.withValues(alpha: 0.5),
+            if (state.isVideoConnected && state.remoteVideoTrack == null) ...[
+              // Connected but waiting for host's video track
+              const SizedBox(
+                width: 40,
+                height: 40,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2.5,
+                  color: Colors.white38,
                 ),
-                textAlign: TextAlign.center,
               ),
-            const SizedBox(height: 8),
-            Text(
-              'Video-Feed wird vorbereitet...',
-              style: GoogleFonts.inter(
-                fontSize: 13,
-                color: Colors.white.withValues(alpha: 0.3),
+              const SizedBox(height: 16),
+              Text(
+                'Warte auf Video vom Host...',
+                style: GoogleFonts.inter(
+                  fontSize: 14,
+                  color: Colors.white.withValues(alpha: 0.4),
+                ),
               ),
-            ),
+            ] else ...[
+              // Not connected yet
+              Icon(
+                Icons.live_tv_rounded,
+                size: 64,
+                color: accentColor.withValues(alpha: 0.3),
+              ),
+              const SizedBox(height: 12),
+              if (state.session != null)
+                Text(
+                  state.session!.title,
+                  style: GoogleFonts.inter(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w700,
+                    color: Colors.white.withValues(alpha: 0.5),
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+              const SizedBox(height: 8),
+              Text(
+                'Verbindung wird aufgebaut...',
+                style: GoogleFonts.inter(
+                  fontSize: 13,
+                  color: Colors.white.withValues(alpha: 0.3),
+                ),
+              ),
+            ],
           ],
         ),
       ),

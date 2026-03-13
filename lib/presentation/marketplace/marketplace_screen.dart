@@ -7,8 +7,8 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../core/community.dart';
 import '../../data/repositories/marketplace_repository.dart';
 import '../../providers/core/providers.dart';
+import '../../providers/core/speed_dial_provider.dart';
 import '../../providers/marketplace/marketplace_notifier.dart';
-import '../../providers/blitzer/navigation_provider.dart';
 import '../../theme/app_theme.dart';
 import 'widgets/create_listing_sheet.dart';
 

@@ -76,7 +76,7 @@ class StoryViewer extends ConsumerStatefulWidget {
     int initialGroupIndex = 0,
     required Color accentColor,
   }) {
-    return Navigator.of(context).push(
+    return Navigator.of(context, rootNavigator: true).push(
       PageRouteBuilder(
         opaque: false,
         pageBuilder: (_, __, ___) => StoryViewer(

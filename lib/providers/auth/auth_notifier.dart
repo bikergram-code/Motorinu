@@ -89,6 +89,8 @@ class AuthNotifier extends Notifier<AuthState> {
     int? motoStartAge,
     int? carStartAge,
     bool? hasTrackExperience,
+    double? homeLat,
+    double? homeLng,
   }) async {
     state = const AuthLoading();
     try {
@@ -122,6 +124,18 @@ class AuthNotifier extends Notifier<AuthState> {
               .from('profiles')
               .update(updates)
               .eq('id', userId);
+        }
+
+        // home_lat / home_lng separat — Spalten existieren evtl. noch nicht
+        if (homeLat != null && homeLng != null) {
+          try {
+            await _supabase.from('profiles').update({
+              'home_lat': homeLat,
+              'home_lng': homeLng,
+            }).eq('id', userId);
+          } catch (e) {
+            debugPrint('[Auth] home_lat/home_lng update failed (migration pending?): $e');
+          }
         }
       }
 
@@ -285,11 +299,18 @@ class AuthNotifier extends Notifier<AuthState> {
         avatarUrlCargram: profileData?['avatar_url_cargram'],
         bio: profileData?['bio'],
         postalCode: profileData?['postal_code'],
+        country: profileData?['country'],
         community: profileData?['community'],
         birthYear: profileData?['birth_year'] as int?,
         motoStartAge: profileData?['moto_start_age'] as int?,
         carStartAge: profileData?['car_start_age'] as int?,
         hasTrackExperience: profileData?['has_track_experience'] ?? false,
+        homeLat: profileData?.containsKey('home_lat') == true
+            ? (profileData!['home_lat'] as num?)?.toDouble()
+            : null,
+        homeLng: profileData?.containsKey('home_lng') == true
+            ? (profileData!['home_lng'] as num?)?.toDouble()
+            : null,
         xpTotal: profileData?['xp_total'] ?? 0,
         level: profileData?['level'] ?? 1,
         isPremium: profileData?['is_premium'] ?? false,

@@ -20,6 +20,14 @@ class LiveUserPosition {
   final DateTime lastUpdate;
   /// Community key (e.g. 'bikergram', 'cars') — used to filter cross-community.
   final String community;
+  /// SOS-Status — wenn true, zeigt blinkenden roten Marker auf der Karte.
+  final bool sos;
+  /// Active group ride ID (null = not in a group ride).
+  final int? activeGroupId;
+  /// Group marker color hex (e.g. '#4CAF50').
+  final String? groupColor;
+  /// True if this user is the leader (admin) of their active group ride.
+  final bool isGroupLeader;
 
   const LiveUserPosition({
     required this.userId,
@@ -35,6 +43,10 @@ class LiveUserPosition {
     this.totalLikes = 0,
     required this.lastUpdate,
     this.community = 'bikergram',
+    this.sos = false,
+    this.activeGroupId,
+    this.groupColor,
+    this.isGroupLeader = false,
   });
 }
 
@@ -58,6 +70,11 @@ class LiveLocationService {
   int _followerCount = 0;
   int _totalLikes = 0;
   String _community = 'bikergram';
+  bool _sosActive = false;
+  int? _activeGroupId;
+  int? get activeGroupId => _activeGroupId;
+  String? _groupColor;
+  bool _isGroupLeader = false;
 
   StreamSubscription<Position>? _positionSub;
   RealtimeChannel? _channel;
@@ -206,8 +223,8 @@ class LiveLocationService {
 
         // Otherwise start a 30s grace period (handles brief network flickers).
         if (_leaveTimers[uid]?.isActive == true) continue; // already waiting
-        debugPrint('[LiveGPS] User $uid left — starting 30s grace period');
-        _leaveTimers[uid] = Timer(const Duration(seconds: 30), () {
+        debugPrint('[LiveGPS] User $uid left — starting 1s grace period');
+        _leaveTimers[uid] = Timer(const Duration(seconds: 1), () {
           _leaveTimers.remove(uid);
           if (_nearbyUsers.containsKey(uid)) {
             _nearbyUsers.remove(uid);
@@ -276,6 +293,17 @@ class LiveLocationService {
     });
   }
 
+  /// Set active group ride. Call when joining/leaving a group ride.
+  /// [isLeader] marks this user as the group leader (admin).
+  void setActiveGroup(int? groupId, String? color, {bool isLeader = false}) {
+    _activeGroupId = groupId;
+    _groupColor = color;
+    _isGroupLeader = isLeader;
+    if (_isLive && _channel != null) {
+      _channel!.track(_buildPayload(_lastPosition));
+    }
+  }
+
   /// Build the presence payload.
   Map<String, dynamic> _buildPayload(Position? pos) {
     return {
@@ -291,7 +319,37 @@ class LiveLocationService {
       'follower_count': _followerCount,
       'total_likes': _totalLikes,
       'community': _community,
+      'sos': _sosActive,
+      if (_activeGroupId != null) 'active_group_id': _activeGroupId,
+      if (_groupColor != null) 'group_color': _groupColor,
+      'is_group_leader': _isGroupLeader,
     };
+  }
+
+  /// Setze SOS-Status und broadcasten sofort an alle.
+  /// Sendet 3x mit kurzer Verzögerung um sicherzustellen, dass alle Empfänger es bekommen.
+  void setSosActive(bool active) {
+    _sosActive = active;
+    debugPrint('[LiveGPS] SOS ${active ? "ACTIVATED" : "deactivated"}');
+    if (_isLive && _channel != null) {
+      final payload = _buildPayload(_lastPosition);
+      try {
+        _channel!.track(payload);
+      } catch (e) {
+        debugPrint('[LiveGPS] SOS broadcast error: $e');
+      }
+      // Retry nach 1s und 3s — Presence-Sync kann erste Events verpassen
+      Future.delayed(const Duration(seconds: 1), () {
+        if (_isLive && _channel != null && _sosActive == active) {
+          try { _channel!.track(_buildPayload(_lastPosition)); } catch (_) {}
+        }
+      });
+      Future.delayed(const Duration(seconds: 3), () {
+        if (_isLive && _channel != null && _sosActive == active) {
+          try { _channel!.track(_buildPayload(_lastPosition)); } catch (_) {}
+        }
+      });
+    }
   }
 
   /// Stop broadcasting and disconnect from all channels.
@@ -330,7 +388,8 @@ class LiveLocationService {
           'user_id': _userId,
           'going_offline': true,
         });
-        await Future.delayed(const Duration(milliseconds: 200));
+        // ★ Länger warten damit das Goodbye-Signal bei anderen ankommt
+        await Future.delayed(const Duration(milliseconds: 800));
         await _channel!.untrack();
         await _supabase.removeChannel(_channel!);
       } catch (_) {}
@@ -433,6 +492,10 @@ class LiveLocationService {
             totalLikes: (data['total_likes'] as num?)?.toInt() ?? 0,
             lastUpdate: DateTime.now(),
             community: data['community'] as String? ?? 'bikergram',
+            sos: data['sos'] == true,
+            activeGroupId: (data['active_group_id'] as num?)?.toInt(),
+            groupColor: data['group_color'] as String?,
+            isGroupLeader: data['is_group_leader'] == true,
           );
         }
       }

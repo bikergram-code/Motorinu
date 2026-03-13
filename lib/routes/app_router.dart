@@ -16,20 +16,22 @@ import '../presentation/feed/feed_screen.dart';
 import '../presentation/garage/garage_screen.dart';
 import '../presentation/marketplace/marketplace_screen.dart';
 import '../presentation/profile/profile_screen.dart';
-import '../presentation/blitzer/blitzer_map_screen.dart';
-import '../presentation/map/user_map_screen.dart';
+import '../presentation/map/community_map_screen.dart';
 import '../presentation/events/events_screen.dart';
 import '../presentation/messages/messages_screen.dart';
 import '../presentation/messages/chat_detail_screen.dart';
 import '../presentation/notifications/notifications_screen.dart';
 import '../presentation/settings/settings_screen.dart';
-import '../presentation/blitzer/blitzer_settings_screen.dart';
-import '../presentation/blitzer/navigation_settings_screen.dart';
+import '../presentation/map/map_settings_screen.dart';
 import '../presentation/feed/post_detail_screen.dart';
 import '../presentation/search/user_search_screen.dart';
 import '../presentation/live/live_browse_screen.dart';
 import '../presentation/live/live_viewer_screen.dart';
 import '../presentation/live/go_live_screen.dart';
+import '../presentation/profile/saved_posts_screen.dart';
+import '../presentation/groups/group_detail_screen.dart';
+import '../presentation/groups/group_ride_screen.dart';
+import '../presentation/groups/groups_screen.dart';
 
 // ---------------------------------------------------------------------------
 // Motorsport-style page transition — fast diagonal slide + fade.
@@ -209,15 +211,9 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             ),
           ),
           GoRoute(
-            path: '/blitzer',
-            pageBuilder: (_, __) => const NoTransitionPage(
-              child: BlitzerMapScreen(),
-            ),
-          ),
-          GoRoute(
             path: '/map',
             pageBuilder: (_, __) => const NoTransitionPage(
-              child: UserMapScreen(),
+              child: CommunityMapScreen(),
             ),
           ),
           GoRoute(
@@ -266,6 +262,33 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         },
       ),
       GoRoute(
+        path: '/groups',
+        pageBuilder: (_, state) => _motoPage(
+          key: state.pageKey,
+          child: const GroupsScreen(),
+        ),
+      ),
+      GoRoute(
+        path: '/group/:groupId',
+        pageBuilder: (_, state) {
+          final groupId = int.parse(state.pathParameters['groupId']!);
+          return _motoPage(
+            key: state.pageKey,
+            child: GroupDetailScreen(groupId: groupId),
+          );
+        },
+      ),
+      GoRoute(
+        path: '/group-ride/:groupId',
+        pageBuilder: (_, state) {
+          final groupId = int.parse(state.pathParameters['groupId']!);
+          return _motoPage(
+            key: state.pageKey,
+            child: GroupRideScreen(groupId: groupId),
+          );
+        },
+      ),
+      GoRoute(
         path: '/profile/:userId',
         pageBuilder: (_, state) {
           final userId = state.pathParameters['userId']!;
@@ -303,6 +326,13 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         },
       ),
       GoRoute(
+        path: '/saved-posts',
+        pageBuilder: (_, state) => _motoPage(
+          key: state.pageKey,
+          child: const SavedPostsScreen(),
+        ),
+      ),
+      GoRoute(
         path: '/search',
         pageBuilder: (_, state) => _motoPage(
           key: state.pageKey,
@@ -324,17 +354,10 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         ),
       ),
       GoRoute(
-        path: '/blitzer-settings',
+        path: '/map-settings',
         pageBuilder: (_, state) => _motoPage(
           key: state.pageKey,
-          child: const BlitzerSettingsScreen(),
-        ),
-      ),
-      GoRoute(
-        path: '/navigation-settings',
-        pageBuilder: (_, state) => _motoPage(
-          key: state.pageKey,
-          child: const NavigationSettingsScreen(),
+          child: const MapSettingsScreen(),
         ),
       ),
     ],

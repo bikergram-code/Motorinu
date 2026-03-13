@@ -12,15 +12,14 @@ import 'package:permission_handler/permission_handler.dart';
 import '../../core/community.dart';
 import '../../providers/auth/auth_notifier.dart';
 import '../../providers/auth/auth_state.dart';
-import '../../providers/blitzer/blitzer_settings_provider.dart';
+import '../../providers/map/map_settings_provider.dart';
 import '../../providers/core/providers.dart';
+import '../../providers/core/speed_dial_provider.dart';
 import '../../providers/map/live_location_provider.dart';
 import '../../providers/messages/incoming_message_provider.dart';
 import '../../providers/messages/unread_messages_notifier.dart';
 import '../../providers/notifications/incoming_notification_provider.dart';
 import '../../providers/notifications/notification_notifier.dart';
-import '../../providers/blitzer/navigation_provider.dart';
-import '../../services/android_auto_service.dart';
 import '../../services/live_location_service.dart';
 import '../../theme/app_theme.dart';
 import '../widgets/community_switcher.dart';
@@ -37,10 +36,10 @@ class MainShell extends ConsumerStatefulWidget {
 
 class _MainShellState extends ConsumerState<MainShell>
     with TickerProviderStateMixin, WidgetsBindingObserver {
-  // Left tabs: Feed, Blitzer, Live
+  // Left tabs: Feed, Karte, Live
   static const _tabsLeft = [
     ('/feed', Icons.home_rounded, Icons.home_outlined, 'Feed'),
-    ('/blitzer', Icons.radar_rounded, Icons.radar_outlined, 'Blitzer'),
+    ('/map', Icons.map_rounded, Icons.map_outlined, 'Karte'),
     ('/live', Icons.live_tv_rounded, Icons.live_tv_outlined, 'Live'),
   ];
 
@@ -57,8 +56,7 @@ class _MainShellState extends ConsumerState<MainShell>
   // Tab title mapping
   static const _tabTitles = {
     '/feed': 'Feed',
-    '/blitzer': 'Blitzer',
-    '/map': 'Map',
+    '/map': 'Karte',
     '/live': 'Live',
     '/events': 'Events',
     '/garage': 'Garage',
@@ -106,9 +104,6 @@ class _MainShellState extends ConsumerState<MainShell>
     _autoStartGlobalLive();
     // Subscribe to live user updates globally (so all tabs see live users)
     _startGlobalLiveListener();
-
-    // ── Android Auto bridge: init so voice replies / mark-read work ──
-    ref.read(androidAutoServiceProvider).init();
 
     // ── Request notification permission (Android 13+) ──
     _requestNotificationPermission();
@@ -173,6 +168,14 @@ class _MainShellState extends ConsumerState<MainShell>
             }
           } else if (type == 'follow' && dataMap['follower_id'] != null) {
             context.push('/profile/${dataMap['follower_id']}');
+          } else if (type == 'system' && dataMap['group_id'] != null) {
+            final gId = dataMap['group_id'];
+            final id = gId is int ? gId : int.tryParse('$gId');
+            if (id != null) {
+              context.push('/group/$id');
+            } else {
+              context.push('/notifications');
+            }
           } else {
             context.push('/notifications');
           }
@@ -353,7 +356,7 @@ class _MainShellState extends ConsumerState<MainShell>
     final service = ref.read(liveLocationServiceProvider);
     _globalLiveSub = service.nearbyUsersStream.listen((_) {
       // The stream is already processed by the service.
-      // Individual screens (BlitzerMapScreen) listen to the same service.
+      // Individual screens (CommunityMapScreen) listen to the same service.
       // This just ensures the service is active and the provider reflects the state.
     });
   }
@@ -409,11 +412,6 @@ class _MainShellState extends ConsumerState<MainShell>
     final currentIndex =
         _allTabs.indexWhere((t) => location.startsWith(t.$1));
 
-    // Hide bottom nav bar ONLY during active blitzer navigation (nicht bei Routenvorschau)
-    final navState = ref.watch(navigationProvider);
-    final isBlitzerNavActive = location == '/blitzer' &&
-        navState.isNavigating;
-
     final isSpeedDialOpen = ref.watch(blitzerSpeedDialProvider);
 
     // Speed-Dial items from active tab screen
@@ -440,11 +438,10 @@ class _MainShellState extends ConsumerState<MainShell>
             accentColor: accentColor,
             title: tabTitle,
             location: location,
-            isNavigating: isBlitzerNavActive,
           ),
         ],
       ),
-      bottomNavigationBar: isBlitzerNavActive ? null : Container(
+      bottomNavigationBar: Container(
         decoration: BoxDecoration(
           color: community?.navBarFor(brightness) ?? (brightness == Brightness.dark ? const Color(0xFF0D0D0D) : const Color(0xFFF5F5F5)),
           border: Border(
@@ -474,7 +471,6 @@ class _MainShellState extends ConsumerState<MainShell>
                   accentColor: accentColor,
                   isSpeedDialOpen: isSpeedDialOpen,
                   hasSpeedDial: hasSpeedDial,
-                  isBlitzerNavActive: isBlitzerNavActive,
                 ),
 
                 // ── Right tabs ──
@@ -515,7 +511,6 @@ class _MainShellState extends ConsumerState<MainShell>
     required Color accentColor,
     required String title,
     required String location,
-    bool isNavigating = false,
   }) {
     final textColor = community?.textColor(brightness) ??
         (brightness == Brightness.dark ? Colors.white : const Color(0xFF1A1A1A));
@@ -523,8 +518,8 @@ class _MainShellState extends ConsumerState<MainShell>
         ? Colors.white.withValues(alpha: 0.7)
         : const Color(0xFF6C757D);
 
-    // On map screens (blitzer) use transparent bg. On other tabs use scaffold bg.
-    final isMapScreen = location == '/blitzer';
+    // On map screen use transparent bg. On other tabs use scaffold bg.
+    final isMapScreen = location == '/map';
     final bgColor = isMapScreen
         ? (brightness == Brightness.dark
             ? Colors.black.withValues(alpha: 0.6)
@@ -532,72 +527,59 @@ class _MainShellState extends ConsumerState<MainShell>
         : (community?.scaffoldFor(brightness) ??
             (brightness == Brightness.dark ? Colors.black : const Color(0xFFF5F5F5)));
 
-    // Im Blitzer-Tab: Icons bekommen eine Hintergrundbox für bessere Lesbarkeit.
-    // Beim Navigieren: Box transparenter, nur Nachrichten + Profil sichtbar.
+    // Im Karten-Tab: Icons bekommen eine Hintergrundbox für bessere Lesbarkeit.
     final mapIconColor = Colors.white.withValues(alpha: 0.9);
     final effectiveIconColor = isMapScreen ? mapIconColor : iconColor;
 
-    // Box-Decor: nur im Blitzer-Tab
-    final blitzerBoxColor = isNavigating
-        ? Colors.black.withValues(alpha: 0.20)
-        : (brightness == Brightness.dark
-            ? Colors.black.withValues(alpha: 0.30)
-            : Colors.white.withValues(alpha: 0.75));
+    final mapBoxColor = brightness == Brightness.dark
+        ? Colors.black.withValues(alpha: 0.30)
+        : Colors.white.withValues(alpha: 0.75);
 
     Widget iconRow = Row(
       mainAxisSize: MainAxisSize.min,
+      spacing: 0,
       children: [
-        // Live Online badge — nur wenn NICHT navigiert
-        if (!isNavigating) ...[
-          _buildLiveOnlineBadge(accentColor, location),
-          const SizedBox(width: 2),
-        ],
-        // Notifications — nur wenn NICHT navigiert
-        if (!isNavigating) ...[
-          _buildNotificationIcon(accentColor, effectiveIconColor),
-          const SizedBox(width: 2),
-        ],
-        // Messages — immer sichtbar
+        // Live Online badge
+        _buildLiveOnlineBadge(accentColor, location),
+        _buildNotificationIcon(accentColor, effectiveIconColor),
         _buildMessageIcon(accentColor, effectiveIconColor),
-        const SizedBox(width: 2),
-        // Search — nur wenn NICHT navigiert
-        if (!isNavigating) ...[
-          IconButton(
-            onPressed: () => context.push('/search'),
-            icon: Icon(Icons.search_rounded, color: effectiveIconColor, size: 24),
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 32, minHeight: 36),
-          ),
-          const SizedBox(width: 2),
-        ],
-        // Profil — immer sichtbar
+        IconButton(
+          onPressed: () => context.push('/groups'),
+          icon: Icon(Icons.groups_rounded, color: effectiveIconColor, size: 16),
+          tooltip: 'Gruppen',
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(minWidth: 20, minHeight: 34),
+        ),
+        IconButton(
+          onPressed: () => context.push('/search'),
+          icon: Icon(Icons.search_rounded, color: effectiveIconColor, size: 16),
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(minWidth: 20, minHeight: 34),
+        ),
         if (location == '/profile')
           IconButton(
             onPressed: () => context.push('/settings'),
-            icon: Icon(Icons.settings_outlined, color: effectiveIconColor, size: 24),
+            icon: Icon(Icons.settings_outlined, color: effectiveIconColor, size: 16),
             padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+            constraints: const BoxConstraints(minWidth: 20, minHeight: 34),
           )
         else
           GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTap: () => context.go('/profile'),
-            child: Padding(
-              padding: const EdgeInsets.all(3),
-              child: _buildProfileAvatar(accentColor),
-            ),
+            child: _buildProfileAvatar(accentColor),
           ),
       ],
     );
 
-    // Blitzer-Tab: Pill-Box um Icons
+    // Karten-Tab: Pill-Box um Icons
     if (isMapScreen) {
       iconRow = Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
         decoration: BoxDecoration(
-          color: blitzerBoxColor,
+          color: mapBoxColor,
           borderRadius: BorderRadius.circular(28),
-          boxShadow: isNavigating ? [] : [
+          boxShadow: [
             BoxShadow(
               color: Colors.black.withValues(alpha: 0.25),
               blurRadius: 12,
@@ -614,16 +596,18 @@ class _MainShellState extends ConsumerState<MainShell>
       child: SafeArea(
         bottom: false,
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           child: Row(
-            mainAxisAlignment: MainAxisAlignment.end,
             children: [
-              // Community switcher — nur wenn NICHT navigiert
-              if (!isNavigating) ...[
-                const CommunitySwitcher(),
-                const Spacer(),
-              ],
-              iconRow,
+              const CommunitySwitcher(),
+              const SizedBox(width: 4),
+              Flexible(
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  alignment: Alignment.centerRight,
+                  child: iconRow,
+                ),
+              ),
             ],
           ),
         ),
@@ -638,11 +622,11 @@ class _MainShellState extends ConsumerState<MainShell>
     return IconButton(
       onPressed: () => context.push('/notifications'),
       padding: EdgeInsets.zero,
-      constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+      constraints: const BoxConstraints(minWidth: 20, minHeight: 34),
       icon: Stack(
         clipBehavior: Clip.none,
         children: [
-          Icon(Icons.notifications_outlined, color: iconColor, size: 24),
+          Icon(Icons.notifications_outlined, color: iconColor, size: 16),
           if (unreadCount > 0)
             Positioned(
               right: -6, top: -4,
@@ -673,11 +657,11 @@ class _MainShellState extends ConsumerState<MainShell>
     return IconButton(
       onPressed: () => context.push('/messages'),
       padding: EdgeInsets.zero,
-      constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+      constraints: const BoxConstraints(minWidth: 20, minHeight: 34),
       icon: Stack(
         clipBehavior: Clip.none,
         children: [
-          Icon(Icons.chat_bubble_outline_rounded, color: iconColor, size: 24),
+          Icon(Icons.chat_bubble_outline_rounded, color: iconColor, size: 16),
           if (unreadCount > 0)
             Positioned(
               right: -6, top: -4,
@@ -715,10 +699,10 @@ class _MainShellState extends ConsumerState<MainShell>
 
     if (avatarUrl != null && avatarUrl.isNotEmpty) {
       return Container(
-        width: 34, height: 34,
+        width: 20, height: 20,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
-          border: Border.all(color: accentColor.withValues(alpha: 0.8), width: 2),
+          border: Border.all(color: accentColor.withValues(alpha: 0.8), width: 1.5),
         ),
         child: ClipOval(
           child: Image.network(avatarUrl, fit: BoxFit.cover,
@@ -731,13 +715,13 @@ class _MainShellState extends ConsumerState<MainShell>
 
   Widget _buildInitialAvatar(String initial, Color accentColor) {
     return Container(
-      width: 34, height: 34,
+      width: 20, height: 20,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
         gradient: LinearGradient(colors: [accentColor, accentColor.withValues(alpha: 0.6)]),
       ),
       child: Center(
-        child: Text(initial, style: GoogleFonts.inter(fontSize: 14, fontWeight: FontWeight.w700, color: Colors.white)),
+        child: Text(initial, style: GoogleFonts.inter(fontSize: 10, fontWeight: FontWeight.w700, color: Colors.white)),
       ),
     );
   }
@@ -887,12 +871,10 @@ class _MainShellState extends ConsumerState<MainShell>
     required Color accentColor,
     required bool isSpeedDialOpen,
     required bool hasSpeedDial,
-    required bool isBlitzerNavActive,
   }) {
     return Expanded(
       child: GestureDetector(
         onTap: () {
-          if (isBlitzerNavActive) return; // Do nothing during nav
           if (hasSpeedDial) {
             _toggleSpeedDial();
           }
@@ -1025,7 +1007,9 @@ class _MainShellState extends ConsumerState<MainShell>
               alignment: Alignment.bottomCenter,
               child: GestureDetector(
                 onTap: () {}, // absorb taps on sheet itself
-                child: Container(
+                child: Material(
+                  type: MaterialType.transparency,
+                  child: Container(
                   constraints: BoxConstraints(
                     maxHeight: MediaQuery.of(context).size.height * 0.65,
                   ),
@@ -1058,7 +1042,7 @@ class _MainShellState extends ConsumerState<MainShell>
                         ),
                         const SizedBox(width: 10),
                         Text(
-                          '${users.length} Biker online',
+                          '${users.length + (isLiveNotifier.value ? 1 : 0)} Biker online',
                           style: GoogleFonts.inter(
                             fontSize: 20, fontWeight: FontWeight.w800, color: textColor,
                             letterSpacing: -0.3,
@@ -1120,7 +1104,7 @@ class _MainShellState extends ConsumerState<MainShell>
                                         ),
                                       );
                                       _closeOnlineSheet();
-                                      context.go('/blitzer');
+                                      context.go('/map');
                                     },
                                     child: Container(
                                       padding: const EdgeInsets.all(12),
@@ -1196,6 +1180,7 @@ class _MainShellState extends ConsumerState<MainShell>
                     ),
                   ]),
                 ),
+                ),
               ),
             ),
           ),
@@ -1245,67 +1230,40 @@ class _LiveOnlineBadgeWidget extends StatelessWidget {
         return ValueListenableBuilder<bool>(
           valueListenable: isLiveNotifier,
           builder: (context, isLive, _) {
-            final liveCount = onlineUsers.length;
-            final visible = isLive || liveCount > 0;
-
-            if (!visible) return const SizedBox.shrink();
+            // Anzahl online User — immer mindestens 1 (der eigene User)
+            final othersCount = onlineUsers.length;
+            final liveCount = othersCount > 0 ? othersCount + 1 : 1;
+            // Badge ist IMMER sichtbar neben der Glocke
 
             final isDark = Theme.of(context).brightness == Brightness.dark;
 
             return GestureDetector(
               onTap: onTap,
               child: Container(
-                padding: EdgeInsets.symmetric(
-                  horizontal: liveCount > 0 ? 8 : 6,
-                  vertical: 6,
-                ),
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
                 decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: [
-                      const Color(0xFF00C853).withValues(alpha: 0.2),
-                      const Color(0xFF00E676).withValues(alpha: 0.1),
-                    ],
-                  ),
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(
-                    color: const Color(0xFF00E676).withValues(alpha: isDark ? 0.4 : 0.5),
-                    width: 1,
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: const Color(0xFF00C853).withValues(alpha: 0.25),
-                      blurRadius: 8,
-                      spreadRadius: 0,
-                    ),
-                  ],
+                  color: Colors.green.withValues(alpha: 0.2),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: Colors.green.withValues(alpha: 0.4)),
                 ),
                 child: Row(mainAxisSize: MainAxisSize.min, children: [
                   Container(
-                    width: 8,
-                    height: 8,
-                    decoration: BoxDecoration(
+                    width: 5,
+                    height: 5,
+                    decoration: const BoxDecoration(
                       shape: BoxShape.circle,
-                      color: const Color(0xFF00E676),
-                      boxShadow: [
-                        BoxShadow(
-                          color: const Color(0xFF00E676).withValues(alpha: 0.6),
-                          blurRadius: 6,
-                          spreadRadius: 1,
-                        ),
-                      ],
+                      color: Colors.green,
                     ),
                   ),
-                  if (liveCount > 0) ...[
-                    const SizedBox(width: 5),
-                    Text(
-                      '$liveCount',
-                      style: GoogleFonts.inter(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w700,
-                        color: const Color(0xFF00E676),
-                      ),
+                  const SizedBox(width: 3),
+                  Text(
+                    '$liveCount',
+                    style: GoogleFonts.inter(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.green,
                     ),
-                  ],
+                  ),
                 ]),
               ),
             );

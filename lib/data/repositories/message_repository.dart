@@ -35,7 +35,7 @@ class MessageRepository {
 
     for (final convId in conversationIds) {
       try {
-        // Get conversation details (including community)
+        // Get conversation details (including community + group_id)
         final conv = await _supabase
             .from('conversations')
             .select()
@@ -51,24 +51,51 @@ class MessageRepository {
           }
         }
 
-        // Get the other participant
-        final otherParticipant = await _supabase
-            .from('conversation_participants')
-            .select('user_id')
-            .eq('conversation_id', convId)
-            .neq('user_id', userId)
-            .maybeSingle();
+        final groupId = (conv?['group_id'] as num?)?.toInt();
+        final isGroupChat = groupId != null;
 
-        if (otherParticipant == null) continue;
+        String otherUserId = '';
+        String otherUsername = 'Unbekannt';
+        String? otherAvatarUrl;
+        String? groupName;
+        String? groupAvatarUrl;
 
-        final otherUserId = otherParticipant['user_id'] as String;
+        if (isGroupChat) {
+          // Group conversation: load group info
+          final group = await _supabase
+              .from('groups')
+              .select('name, avatar_url')
+              .eq('id', groupId)
+              .maybeSingle();
+          groupName = group?['name'] as String? ?? 'Gruppe';
+          groupAvatarUrl = group?['avatar_url'] as String?;
+          otherUsername = groupName;
+          otherUserId = 'group_$groupId';
+        } else {
+          // 1:1 conversation: load other participant
+          final otherParticipant = await _supabase
+              .from('conversation_participants')
+              .select('user_id')
+              .eq('conversation_id', convId)
+              .neq('user_id', userId)
+              .maybeSingle();
 
-        // Get other user's profile
-        final otherProfile = await _supabase
-            .from('profiles')
-            .select('username, display_name, avatar_url')
-            .eq('id', otherUserId)
-            .maybeSingle();
+          if (otherParticipant == null) continue;
+
+          otherUserId = otherParticipant['user_id'] as String;
+
+          // Get other user's profile
+          final otherProfile = await _supabase
+              .from('profiles')
+              .select('username, display_name, avatar_url')
+              .eq('id', otherUserId)
+              .maybeSingle();
+
+          otherUsername = otherProfile?['display_name'] as String? ??
+              otherProfile?['username'] as String? ??
+              'Unbekannt';
+          otherAvatarUrl = otherProfile?['avatar_url'] as String?;
+        }
 
         // Get last message
         final lastMessage = await _supabase
@@ -90,14 +117,16 @@ class MessageRepository {
         results.add({
           'id': convId,
           'other_user_id': otherUserId,
-          'other_username': otherProfile?['display_name'] ??
-              otherProfile?['username'] ??
-              'Unbekannt',
-          'other_avatar_url': otherProfile?['avatar_url'],
+          'other_username': otherUsername,
+          'other_avatar_url': isGroupChat ? groupAvatarUrl : otherAvatarUrl,
           'last_message_body': lastMessage?['body'],
           'last_message_at': lastMessage?['created_at'],
           'unread_count': unreadData.length,
           'created_at': lastMessage?['created_at'],
+          'is_group_chat': isGroupChat,
+          'group_id': groupId,
+          'group_name': groupName,
+          'group_avatar_url': groupAvatarUrl,
         });
       } catch (e) {
         debugPrint('Error loading conversation $convId: $e');
@@ -315,14 +344,16 @@ class MessageRepository {
           .toList();
 
       // 2. Filter by community in ONE query (instead of N queries)
+      //    Include conversations with NULL community (legacy, before community feature)
       List<int> filteredConvIds;
       if (community != null && allConvIds.isNotEmpty) {
         final convs = await _supabase
             .from('conversations')
             .select('id')
             .inFilter('id', allConvIds)
-            .eq('community', community);
+            .or('community.eq.$community,community.is.null');
         filteredConvIds = convs.map<int>((c) => c['id'] as int).toList();
+        debugPrint('[MsgRepo] Community filter: ${allConvIds.length} total → ${filteredConvIds.length} matching "$community" (incl. null)');
       } else {
         filteredConvIds = allConvIds;
       }

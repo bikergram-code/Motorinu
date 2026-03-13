@@ -152,7 +152,19 @@ create table if not exists public.blitzer_reports (
 alter table public.blitzer_reports enable row level security;
 create policy "blitzer_select" on public.blitzer_reports for select using (is_active = true);
 create policy "blitzer_insert" on public.blitzer_reports for insert with check (auth.uid() = user_id);
-create policy "blitzer_update" on public.blitzer_reports for update using (auth.uid() = user_id);
+-- Any authenticated user can update (dismiss/deactivate) blitzer reports
+create policy "blitzer_update" on public.blitzer_reports for update using (auth.uid() is not null);
+
+-- RPC to deactivate a blitzer report (SECURITY DEFINER = bypasses RLS)
+create or replace function public.deactivate_blitzer(report_id bigint)
+returns void
+language sql
+security definer
+as $$
+  update public.blitzer_reports
+  set is_active = false, dismissals = 99
+  where id = report_id;
+$$;
 
 -- 9. MARKETPLACE
 create table if not exists public.marketplace_listings (

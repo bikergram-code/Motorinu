@@ -15,6 +15,8 @@ import '../../data/repositories/profile_repository.dart';
 import '../../data/repositories/ride_repository.dart';
 import '../../data/repositories/story_repository.dart';
 import '../../data/repositories/live_repository.dart';
+import '../../data/repositories/events_repository.dart';
+import '../../data/repositories/group_repository.dart';
 import '../../data/repositories/moderation_repository.dart';
 
 // ---------------------------------------------------------------------------
@@ -146,4 +148,12 @@ final liveRepositoryProvider = Provider<LiveRepository>((ref) {
 
 final moderationRepositoryProvider = Provider<ModerationRepository>((ref) {
   return ModerationRepository();
+});
+
+final eventsRepositoryProvider = Provider<EventsRepository>((ref) {
+  return EventsRepository();
+});
+
+final groupRepositoryProvider = Provider<GroupRepository>((ref) {
+  return GroupRepository();
 });
