@@ -152,7 +152,16 @@ class HeadingSensorService {
     // Ignore unreasonable dt (first event, app resume, etc.)
     if (dt <= 0 || dt > 0.5) return;
 
-    if (!_initialized) return; // Wait for first GPS fix
+    // Initialize from magnetometer if GPS hasn't provided a fix yet
+    if (!_initialized) {
+      if (_magnetHeading != null) {
+        _fusedHeading = _magnetHeading!;
+        _initialized = true;
+        _controller.add(_fusedHeading);
+        debugPrint('[HeadingSensor] Initialized from magnetometer: ${_magnetHeading!.toStringAsFixed(1)}°');
+      }
+      return;
+    }
 
     // Z-axis = yaw rotation. Negative because turning right = positive heading.
     // Phone in portrait, screen facing user: Z points up.
@@ -164,10 +173,12 @@ class HeadingSensorService {
       final gyroHeading = _fusedHeading + yawDeg;
       _fusedHeading = _complementaryFilter(gyroHeading, _gpsHeading, alpha: 0.98);
     } else {
-      // Stationary: fuse gyro with magnetometer if available
+      // Stationary/walking: fuse gyro with magnetometer if available
       if (_magnetHeading != null) {
         final gyroHeading = _fusedHeading + yawDeg;
-        _fusedHeading = _complementaryFilter(gyroHeading, _magnetHeading!, alpha: 0.95);
+        // Lower speed → trust magnetometer more (walking: 0.85, standstill: 0.80)
+        final alpha = _gpsSpeed < 1 ? 0.80 : 0.85;
+        _fusedHeading = _complementaryFilter(gyroHeading, _magnetHeading!, alpha: alpha);
       } else {
         // No magnetometer: just integrate gyro (will drift, but short-term OK)
         _fusedHeading = _fusedHeading + yawDeg;
@@ -188,18 +199,20 @@ class HeadingSensorService {
 
   // ── Magnetometer callback ──
   void _onMagnetEvent(MagnetometerEvent event) {
-    // Simple heading from X/Y (device in portrait, screen up)
-    var heading = atan2(event.y, event.x) * (180 / pi);
+    // Compass heading from magnetometer (device flat or portrait, screen facing user).
+    // atan2(x, y) gives angle from Y-axis (North) clockwise:
+    //   North (x≈0,y>0) → 0°, East (x>0,y≈0) → 90°, etc.
+    var heading = atan2(event.x, event.y) * (180 / pi);
     if (heading < 0) heading += 360;
 
-    // EMA smoothing (alpha=0.3) to reduce magnetic noise
+    // EMA smoothing (alpha=0.35) to reduce magnetic noise while staying responsive
     if (!_magnetInitialized) {
       _magnetSmoothed = heading;
       _magnetInitialized = true;
     } else {
       // Circular EMA
       final diff = _angleDiff(_magnetSmoothed, heading);
-      _magnetSmoothed = (_magnetSmoothed + 0.3 * diff) % 360;
+      _magnetSmoothed = (_magnetSmoothed + 0.35 * diff) % 360;
       if (_magnetSmoothed < 0) _magnetSmoothed += 360;
     }
     _magnetHeading = _magnetSmoothed;

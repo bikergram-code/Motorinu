@@ -180,6 +180,9 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
   LatLng? _interpolatedPos;     // current interpolated position
   double _interpolatedHeading = 0;
 
+  // ── Non-nav heading follow (compass rotation without navigation) ──
+  Timer? _headingFollowTimer;
+
   // ── Periodic nav tasks (off-route check, speed limit) ──
   Timer? _navPeriodicTimer;
 
@@ -465,6 +468,9 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
       _fusedHeading = heading;
     });
 
+    // Start non-nav heading follow (compass rotation without active navigation)
+    _startHeadingFollowTimer();
+
     _headingGpsSub = Geolocator.getPositionStream(
       locationSettings: const LocationSettings(
         accuracy: LocationAccuracy.high,
@@ -718,6 +724,37 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
     return (a + diff * t) % 360;
   }
 
+  /// Start heading-follow timer for non-navigation mode.
+  /// Rotates map to match compass heading at 30fps without nav-specific
+  /// offset/tilt logic. Stops automatically when navigation starts.
+  void _startHeadingFollowTimer() {
+    _headingFollowTimer?.cancel();
+    _headingFollowTimer = Timer.periodic(const Duration(milliseconds: 33), (_) {
+      // Stop if navigation extrapolation is active or user panned away
+      if (_isNavigating || _extrapolationTimer != null) return;
+      if (!_isNavFollowing || _mapController == null) return;
+      if (_currentGpsPos == null) return;
+
+      final heading = HeadingSensorService.instance.isGyroAvailable
+          ? _fusedHeading
+          : _currentHeading;
+
+      _isProgrammaticMove = true;
+      _mapController!.moveCamera(
+        CameraUpdate.newCameraPosition(gmaps.CameraPosition(
+          target: _currentGpsPos!,
+          zoom: 17.0,
+          tilt: 50.0,
+          bearing: heading,
+        )),
+      );
+      // Allow onCameraMoveStarted after a short delay
+      Future.delayed(const Duration(milliseconds: 50), () {
+        _isProgrammaticMove = false;
+      });
+    });
+  }
+
   /// Query speed limit + check for speeding.
   void _updateSpeedLimit(double lat, double lon, double speedKmh) async {
     try {
@@ -762,6 +799,7 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
     _headingGpsSub?.cancel();
     _fusedHeadingSub?.cancel();
     HeadingSensorService.instance.stop();
+    _headingFollowTimer?.cancel();
     _extrapolationTimer?.cancel();
     _navPeriodicTimer?.cancel();
     _searchDebounce?.cancel();
@@ -3327,6 +3365,9 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
     _autoStartTimer?.cancel();
     _autoStartTimer = null;
     _autoStartCountdown = 0;
+    // Stop non-nav heading follow (extrapolation timer takes over)
+    _headingFollowTimer?.cancel();
+    _headingFollowTimer = null;
     setState(() {
       _routePanelExpanded = false;
       _isNavFollowing = true;
@@ -3464,9 +3505,7 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
     _extrapolationTimer?.cancel();
     _extrapolationTimer = null;
     _isProgrammaticMove = false; // Allow user gestures again
-    _fusedHeadingSub?.cancel();
-    _fusedHeadingSub = null;
-    HeadingSensorService.instance.stop();
+    // Keep HeadingSensorService + fused heading running for non-nav heading follow
     _navKalman.reset(); // Reset Kalman filter for next navigation
     _navPeriodicTimer?.cancel();
     _navPeriodicTimer = null;
@@ -3476,7 +3515,7 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
     setState(() {
       _isNavigating = false;
       _navUiHidden = false; // Show UI again when navigation stops
-      _isNavFollowing = false;
+      _isNavFollowing = true; // Keep heading follow active (non-nav rotation)
       _currentRoute = null;
       _alternativeRoutes = [];
       _selectedRouteIndex = 0;
@@ -3499,19 +3538,8 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
       _lastSnapInput = null;
       _expandedCountries.clear();
     });
-    // Reset camera to normal overview
-    if (_mapController != null && _currentGpsPos != null) {
-      _mapController!.animateCamera(
-        CameraUpdate.newCameraPosition(
-          gmaps.CameraPosition(
-            target: _currentGpsPos!,
-            zoom: 14,
-            tilt: 0,
-            bearing: 0,
-          ),
-        ),
-      );
-    }
+    // Resume non-nav heading follow timer (compass rotation)
+    _startHeadingFollowTimer();
   }
 
   /// Calculate route from admin/leader position to destination via OSRM.
@@ -4297,17 +4325,13 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
                     _isProgrammaticMove = false;
                   });
                 } else if (_currentGpsPos != null && _mapController != null) {
-                  // No route → center on GPS position
-                  _mapController!.animateCamera(
-                    CameraUpdate.newCameraPosition(
-                      gmaps.CameraPosition(
-                        target: _currentGpsPos!,
-                        zoom: 15.0,
-                        tilt: 0,
-                        bearing: 0,
-                      ),
-                    ),
-                  );
+                  // No route → re-center with heading follow
+                  _isProgrammaticMove = true;
+                  setState(() => _isNavFollowing = true);
+                  _startHeadingFollowTimer();
+                  Future.delayed(const Duration(milliseconds: 500), () {
+                    _isProgrammaticMove = false;
+                  });
                 } else {
                   final rs = ref.read(groupRideProvider(widget.groupId));
                   _centerOnGroup(rs);
