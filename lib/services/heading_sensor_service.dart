@@ -4,16 +4,20 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 
-/// Fuses gyroscope, GPS heading, and magnetometer for Waze-level smooth
-/// camera rotation during navigation.
+/// Fuses gyroscope, GPS heading, and magnetometer+accelerometer for Waze-level
+/// smooth camera rotation during navigation.
 ///
 /// - Gyroscope: instant rotation rate at ~50Hz (Z-axis = yaw)
 /// - GPS heading: drift-free but slow (~1Hz), used for correction
-/// - Magnetometer: fallback when stationary (< 3 km/h)
+/// - Magnetometer+Accelerometer: tilt-compensated compass heading (fallback < 3 km/h)
+///
+/// The magnetometer heading uses the full rotation matrix approach
+/// (equivalent to Android's SensorManager.getRotationMatrix + getOrientation)
+/// so it works correctly regardless of how the phone is tilted or mounted.
 ///
 /// Algorithm: Complementary filter
 ///   fusedHeading = α * (prev + gyroRate × dt) + (1-α) * reference
-///   α = 0.98 while moving (trust gyro), α = 0.95 while stationary (trust magnetometer)
+///   α = 0.98 while moving (trust gyro), α = 0.80-0.85 while stationary (trust compass)
 class HeadingSensorService {
   HeadingSensorService._();
   static final instance = HeadingSensorService._();
@@ -43,16 +47,23 @@ class HeadingSensorService {
   double _gpsHeading = 0;
   double _gpsSpeed = 0; // km/h
 
-  // ── Magnetometer ──
+  // ── Magnetometer (tilt-compensated via accelerometer) ──
   StreamSubscription<MagnetometerEvent>? _magnetSub;
+  StreamSubscription<AccelerometerEvent>? _accelSub;
   double? _magnetHeading;
   double _magnetSmoothed = 0;
   bool _magnetInitialized = false;
 
+  // Latest accelerometer values for tilt compensation
+  double _accelX = 0, _accelY = 0, _accelZ = 9.81;
+  // Latest magnetometer raw values
+  double _magX = 0, _magY = 0, _magZ = 0;
+  bool _hasMagData = false;
+
   // ── Lifecycle ──
   bool _running = false;
 
-  /// Start listening to gyroscope and magnetometer.
+  /// Start listening to gyroscope, magnetometer, and accelerometer.
   void start() {
     if (_running) return;
     _running = true;
@@ -76,7 +87,26 @@ class HeadingSensorService {
       _gyroAvailable = false;
     }
 
-    // Magnetometer stream (~15Hz = uiInterval, only used as fallback)
+    // Accelerometer stream (~15Hz for tilt compensation)
+    try {
+      _accelSub = accelerometerEventStream(
+        samplingPeriod: SensorInterval.uiInterval,
+      ).listen(
+        (event) {
+          _accelX = event.x;
+          _accelY = event.y;
+          _accelZ = event.z;
+        },
+        onError: (e) {
+          debugPrint('[HeadingSensor] Accelerometer not available: $e');
+        },
+      );
+      debugPrint('[HeadingSensor] Accelerometer started');
+    } catch (e) {
+      debugPrint('[HeadingSensor] Accelerometer init error: $e');
+    }
+
+    // Magnetometer stream (~15Hz = uiInterval)
     try {
       _magnetSub = magnetometerEventStream(
         samplingPeriod: SensorInterval.uiInterval,
@@ -98,6 +128,8 @@ class HeadingSensorService {
     _gyroSub = null;
     _magnetSub?.cancel();
     _magnetSub = null;
+    _accelSub?.cancel();
+    _accelSub = null;
     _running = false;
     debugPrint('[HeadingSensor] Stopped');
   }
@@ -197,12 +229,52 @@ class HeadingSensorService {
     _controller.add(_fusedHeading);
   }
 
-  // ── Magnetometer callback ──
+  // ── Magnetometer callback (tilt-compensated via accelerometer) ──
   void _onMagnetEvent(MagnetometerEvent event) {
-    // Compass heading from magnetometer (device flat or portrait, screen facing user).
-    // atan2(x, y) gives angle from Y-axis (North) clockwise:
-    //   North (x≈0,y>0) → 0°, East (x>0,y≈0) → 90°, etc.
-    var heading = atan2(event.x, event.y) * (180 / pi);
+    _magX = event.x;
+    _magY = event.y;
+    _magZ = event.z;
+    _hasMagData = true;
+
+    // ── Tilt-compensated heading using rotation matrix ──
+    // This is equivalent to Android's SensorManager.getRotationMatrix()
+    // + SensorManager.getOrientation(). Works regardless of device tilt/mount.
+    //
+    // Algorithm:
+    // 1. gravity = accelerometer vector (includes gravity)
+    // 2. East = magnetometer × gravity  (cross product)
+    // 3. North = gravity × East         (cross product)
+    // 4. heading = atan2(dot(East, forward), dot(North, forward))
+    //    where forward = device Y-axis = [0, 1, 0] (top of phone)
+
+    final ax = _accelX, ay = _accelY, az = _accelZ;
+
+    // Cross product: East = mag × gravity
+    final ex = _magY * az - _magZ * ay;
+    final ey = _magZ * ax - _magX * az;
+    final ez = _magX * ay - _magY * ax;
+
+    // Normalize East vector
+    final eNorm = sqrt(ex * ex + ey * ey + ez * ez);
+    if (eNorm < 0.1) return; // Degenerate case (free fall, etc.)
+    final enx = ex / eNorm;
+    final eny = ey / eNorm;
+    final enz = ez / eNorm;
+
+    // Cross product: North = gravity × East_unit
+    final nx = ay * enz - az * eny;
+    final ny = az * enx - ax * enz;
+    final nz = ax * eny - ay * enx;
+
+    // Normalize North vector (magnitude ≈ |gravity|, must match East_unit scale)
+    final nNorm = sqrt(nx * nx + ny * ny + nz * nz);
+    if (nNorm < 0.1) return;
+    final nny = ny / nNorm;
+
+    // Heading: angle of device Y-axis projected on horizontal plane
+    // dot(East_unit, [0,1,0]) = eny   (how much phone top points East)
+    // dot(North_unit, [0,1,0]) = nny  (how much phone top points North)
+    var heading = atan2(eny, nny) * (180 / pi);
     if (heading < 0) heading += 360;
 
     // EMA smoothing (alpha=0.35) to reduce magnetic noise while staying responsive

@@ -465,7 +465,7 @@ class _CommunityMapScreenState extends ConsumerState<CommunityMapScreen> {
   // Privacy Prompt: nur 1x pro Session fragen
   bool _hasBeenPromptedThisSession = false;
 
-  // ── Heading rotation (compass-based map bearing in 3D mode) ──
+  // ── Heading rotation (compass-based map bearing) ──
   StreamSubscription<double>? _headingSub;
   StreamSubscription<Position>? _headingGpsSub;
   double _currentHeading = 0;
@@ -1623,8 +1623,8 @@ class _CommunityMapScreenState extends ConsumerState<CommunityMapScreen> {
       _gpsActive = true;
       debugPrint('[Map] GPS activated');
 
-      // Start compass heading follow if in 3D mode
-      if (_is3D) _startHeadingFollow();
+      // Start compass heading follow (always active when GPS is on)
+      _startHeadingFollow();
 
       // ★ Eigenen PLZ-Marker entfernen (GPS-Marker übernimmt)
       _loadCommunityUsers();
@@ -3134,11 +3134,6 @@ class _CommunityMapScreenState extends ConsumerState<CommunityMapScreen> {
               if (drivingState.isActive) {
                 ref.read(drivingModeProvider.notifier).onUserPannedMap();
               }
-              // Pause heading follow on user pan/zoom
-              if (!_isProgrammaticMove && _headingFollowActive) {
-                _headingFollowTimer?.cancel();
-                _headingFollowTimer = null;
-              }
               // Auto-hide UI on user interaction
               _mapIdleTimer?.cancel();
               if (!_isProgrammaticMove && !_mapInteracting) {
@@ -3659,20 +3654,7 @@ class _CommunityMapScreenState extends ConsumerState<CommunityMapScreen> {
     if (_disposed || !mounted) return;
     setState(() => _is3D = !_is3D);
     _registerSpeedDialItems(); // Update labels
-    if (_currentPosition != null) {
-      _mapController?.animateCamera(CameraUpdate.newCameraPosition(CameraPosition(
-        target: LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
-        zoom: _is3D ? 18 : 15,
-        tilt: _is3D ? 65 : 0,
-        bearing: _is3D ? _currentHeading : 0,
-      )));
-    }
-    // Start/stop heading follow based on 3D mode
-    if (_is3D && _gpsActive) {
-      _startHeadingFollow();
-    } else {
-      _stopHeadingFollow();
-    }
+    // Camera zoom/tilt adapts automatically in heading follow timer
     // Auto-switch to satellite in 3D for better topography
     if (_is3D && _mapType == MapType.normal) {
       setState(() => _mapType = MapType.hybrid);
@@ -3681,18 +3663,19 @@ class _CommunityMapScreenState extends ConsumerState<CommunityMapScreen> {
 
   /// Start continuous heading rotation (compass-based map bearing).
   /// Uses HeadingSensorService with gyro+magnetometer fusion for smooth rotation.
+  /// Creates a dedicated high-frequency GPS stream (distanceFilter: 1m) for heading.
   void _startHeadingFollow() {
     if (_headingFollowActive) return;
     _headingFollowActive = true;
 
-    // Start sensor fusion
+    // Start sensor fusion (gyro + magnetometer)
     final headingService = HeadingSensorService.instance;
     headingService.start();
     _headingSub = headingService.headingStream.listen((heading) {
       _currentHeading = heading;
     });
 
-    // Feed GPS heading to sensor fusion from a dedicated position stream
+    // High-frequency GPS stream for heading data (1m filter = fast updates)
     _headingGpsSub?.cancel();
     _headingGpsSub = Geolocator.getPositionStream(
       locationSettings: const LocationSettings(
@@ -3713,7 +3696,7 @@ class _CommunityMapScreenState extends ConsumerState<CommunityMapScreen> {
     // 30fps camera rotation timer
     _headingFollowTimer?.cancel();
     _headingFollowTimer = Timer.periodic(const Duration(milliseconds: 33), (_) {
-      if (_disposed || !mounted || !_is3D || !_gpsActive) return;
+      if (_disposed || !mounted || !_gpsActive) return;
       if (_mapController == null || _currentPosition == null) return;
 
       final heading = HeadingSensorService.instance.isGyroAvailable
@@ -3721,24 +3704,19 @@ class _CommunityMapScreenState extends ConsumerState<CommunityMapScreen> {
           : (_currentPosition!.heading >= 0 ? _currentPosition!.heading : _currentHeading);
 
       _isProgrammaticMove = true;
-      _mapController!.moveCamera(
-        CameraUpdate.newCameraPosition(CameraPosition(
-          target: LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
-          zoom: 18,
-          tilt: 65,
-          bearing: heading,
-        )),
-      );
-      Future.delayed(const Duration(milliseconds: 50), () {
-        if (!_disposed) _isProgrammaticMove = false;
-      });
+      _mapController!.moveCamera(CameraUpdate.newCameraPosition(CameraPosition(
+        target: LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
+        zoom: _is3D ? 18 : 16,
+        tilt: _is3D ? 65 : 30,
+        bearing: heading,
+      )));
+      _isProgrammaticMove = false;
     });
     debugPrint('[Map] Heading follow started (3D compass rotation)');
   }
 
   /// Stop heading follow and reset to north-up.
   void _stopHeadingFollow() {
-    if (!_headingFollowActive) return;
     _headingFollowActive = false;
     _headingFollowTimer?.cancel();
     _headingFollowTimer = null;
@@ -3747,6 +3725,7 @@ class _CommunityMapScreenState extends ConsumerState<CommunityMapScreen> {
     _headingGpsSub?.cancel();
     _headingGpsSub = null;
     HeadingSensorService.instance.stop();
+    _isProgrammaticMove = false;
     debugPrint('[Map] Heading follow stopped');
   }
 

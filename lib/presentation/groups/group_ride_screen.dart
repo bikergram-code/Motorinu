@@ -725,12 +725,10 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
   }
 
   /// Start heading-follow timer for non-navigation mode.
-  /// Rotates map to match compass heading at 30fps without nav-specific
-  /// offset/tilt logic. Stops automatically when navigation starts.
+  /// Direct compass rotation at 30fps.
   void _startHeadingFollowTimer() {
     _headingFollowTimer?.cancel();
     _headingFollowTimer = Timer.periodic(const Duration(milliseconds: 33), (_) {
-      // Stop if navigation extrapolation is active or user panned away
       if (_isNavigating || _extrapolationTimer != null) return;
       if (!_isNavFollowing || _mapController == null) return;
       if (_currentGpsPos == null) return;
@@ -748,10 +746,7 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
           bearing: heading,
         )),
       );
-      // Allow onCameraMoveStarted after a short delay
-      Future.delayed(const Duration(milliseconds: 50), () {
-        _isProgrammaticMove = false;
-      });
+      _isProgrammaticMove = false;
     });
   }
 
@@ -3368,6 +3363,7 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
     // Stop non-nav heading follow (extrapolation timer takes over)
     _headingFollowTimer?.cancel();
     _headingFollowTimer = null;
+    _isProgrammaticMove = true; // Protect from onCameraMoveStarted during setup
     setState(() {
       _routePanelExpanded = false;
       _isNavFollowing = true;
