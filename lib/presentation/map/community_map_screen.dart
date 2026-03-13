@@ -70,12 +70,32 @@ Future<BitmapDescriptor> _getProfileNavIcon({
   final cacheKey = '${avatarUrl ?? 'fallback'}_${accentColor.value}';
   if (_navIconCache.containsKey(cacheKey)) return _navIconCache[cacheKey]!;
 
-  const double size = 128;
+  const double circleSize = 128;
+  const double arrowHeight = 36; // Arrow extends above circle
+  const double canvasWidth = circleSize;
+  const double canvasHeight = circleSize + arrowHeight;
   const borderColor = Color(0xFF00C853); // Leuchtgrün = Online
-  const center = Offset(size / 2, size / 2);
+  const center = Offset(canvasWidth / 2, arrowHeight + circleSize / 2);
 
   final recorder = ui.PictureRecorder();
-  final canvas = Canvas(recorder, const Rect.fromLTWH(0, 0, size, size));
+  final canvas = Canvas(recorder, const Rect.fromLTWH(0, 0, canvasWidth, canvasHeight));
+
+  // ── Direction arrow (chevron) pointing up ──
+  final arrowPaint = Paint()
+    ..color = const Color(0xFF2196F3) // Blue arrow
+    ..style = PaintingStyle.fill;
+  final arrowPath = Path()
+    ..moveTo(canvasWidth / 2, 0) // Tip (top center)
+    ..lineTo(canvasWidth / 2 - 18, arrowHeight + 4) // Bottom left
+    ..lineTo(canvasWidth / 2, arrowHeight - 8) // Inner notch
+    ..lineTo(canvasWidth / 2 + 18, arrowHeight + 4) // Bottom right
+    ..close();
+  canvas.drawPath(arrowPath, arrowPaint);
+  // Arrow border
+  canvas.drawPath(arrowPath, Paint()
+    ..color = Colors.white
+    ..style = PaintingStyle.stroke
+    ..strokeWidth = 2);
 
   // Try to load profile picture
   ui.Image? profileImage;
@@ -85,8 +105,8 @@ Future<BitmapDescriptor> _getProfileNavIcon({
       if (response.statusCode == 200) {
         final codec = await ui.instantiateImageCodec(
           response.bodyBytes,
-          targetWidth: size.toInt(),
-          targetHeight: size.toInt(),
+          targetWidth: circleSize.toInt(),
+          targetHeight: circleSize.toInt(),
         );
         final frame = await codec.getNextFrame();
         profileImage = frame.image;
@@ -97,27 +117,27 @@ Future<BitmapDescriptor> _getProfileNavIcon({
   }
 
   // Grüner Glow (Online)
-  canvas.drawCircle(center, size / 2,
+  canvas.drawCircle(center, circleSize / 2,
     Paint()
       ..color = borderColor.withValues(alpha: 0.35)
       ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4));
 
   // Grüner Rand (Online)
-  canvas.drawCircle(center, size / 2 - 4, Paint()..color = borderColor);
+  canvas.drawCircle(center, circleSize / 2 - 4, Paint()..color = borderColor);
 
   if (profileImage != null) {
     // Clip to circle and draw profile image
     canvas.save();
     final clipPath = Path()
-      ..addOval(Rect.fromCircle(center: center, radius: size / 2 - 10));
+      ..addOval(Rect.fromCircle(center: center, radius: circleSize / 2 - 10));
     canvas.clipPath(clipPath);
     final srcRect = Rect.fromLTWH(0, 0, profileImage.width.toDouble(), profileImage.height.toDouble());
-    final dstRect = Rect.fromCircle(center: center, radius: size / 2 - 10);
+    final dstRect = Rect.fromCircle(center: center, radius: circleSize / 2 - 10);
     canvas.drawImageRect(profileImage, srcRect, dstRect, Paint());
     canvas.restore();
   } else {
     // Fallback: white circle with vehicle icon
-    canvas.drawCircle(center, size / 2 - 10, Paint()..color = Colors.white);
+    canvas.drawCircle(center, circleSize / 2 - 10, Paint()..color = Colors.white);
     final iconData = communityKey == 'bikergram'
         ? Icons.two_wheeler_rounded
         : Icons.directions_car_rounded;
@@ -132,23 +152,24 @@ Future<BitmapDescriptor> _getProfileNavIcon({
         ),
       )
       ..layout();
-    tp.paint(canvas, Offset((size - tp.width) / 2, (size - tp.height) / 2));
+    tp.paint(canvas, Offset((canvasWidth - tp.width) / 2, (arrowHeight + (circleSize - tp.height) / 2)));
   }
 
   // Weißer Innenring
-  canvas.drawCircle(center, size / 2 - 8,
+  canvas.drawCircle(center, circleSize / 2 - 8,
     Paint()..color = Colors.white..style = PaintingStyle.stroke..strokeWidth = 3);
 
   // Grüner Außenring (prominent)
-  canvas.drawCircle(center, size / 2 - 3,
+  canvas.drawCircle(center, circleSize / 2 - 3,
     Paint()..color = borderColor..style = PaintingStyle.stroke..strokeWidth = 5);
 
   final picture = recorder.endRecording();
-  final image = await picture.toImage(size.toInt(), size.toInt());
+  final image = await picture.toImage(canvasWidth.toInt(), canvasHeight.toInt());
   final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
   final bytes = byteData!.buffer.asUint8List();
 
-  final descriptor = BitmapDescriptor.bytes(bytes, width: 48, height: 48);
+  // Anchor at circle center (not image center) so GPS position aligns correctly
+  final descriptor = BitmapDescriptor.bytes(bytes, width: 48, height: (48 * canvasHeight / canvasWidth).round().toDouble());
   _navIconCache[cacheKey] = descriptor;
   return descriptor;
 }
@@ -752,9 +773,9 @@ class _CommunityMapScreenState extends ConsumerState<CommunityMapScreen> {
         markerId: const MarkerId('my_vehicle'),
         position: LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
         icon: ownIcon,
-        rotation: 0,
-        anchor: const Offset(0.5, 0.5),
-        flat: !ownSos,
+        rotation: _currentHeading,
+        anchor: const Offset(0.5, 0.72), // Circle center (below arrow)
+        flat: true,
         zIndex: ownSos ? 100 : 30,
         // Bei SOS ohne SOS-Icon: Sichtbarkeit blinken
         visible: ownSos && _sosUserIcons[Supabase.instance.client.auth.currentUser?.id] == null
@@ -3693,34 +3714,28 @@ class _CommunityMapScreenState extends ConsumerState<CommunityMapScreen> {
       _currentPosition = pos;
     });
 
-    // 10fps camera rotation timer — only updates when heading changed > 1°
-    // Lower frequency prevents marker rendering issues
+    // 10fps heading timer — rotates user marker only, map stays north-up
     double _lastBearing = -999;
     _headingFollowTimer?.cancel();
     _headingFollowTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
       if (_disposed || !mounted || !_gpsActive) return;
-      if (_mapController == null || _currentPosition == null) return;
+      if (_currentPosition == null) return;
 
       final heading = HeadingSensorService.instance.isGyroAvailable
           ? _currentHeading
           : (_currentPosition!.heading >= 0 ? _currentPosition!.heading : _currentHeading);
 
-      // Skip if heading barely changed (< 1°) — saves GPU and lets markers render
+      // Skip if heading barely changed (< 3°)
       var diff = (heading - _lastBearing).abs();
       if (diff > 180) diff = 360 - diff;
-      if (diff < 1.0 && _lastBearing != -999) return;
+      if (diff < 3.0 && _lastBearing != -999) return;
       _lastBearing = heading;
 
-      _isProgrammaticMove = true;
-      _mapController!.moveCamera(CameraUpdate.newCameraPosition(CameraPosition(
-        target: LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
-        zoom: _is3D ? 18 : 16,
-        tilt: _is3D ? 65 : 30,
-        bearing: heading,
-      )));
-      _isProgrammaticMove = false;
+      // Update marker rotation only (north-up map)
+      _rebuildCachedMarkers();
+      if (mounted && !_disposed) setState(() {});
     });
-    debugPrint('[Map] Heading follow started (3D compass rotation)');
+    debugPrint('[Map] Heading follow started (marker rotation, north-up)');
   }
 
   /// Stop heading follow and reset to north-up.

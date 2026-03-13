@@ -690,22 +690,13 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
           ? _fusedHeading
           : _lerpAngle(_prevHeading, _targetHeading, t.clamp(0.0, 1.0));
 
-      // Adjust camera for landscape: less tilt, zoom out, less offset
-      final isLandscape = MediaQuery.of(context).size.width >
-          MediaQuery.of(context).size.height;
-      final navTilt = isLandscape ? 45.0 : 60.0;
-      final navZoom = isLandscape ? 17.0 : 18.0;
-      final navOffset = isLandscape ? 80.0 : 150.0;
-
-      final cameraTarget = _offsetPositionAhead(
-          _interpolatedPos!, _interpolatedHeading, navOffset);
-
+      // North-up: camera follows position, marker rotates for heading
       _mapController!.moveCamera(
         CameraUpdate.newCameraPosition(gmaps.CameraPosition(
-          target: cameraTarget,
-          zoom: navZoom,
-          tilt: navTilt,
-          bearing: _interpolatedHeading,
+          target: _interpolatedPos!,
+          zoom: 17.0,
+          tilt: 0,
+          bearing: 0,
         )),
       );
 
@@ -726,37 +717,27 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
   }
 
   /// Start heading-follow timer for non-navigation mode.
-  /// 10fps with 1° threshold — prevents marker rendering issues.
+  /// 10fps marker rotation — rotates user marker, map stays north-up.
   void _startHeadingFollowTimer() {
     double lastBearing = -999;
     _headingFollowTimer?.cancel();
     _headingFollowTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
       if (_isNavigating || _extrapolationTimer != null) return;
-      if (!_isNavFollowing || _mapController == null) return;
       if (_currentGpsPos == null) return;
 
       final heading = HeadingSensorService.instance.isGyroAvailable
           ? _fusedHeading
           : _currentHeading;
 
-      // Skip if heading barely changed (< 1°)
+      // Skip if heading barely changed (< 3°) — reduces marker rebuilds
       var diff = (heading - lastBearing).abs();
       if (diff > 180) diff = 360 - diff;
-      if (diff < 1.0 && lastBearing != -999) return;
+      if (diff < 3.0 && lastBearing != -999) return;
       lastBearing = heading;
 
-      _isProgrammaticMove = true;
-      _lastProgrammaticMoveTime = DateTime.now();
-      _mapController!.moveCamera(
-        CameraUpdate.newCameraPosition(gmaps.CameraPosition(
-          target: _currentGpsPos!,
-          zoom: 17.0,
-          tilt: 50.0,
-          bearing: heading,
-        )),
-      );
-      // Don't reset _isProgrammaticMove synchronously — onCameraMoveStarted
-      // fires asynchronously and would see false. Use timestamp instead.
+      // Update heading for marker rotation (map stays north-up)
+      _currentHeading = heading;
+      if (mounted) setState(() {});
     });
   }
 
@@ -1000,7 +981,7 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
         markerId: const MarkerId('my_vehicle'),
         position: markerPos,
         icon: _navVehicleIcon!,
-        anchor: const Offset(0.5, 0.5),
+        anchor: const Offset(0.5, 0.7), // Circle center (below arrow)
         rotation: markerHeading,
         flat: true,
         zIndex: 100,
@@ -1093,8 +1074,8 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
       initialCameraPosition: gmaps.CameraPosition(
         target: startPos,
         zoom: startZoom,
-        tilt: 50, // Waze-style perspective tilt
-        bearing: _currentHeading,
+        tilt: 0,
+        bearing: 0,
       ),
       markers: markers,
       polylines: polylines,
@@ -3447,17 +3428,13 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
         _targetGpsTime = DateTime.now();
       }
       _isProgrammaticMove = true;
-      final isLandscape = MediaQuery.of(context).size.width >
-          MediaQuery.of(context).size.height;
-      final ct = _offsetPositionAhead(
-          _currentGpsPos!, initBearing, isLandscape ? 80 : 150);
       _mapController!.animateCamera(
         CameraUpdate.newCameraPosition(
           gmaps.CameraPosition(
-            target: ct,
-            zoom: isLandscape ? 17.0 : 18.0,
-            tilt: isLandscape ? 45 : 60,
-            bearing: initBearing,
+            target: _currentGpsPos!,
+            zoom: 17.0,
+            tilt: 0,
+            bearing: 0,
           ),
         ),
       );
