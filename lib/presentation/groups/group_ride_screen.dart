@@ -120,6 +120,8 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
   bool _isNavFollowing = true; // auto-follow with heading rotation
   bool _isProgrammaticMove = false;
   DateTime _lastProgrammaticMoveTime = DateTime.fromMillisecondsSinceEpoch(0);
+  bool _userTouchingMap = false; // true while user finger is on map
+  double _currentZoom = 17.0; // track zoom level so we can preserve it
   bool _isNavigating = false; // true after user taps "LOS!"
   bool _navUiHidden = false; // true = hide search/buttons during navigation
   Timer? _navUiShowTimer; // auto-hide UI after tap
@@ -412,8 +414,10 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
               _wakeWordTriggered = false;
               _listenText = text;
             });
-            // Off-route answer has highest priority (Ja/Nein without wake word)
-            if (_awaitingOffRouteAnswer) {
+            // Nav voice commands ("Zurück", "Navigation beenden") — highest priority
+            if (_handleNavVoiceCommand(text)) {
+              // handled
+            } else if (_awaitingOffRouteAnswer) {
               _handleOffRouteVoiceAnswer(text);
             } else if (_pendingBlitzerType) {
               _handleBlitzerTypeVoiceChoice(text);
@@ -474,8 +478,8 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
 
     _headingGpsSub = Geolocator.getPositionStream(
       locationSettings: const LocationSettings(
-        accuracy: LocationAccuracy.high,
-        distanceFilter: 1, // 1m for maximum GPS frequency during navigation
+        accuracy: LocationAccuracy.bestForNavigation, // Max: GPS+WLAN+Cell+Sensors
+        distanceFilter: 1, // 1m between fixes
       ),
     ).listen((pos) {
       if (!mounted) return;
@@ -486,8 +490,8 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
       final speedKmh = smoothed.smoothedSpeed; // Kalman-EMA smoothed
       final rawSpeedKmh = pos.speed * 3.6;
 
-      // Skip very bad GPS fixes (accuracy > 50m) for navigation
-      if (pos.accuracy > 50) return;
+      // Skip bad GPS fixes (accuracy > 25m) for navigation
+      if (pos.accuracy > 25) return;
 
       // Feed GPS heading + speed to sensor fusion service
       HeadingSensorService.instance.updateFromGps(
@@ -528,18 +532,17 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
       _smoothedSpeed = speedKmh;
       _displaySpeed = speedKmh < 3 ? 0 : speedKmh;
 
-      // ── Camera moves via interpolation timer (60fps) — NOT here ──
-      // Only move camera here if NOT navigating (no interpolation needed)
-      if (!_isNavFollowing && _mapController != null && !_isNavigating) {
-        // Non-nav mode: just follow GPS directly
-      }
+      // Camera follow is handled by the extrapolation timer (~3.3Hz)
 
-      // Throttle UI rebuilds: 20/sec during navigation, 4/sec otherwise
-      final now = DateTime.now();
-      final throttleMs = _isNavigating ? 50 : 250;
-      if (now.difference(_lastUiUpdate).inMilliseconds > throttleMs) {
-        _lastUiUpdate = now;
-        setState(() {}); // Minimal rebuild for speed display + marker position
+      // Throttle UI rebuilds — skip entirely while user is touching the map
+      // (setState rebuilds GoogleMap widget which kills pinch/pan gestures)
+      if (!_userTouchingMap) {
+        final now = DateTime.now();
+        final throttleMs = _isNavigating ? 50 : 250;
+        if (now.difference(_lastUiUpdate).inMilliseconds > throttleMs) {
+          _lastUiUpdate = now;
+          setState(() {}); // Minimal rebuild for speed display + marker position
+        }
       }
 
       // NOTE: Off-route check + speed limit queries moved to _navPeriodicTimer
@@ -566,12 +569,14 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
 
   /// Announce upcoming turns via TTS — multi-level announcements like Waze/Maps.
   ///
-  /// Announcement levels:
-  /// 1. After completing a step: "Weiter für 1,6 km geradeaus, dann links abbiegen"
-  /// 2. 200m before turn: "In 200 Metern, links abbiegen"
-  /// 3. 50m before turn: "Jetzt links abbiegen"
-  /// 4. Arrival: "Du hast dein Ziel erreicht"
-  int _lastEarlyAnnouncedIdx = -1; // for the "weiter für X km" announcement
+  /// Announcement levels (motorcycle-optimized: earlier = safer):
+  /// 1. After completing a step: "Weiter für 1,6 km, dann links auf Mülheimer Straße"
+  /// 2. 800m pre-warning: "In 800 Metern links abbiegen auf Berliner Straße"
+  /// 3. 300m pre-announcement: "In 300 Metern links abbiegen"
+  /// 4. 50m now-announcement: "Jetzt links abbiegen"
+  /// 5. Arrival: "Du hast dein Ziel erreicht"
+  int _lastEarlyAnnouncedIdx = -1;
+  int _lastFarPreAnnouncedIdx = -1; // 800m pre-warning
 
   void _announceNextStep(LatLng pos) {
     if (_currentRoute == null || _currentRoute!.steps.isEmpty) return;
@@ -584,6 +589,10 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
       // Skip "depart" maneuver
       if (step.maneuver == 'depart') continue;
 
+      // Build instruction with road name if available
+      final roadInfo = step.roadName != null && step.roadName!.isNotEmpty
+          ? ' auf ${step.roadName}' : '';
+
       // ── Arrival announcement ──
       if (step.maneuver == 'arrive' && distToStep < 50) {
         _lastAnnouncedStepIndex = i;
@@ -592,23 +601,30 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
       }
 
       // ── Level 1: Early announcement when entering a long segment ──
-      // "Weiter für 1,6 km geradeaus, dann links abbiegen"
-      if (distToStep > 300 && i != _lastEarlyAnnouncedIdx) {
-        // Check if we just passed the previous step (within 80m of previous step's location)
+      if (distToStep > 500 && i != _lastEarlyAnnouncedIdx) {
         final prevStepDist = i > 1 ? _distLatLng(pos, steps[i - 1].location) : 999.0;
         if (prevStepDist < 80) {
           _lastEarlyAnnouncedIdx = i;
           final distText = _formatDistance(distToStep);
-          final instruction = step.instruction;
           TtsAlertService.instance.speakText(
-            'Weiter für $distText, dann $instruction',
+            'Weiter für $distText, dann ${step.instruction}$roadInfo',
           );
           return;
         }
       }
 
-      // ── Level 2: 200m pre-announcement ──
-      if (distToStep < 200 && distToStep > 80 && i != _lastPreAnnouncedIdx) {
+      // ── Level 2: 800m far pre-warning (motorcycle needs early notice) ──
+      if (distToStep < 800 && distToStep > 400 && i != _lastFarPreAnnouncedIdx) {
+        _lastFarPreAnnouncedIdx = i;
+        final distRounded = (distToStep / 100).round() * 100;
+        TtsAlertService.instance.speakText(
+          'In $distRounded Metern, ${step.instruction}$roadInfo',
+        );
+        return;
+      }
+
+      // ── Level 3: 300m pre-announcement ──
+      if (distToStep < 300 && distToStep > 80 && i != _lastPreAnnouncedIdx) {
         _lastPreAnnouncedIdx = i;
         final distRounded = (distToStep / 50).round() * 50;
         TtsAlertService.instance.speakText(
@@ -617,7 +633,7 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
         return;
       }
 
-      // ── Level 3: 50m now-announcement ──
+      // ── Level 4: 50m now-announcement ──
       if (distToStep < 50) {
         _lastAnnouncedStepIndex = i;
         TtsAlertService.instance.speakText('Jetzt ${step.instruction}');
@@ -665,47 +681,60 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
   void _startExtrapolationTimer() {
     _extrapolationTimer?.cancel();
     _frameCount = 0;
-    // Keep _isProgrammaticMove=true while nav following is active
-    // to prevent onCameraMoveStarted from disabling follow mode
     _isProgrammaticMove = true;
-    _extrapolationTimer = Timer.periodic(const Duration(milliseconds: 16), (_) {
-      if (!_isNavFollowing || _mapController == null) return;
-      if (_prevGpsPos == null || _targetGpsPos == null) return;
 
-      final gpsInterval = _targetGpsTime.difference(_prevGpsTime).inMilliseconds;
-      if (gpsInterval <= 0) return;
-      final elapsed = DateTime.now().difference(_prevGpsTime).inMilliseconds;
-      // t: 0.0 = prev GPS fix, 1.0 = target GPS fix, >1.0 = extrapolation beyond
-      final t = (elapsed / gpsInterval).clamp(0.0, 1.5);
+    // ── 10fps timer: marker rotation + camera follow (every 3rd tick = ~3.3Hz) ──
+    _extrapolationTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
+      if (_mapController == null) return;
 
-      // Lerp position between prev and target GPS
-      final lat = _prevGpsPos!.latitude +
-          (_targetGpsPos!.latitude - _prevGpsPos!.latitude) * t;
-      final lng = _prevGpsPos!.longitude +
-          (_targetGpsPos!.longitude - _prevGpsPos!.longitude) * t;
-      _interpolatedPos = LatLng(lat, lng);
+      // ── Heading: use GPS heading when driving, compass when stationary ──
+      if (_gpsSpeedKmh > 5 && _targetHeading >= 0) {
+        // At speed: GPS heading is more reliable than magnetometer
+        _interpolatedHeading = _targetHeading;
+      } else {
+        // Stationary: use fused compass heading for marker rotation
+        _interpolatedHeading = _fusedHeading;
+      }
 
-      // Heading: use gyro-fused heading (50Hz) if available, else lerp GPS
-      _interpolatedHeading = HeadingSensorService.instance.isGyroAvailable
-          ? _fusedHeading
-          : _lerpAngle(_prevHeading, _targetHeading, t.clamp(0.0, 1.0));
+      // Interpolate position between GPS fixes for smooth marker movement
+      if (_prevGpsPos != null && _targetGpsPos != null) {
+        final gpsInterval = _targetGpsTime.difference(_prevGpsTime).inMilliseconds;
+        if (gpsInterval > 0) {
+          final elapsed = DateTime.now().difference(_prevGpsTime).inMilliseconds;
+          final t = (elapsed / gpsInterval).clamp(0.0, 1.5);
+          final lat = _prevGpsPos!.latitude +
+              (_targetGpsPos!.latitude - _prevGpsPos!.latitude) * t;
+          final lng = _prevGpsPos!.longitude +
+              (_targetGpsPos!.longitude - _prevGpsPos!.longitude) * t;
+          _interpolatedPos = LatLng(lat, lng);
+        }
+      }
 
-      // North-up: camera follows position, marker rotates for heading
-      _mapController!.moveCamera(
-        CameraUpdate.newCameraPosition(gmaps.CameraPosition(
-          target: _interpolatedPos!,
-          zoom: 17.0,
-          tilt: 0,
-          bearing: 0,
-        )),
-      );
+      final pos = _interpolatedPos ?? _currentGpsPos;
 
-      // Update marker position every ~100ms (6 frames) to keep vehicle icon synced
+      // ── Camera follow every 3rd tick (~3.3Hz) — smooth but not blocking ──
       _frameCount++;
-      if (_frameCount % 6 == 0 && mounted) {
-        setState(() {}); // Triggers _buildMarkers → marker uses _interpolatedPos
+      if (_isNavFollowing && !_userTouchingMap && pos != null && _frameCount % 3 == 0) {
+        _navCameraFollow(pos);
+      }
+
+      // setState for marker rotation
+      if (mounted && !_userTouchingMap) {
+        setState(() {});
       }
     });
+  }
+
+  /// Move camera to follow user — always offset so user sits at bottom center.
+  void _navCameraFollow(LatLng pos) {
+    if (_mapController == null || !_isNavFollowing) return;
+    // When driving: offset in travel direction. When stationary: offset north.
+    final heading = _gpsSpeedKmh > 5 ? _targetHeading : 0.0;
+    final cameraCenter = _offsetPositionAhead(pos, heading, 210);
+    _lastProgrammaticMoveTime = DateTime.now();
+    _mapController!.moveCamera(
+      CameraUpdate.newLatLngZoom(cameraCenter, _currentZoom),
+    );
   }
 
   /// Linearly interpolate between two angles via shortest arc.
@@ -737,7 +766,20 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
 
       // Update heading for marker rotation (map stays north-up)
       _currentHeading = heading;
-      if (mounted) setState(() {});
+
+      // Center camera on user position (north-up, no rotation)
+      if (_isNavFollowing && _mapController != null && !_userTouchingMap) {
+        _isProgrammaticMove = true;
+        _lastProgrammaticMoveTime = DateTime.now();
+        _mapController!.moveCamera(
+          CameraUpdate.newLatLng(_currentGpsPos!),
+        );
+        Future.delayed(const Duration(milliseconds: 200), () {
+          _isProgrammaticMove = false;
+        });
+      }
+
+      if (mounted && !_userTouchingMap) setState(() {});
     });
   }
 
@@ -1070,7 +1112,20 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
     final startPos = _initialPosition ?? const LatLng(51.16, 10.45);
     final startZoom = _initialPosition != null ? 15.0 : 6.0;
 
-    return GoogleMap(
+    return Listener(
+      onPointerDown: (_) => _userTouchingMap = true,
+      onPointerUp: (_) {
+        // Small delay so onCameraMoveStarted fires while flag is still true
+        Future.delayed(const Duration(milliseconds: 300), () {
+          _userTouchingMap = false;
+        });
+      },
+      onPointerCancel: (_) {
+        Future.delayed(const Duration(milliseconds: 300), () {
+          _userTouchingMap = false;
+        });
+      },
+      child: GoogleMap(
       initialCameraPosition: gmaps.CameraPosition(
         target: startPos,
         zoom: startZoom,
@@ -1085,6 +1140,7 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
       compassEnabled: false,
       mapToolbarEnabled: false,
       mapType: MapType.normal,
+      padding: EdgeInsets.zero,
       style: _darkMapStyle,
       onMapCreated: (controller) {
         _mapController = controller;
@@ -1092,22 +1148,15 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
       },
       // Detect user panning/zooming → pause auto-follow + hide UI
       onCameraMoveStarted: () {
-        // Check both the flag AND the timestamp — the heading follow timer
-        // sets _isProgrammaticMove=true but moveCamera fires onCameraMoveStarted
-        // asynchronously, after the synchronous code path completes.
-        final msSinceLastProgrammatic = DateTime.now()
-            .difference(_lastProgrammaticMoveTime)
-            .inMilliseconds;
-        final isProgrammatic = _isProgrammaticMove || msSinceLastProgrammatic < 200;
-        if (!isProgrammatic) {
+        // Only react to user finger touches — not programmatic animateCamera
+        if (_userTouchingMap) {
           if (_isNavFollowing) setState(() => _isNavFollowing = false);
-          // Hide UI during interaction (smooth effect)
           _mapIdleTimer?.cancel();
           if (!_mapInteracting) setState(() => _mapInteracting = true);
         }
       },
-      onCameraMove: (_) {
-        // Keep hiding while user is still moving
+      onCameraMove: (pos) {
+        _currentZoom = pos.zoom; // Track zoom so we preserve it
         _mapIdleTimer?.cancel();
       },
       // Camera stopped moving → show UI again (debounced)
@@ -1128,7 +1177,8 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
           return;
         }
       },
-    );
+    ),
+    ); // end Listener
   }
 
   /// Build polylines with caching — only rebuild when route/alternatives change.
@@ -3427,22 +3477,21 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
         _prevGpsTime = DateTime.now();
         _targetGpsTime = DateTime.now();
       }
+      // North-up: user at bottom center, offset in route direction
       _isProgrammaticMove = true;
-      _mapController!.animateCamera(
+      _lastProgrammaticMoveTime = DateTime.now();
+      _currentZoom = 17.0;
+      _mapController!.moveCamera(
         CameraUpdate.newCameraPosition(
           gmaps.CameraPosition(
-            target: _currentGpsPos!,
+            target: _offsetPositionAhead(_currentGpsPos!, initBearing, 210),
             zoom: 17.0,
             tilt: 0,
             bearing: 0,
           ),
         ),
       );
-      // Start extrapolation timer AFTER initial camera animation finishes
-      Future.delayed(const Duration(milliseconds: 1200), () {
-        _isProgrammaticMove = false;
-        if (mounted && _isNavigating) _startExtrapolationTimer();
-      });
+      _startExtrapolationTimer();
     } else {
       // No GPS → start interpolation immediately
       _startExtrapolationTimer();
@@ -3521,6 +3570,8 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
       _nextTurnDistanceM = 0;
       _offRouteCount = 0;
       _offRouteAsked = false;
+      _offRouteWarned = false;
+      _lastOnRoutePos = _currentGpsPos;
       _routePanelExpanded = false;
       _isLoadingRouteInfo = false;
       _cachedRouteStepWidgets = null;
@@ -3623,30 +3674,60 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
     }
   }
 
-  /// Check if user is off-route. After 3 consecutive fixes:
-  /// 1. Ask via TTS "Hast du etwas vergessen? Neue Route wird berechnet."
-  /// 2. Auto-reroute after short delay.
-  bool _offRouteAsked = false; // prevents repeating the question during reroute
+  /// Off-route detection — 2-stage system:
+  /// Stage 1 (3s off-route): TTS warning "Du hast die Route verlassen"
+  /// Stage 2 (8s off-route): Auto-reroute + "Route wird neu berechnet"
+  /// User can say "Zurück" to go back or "Navigation beenden" to stop.
+  bool _offRouteAsked = false;
+  bool _offRouteWarned = false; // stage 1 warning given
+  LatLng? _lastOnRoutePos; // last position that was on the route
+
   void _checkOffRoute(LatLng pos) {
     if (_currentRoute == null || _isCalculatingRoute) return;
     final dist = _minDistanceToRoute(pos);
     if (dist > 40) {
       _offRouteCount++;
-      if (_offRouteCount >= 3 && !_offRouteAsked) {
+
+      // ── Stage 1: Warning after 3 consecutive off-route fixes (~3s) ──
+      if (_offRouteCount >= 3 && !_offRouteWarned) {
+        _offRouteWarned = true;
+        debugPrint('[Nav] Off-route warning (${dist.toStringAsFixed(0)}m off)');
+        TtsAlertService.instance.speakPriority(
+          'Du hast die Route verlassen.',
+        );
+      }
+
+      // ── Stage 2: Auto-reroute after 8 consecutive fixes (~8s) ──
+      if (_offRouteCount >= 8 && !_offRouteAsked) {
         _offRouteAsked = true;
         _offRouteCount = 0;
-        final group = ref.read(groupRideProvider(widget.groupId)).group;
-        if (group?.destinationLat != null && group?.destinationLng != null) {
-          debugPrint('[Nav] Off-route detected! Asking via TTS + voice...');
-          _askOffRouteVoice(
-            LatLng(group!.destinationLat!, group!.destinationLng!),
+        final dest = _getNavDestination();
+        if (dest != null) {
+          debugPrint('[Nav] Auto-reroute triggered (${dist.toStringAsFixed(0)}m off for 8s)');
+          TtsAlertService.instance.speakText(
+            'Route wird neu berechnet.',
           );
+          _rerouteFromCurrentPosition(pos, dest);
         }
       }
     } else {
+      // Back on route — save position and reset counters
+      _lastOnRoutePos = pos;
       _offRouteCount = 0;
-      _offRouteAsked = false; // back on route, allow future reroute questions
+      _offRouteWarned = false;
+      _offRouteAsked = false;
     }
+  }
+
+  /// Get navigation destination from group or route endpoint.
+  LatLng? _getNavDestination() {
+    final group = ref.read(groupRideProvider(widget.groupId)).group;
+    if (group?.destinationLat != null && group?.destinationLng != null) {
+      return LatLng(group!.destinationLat!, group!.destinationLng!);
+    } else if (_currentRoute != null && _currentRoute!.polylinePoints.isNotEmpty) {
+      return _currentRoute!.polylinePoints.last;
+    }
+    return null;
   }
 
   /// Ask user via TTS + Vosk voice recognition if they want to reroute.
@@ -3714,6 +3795,32 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
       _offRouteAsked = false;
       _offRouteCount = 0;
     }
+  }
+
+  /// Handle voice commands during navigation (called from Vosk handler).
+  /// Returns true if the command was handled.
+  bool _handleNavVoiceCommand(String text) {
+    if (!_isNavigating) return false;
+    final lower = text.toLowerCase().trim();
+
+    // "Zurück" — reroute back to last on-route position, then to destination
+    if (lower.contains('zurück') || lower.contains('umdrehen') || lower.contains('umkehren')) {
+      if (_lastOnRoutePos != null && _currentGpsPos != null) {
+        TtsAlertService.instance.speakText('Wird zurück zur Route berechnet.');
+        _rerouteFromCurrentPosition(_currentGpsPos!, _getNavDestination() ?? _lastOnRoutePos!);
+      }
+      return true;
+    }
+
+    // "Navigation beenden" / "Stopp" — end navigation
+    if (lower.contains('navigation beenden') || lower.contains('navi beenden') ||
+        lower.contains('stopp navigation') || lower.contains('navi stopp')) {
+      TtsAlertService.instance.speakText('Navigation wird beendet.');
+      _stopNavigation();
+      return true;
+    }
+
+    return false;
   }
 
   /// Reroute from current GPS position — recalculates route line immediately.
@@ -4306,22 +4413,17 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
                   _fitCameraToRoute(_currentRoute!); // sets _isNavFollowing = false
                 } else if (_currentRoute != null) {
                   // Currently in route overview → switch to driving view
-                  // Set programmatic flag BEFORE setState to prevent onCameraMoveStarted race
-                  _isProgrammaticMove = true;
-                  setState(() => _isNavFollowing = true);
-                  // The extrapolation timer (16ms) will now pick up _isNavFollowing=true
-                  // and move the camera with tilt/bearing/zoom. Give it time.
-                  Future.delayed(const Duration(milliseconds: 500), () {
-                    _isProgrammaticMove = false;
-                  });
+                  _isNavFollowing = true;
+                  _currentZoom = 17.0;
+                  setState(() {});
+                  // Immediately move camera to current GPS position
+                  if (_currentGpsPos != null && _mapController != null) {
+                    _navCameraFollow(_currentGpsPos!);
+                  }
                 } else if (_currentGpsPos != null && _mapController != null) {
                   // No route → re-center with heading follow
-                  _isProgrammaticMove = true;
                   setState(() => _isNavFollowing = true);
                   _startHeadingFollowTimer();
-                  Future.delayed(const Duration(milliseconds: 500), () {
-                    _isProgrammaticMove = false;
-                  });
                 } else {
                   final rs = ref.read(groupRideProvider(widget.groupId));
                   _centerOnGroup(rs);
@@ -4366,7 +4468,9 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
   Widget _zoomButton(IconData icon, double zoomDelta) {
     return GestureDetector(
       onTap: () {
-        _mapController?.animateCamera(CameraUpdate.zoomBy(zoomDelta));
+        _currentZoom = (_currentZoom + zoomDelta).clamp(5.0, 20.0);
+        // Apply zoom immediately via animateCamera
+        _mapController?.animateCamera(CameraUpdate.zoomTo(_currentZoom));
       },
       child: Container(
         width: 40, height: 40,

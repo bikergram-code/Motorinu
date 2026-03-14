@@ -264,10 +264,12 @@ class MarkerIconService {
     final cacheKey = 'nav_${modeKey}_${avatarUrl ?? displayName}';
     if (_navVehicleCache.containsKey(cacheKey)) return _navVehicleCache[cacheKey]!;
 
-    const double size = 160; // larger to fit profile + badge
+    const double circleArea = 160;
+    const double arrowH = 20; // Small nose arrow flush with circle
+    const double size = circleArea + arrowH;
     final recorder = ui.PictureRecorder();
-    final canvas = Canvas(recorder, const Rect.fromLTWH(0, 0, size, size));
-    const center = Offset(size / 2, size / 2 - 6); // offset up for badge room
+    final canvas = Canvas(recorder, const Rect.fromLTWH(0, 0, circleArea, size));
+    const center = Offset(circleArea / 2, arrowH + circleArea / 2 - 6);
 
     final profileImage = await _loadAvatar(avatarUrl, size.toInt());
 
@@ -327,7 +329,7 @@ class MarkerIconService {
         ..strokeWidth = 4);
 
     // ── Vehicle mode badge at bottom ──
-    const badgeCenter = Offset(size / 2, size - 22);
+    final badgeCenter = Offset(circleArea / 2, arrowH + circleArea - 32);
     // White outline circle
     canvas.drawCircle(badgeCenter, 20, Paint()..color = Colors.white);
     // Colored circle
@@ -345,28 +347,27 @@ class MarkerIconService {
         badgeCenter.dx - vehicleTp.width / 2,
         badgeCenter.dy - vehicleTp.height / 2));
 
-    // Small navigation arrow indicator at top
-    const arrowCenter = Offset(size / 2, 10);
+    // ── Direction nose arrow flush with circle top ──
     final arrowPath = Path()
-      ..moveTo(arrowCenter.dx, arrowCenter.dy - 8)
-      ..lineTo(arrowCenter.dx + 7, arrowCenter.dy + 5)
-      ..lineTo(arrowCenter.dx, arrowCenter.dy + 1)
-      ..lineTo(arrowCenter.dx - 7, arrowCenter.dy + 5)
+      ..moveTo(circleArea / 2, 0) // Tip
+      ..lineTo(circleArea / 2 - 14, arrowH + 2) // Bottom left
+      ..lineTo(circleArea / 2, arrowH - 4) // Inner notch
+      ..lineTo(circleArea / 2 + 14, arrowH + 2) // Bottom right
       ..close();
     canvas.drawPath(arrowPath, Paint()..color = modeColor);
     canvas.drawPath(arrowPath,
       Paint()
         ..color = Colors.white
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 1.5
+        ..strokeWidth = 2
         ..strokeJoin = StrokeJoin.round);
 
     final picture = recorder.endRecording();
-    final image = await picture.toImage(size.toInt(), size.toInt());
+    final image = await picture.toImage(circleArea.toInt(), size.toInt());
     final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
     final bytes = byteData!.buffer.asUint8List();
 
-    final descriptor = BitmapDescriptor.bytes(bytes, width: 56, height: 56);
+    final descriptor = BitmapDescriptor.bytes(bytes, width: 56, height: (56 * size / circleArea).round().toDouble());
     _navVehicleCache[cacheKey] = descriptor;
     _evictIfNeeded(_navVehicleCache);
     return descriptor;

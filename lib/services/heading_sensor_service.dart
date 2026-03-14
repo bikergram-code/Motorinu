@@ -225,8 +225,8 @@ class HeadingSensorService {
       // Stationary/walking: fuse gyro with magnetometer if available
       if (_magnetHeading != null) {
         final gyroHeading = _fusedHeading + yawDeg;
-        // Lower speed → trust magnetometer more (walking: 0.85, standstill: 0.80)
-        final alpha = _gpsSpeed < 1 ? 0.80 : 0.85;
+        // Lower speed → trust magnetometer more (walking: 0.75, standstill: 0.65)
+        final alpha = _gpsSpeed < 1 ? 0.65 : 0.75;
         _fusedHeading = _complementaryFilter(gyroHeading, _magnetHeading!, alpha: alpha);
       } else {
         // No magnetometer: just integrate gyro (will drift, but short-term OK)
@@ -294,14 +294,14 @@ class HeadingSensorService {
     var heading = atan2(eny, nny) * (180 / pi);
     if (heading < 0) heading += 360;
 
-    // EMA smoothing (alpha=0.35) to reduce magnetic noise while staying responsive
+    // EMA smoothing (alpha=0.5) to reduce magnetic noise while staying responsive
     if (!_magnetInitialized) {
       _magnetSmoothed = heading;
       _magnetInitialized = true;
     } else {
       // Circular EMA
       final diff = _angleDiff(_magnetSmoothed, heading);
-      _magnetSmoothed = (_magnetSmoothed + 0.35 * diff) % 360;
+      _magnetSmoothed = (_magnetSmoothed + 0.50 * diff) % 360;
       if (_magnetSmoothed < 0) _magnetSmoothed += 360;
     }
     _magnetHeading = _magnetSmoothed;
