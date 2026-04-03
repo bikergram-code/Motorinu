@@ -3,7 +3,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
-
 import '../../core/community.dart';
 import '../../providers/core/providers.dart';
 import '../../providers/notifications/notification_notifier.dart';
@@ -82,7 +81,7 @@ class NotificationsScreen extends ConsumerWidget {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Icon(Icons.error_outline_rounded,
-                color: Colors.white.withValues(alpha: 0.3), size: 48),
+                color: brightness == Brightness.dark ? Colors.white.withValues(alpha: 0.3) : const Color(0xFF9E9E9E), size: 48),
             const SizedBox(height: 16),
             Text(
               'Fehler beim Laden',
@@ -154,12 +153,12 @@ class NotificationsScreen extends ConsumerWidget {
             height: 80,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              color: Colors.white.withValues(alpha: 0.04),
+              color: brightness == Brightness.dark ? Colors.white.withValues(alpha: 0.04) : Colors.black.withValues(alpha: 0.04),
             ),
             child: Icon(
               Icons.notifications_none_rounded,
               size: 36,
-              color: Colors.white.withValues(alpha: 0.15),
+              color: brightness == Brightness.dark ? Colors.white.withValues(alpha: 0.15) : const Color(0xFF9E9E9E),
             ),
           ),
           const SizedBox(height: 20),
@@ -193,6 +192,37 @@ class NotificationsScreen extends ConsumerWidget {
       case 'like':
       case 'comment':
       case 'mention':
+        // ── Dating notifications (like with type=dating_like or match) ──
+        final subType = data['type'] as String?;
+        if (subType == 'match') {
+          final convId = data['conversation_id'];
+          if (convId != null) {
+            final id = convId is int ? convId : int.tryParse('$convId');
+            if (id != null) {
+              context.push('/messages/$id');
+              return;
+            }
+          }
+          // Fallback: go to match partner's profile
+          final matchActorId = data['actor_id'] as String?;
+          if (matchActorId != null && matchActorId.isNotEmpty) {
+            context.push('/profile/$matchActorId');
+            return;
+          }
+          context.go('/feed');
+          return;
+        }
+        if (subType == 'dating_like') {
+          // Navigate to the liker's profile
+          final likerId = data['actor_id'] as String?;
+          if (likerId != null && likerId.isNotEmpty) {
+            context.push('/profile/$likerId');
+            return;
+          }
+          context.go('/feed');
+          return;
+        }
+
         // Navigate to the post (where like/comment happened)
         final postId = data['post_id'];
         if (postId != null) {
@@ -212,6 +242,21 @@ class NotificationsScreen extends ConsumerWidget {
         final followerId = data['follower_id'] as String?;
         if (followerId != null && followerId.isNotEmpty) {
           context.push('/profile/$followerId');
+        }
+        break;
+      case 'vehicle_offer':
+        final convId = data['conversation_id'];
+        if (convId != null) {
+          final id = convId is int ? convId : int.tryParse('$convId');
+          if (id != null) {
+            context.push('/messages/$id');
+            return;
+          }
+        }
+        // Fallback: navigate to sender profile
+        final senderId = data['sender_id'] as String?;
+        if (senderId != null && senderId.isNotEmpty) {
+          context.push('/profile/$senderId');
         }
         break;
       case 'xp':
@@ -251,6 +296,8 @@ class _NotificationTile extends StatelessWidget {
             ? const Color(0xFF1A1A1A)
             : Colors.white);
 
+    final offerType = notification.data['offer_type']?.toString() ?? '';
+
     final (IconData icon, Color color) = switch (notification.type) {
       'like' => (Icons.favorite_rounded, Colors.red),
       'comment' => (Icons.chat_bubble_rounded, accentColor),
@@ -258,6 +305,14 @@ class _NotificationTile extends StatelessWidget {
       'mention' => (Icons.alternate_email_rounded, Colors.blue),
       'xp' => (Icons.bolt_rounded, Colors.amber),
       'system' => (Icons.info_outline_rounded, Colors.blueGrey),
+      'vehicle_offer' => switch (offerType) {
+        'like' => (Icons.favorite_rounded, Colors.red),
+        'offer' => (Icons.local_offer_rounded, Colors.orange),
+        'counter' => (Icons.swap_horiz_rounded, Colors.blue),
+        'accepted' => (Icons.check_circle_rounded, Colors.green),
+        'declined' => (Icons.cancel_rounded, Colors.red.shade300),
+        _ => (Icons.local_offer_rounded, Colors.orange),
+      },
       _ => (Icons.notifications_rounded, Colors.grey),
     };
 
@@ -364,6 +419,28 @@ class _NotificationTile extends StatelessWidget {
                             ),
                           ],
 
+                          // ── "Zur Nachricht" hint for vehicle_offer ──
+                          if (notification.type == 'vehicle_offer' &&
+                              notification.data['conversation_id'] != null) ...[
+                            const SizedBox(height: 6),
+                            Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.chat_bubble_outline_rounded,
+                                    size: 12, color: accentColor),
+                                const SizedBox(width: 4),
+                                Text(
+                                  'Zur Nachricht',
+                                  style: GoogleFonts.inter(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w600,
+                                    color: accentColor,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+
                           const SizedBox(height: 5),
 
                           // Time + unread badge
@@ -439,3 +516,4 @@ class _NotificationTile extends StatelessWidget {
     return '${time.day}.${time.month}.${time.year}';
   }
 }
+

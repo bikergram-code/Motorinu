@@ -1,0 +1,53 @@
+name: Quick Build Check (Android + iOS)
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+jobs:
+  # ── Android compile check ──────────────────────────────────────────────────
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.38.2'
+          channel: master
+
+      - name: Mapbox token
+        run: echo "MAPBOX_DOWNLOADS_TOKEN=${{ secrets.MAPBOX_DOWNLOADS_TOKEN }}" >> android/gradle.properties
+
+      - run: flutter pub get
+      - run: flutter build apk --debug
+      - run: flutter analyze --no-fatal-infos || true
+
+  # ── iOS compile check (no signing) ────────────────────────────────────────
+  ios:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.38.2'
+          channel: master
+
+      - name: Mapbox token for CocoaPods
+        run: |
+          cat > ~/.netrc << EOF
+          machine api.mapbox.com
+            login mapbox
+            password ${{ secrets.MAPBOX_DOWNLOADS_TOKEN }}
+          EOF
+          chmod 600 ~/.netrc
+
+      - run: flutter pub get
+      - run: cd ios && pod install --repo-update
+      - run: flutter build ios --no-codesign

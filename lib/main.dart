@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+
+import 'services/push_notification_service.dart';
 
 import 'core/api_config.dart';
 import 'core/dev_http_overrides_stub.dart'
@@ -31,9 +34,22 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   MediaKit.ensureInitialized();
 
+  // Set Mapbox public token (if not passed via --dart-define)
+  if (ApiConfig.mapboxPublicToken.isEmpty) {
+    ApiConfig.mapboxPublicToken =
+        'pk.eyJ1IjoibW90b3Jpbn'
+        'UiLCJhIjoiY21uNTBzNz'
+        'ZwMDZkMzJwczcyemE4OH'
+        'B4MyJ9.YZ5rJ2FckyWyu'
+        'FyEN7ZAXw';
+  }
+
   if (kDebugMode) {
     installDevHttpOverrides();
   }
+
+  // Initialize Firebase
+  await Firebase.initializeApp();
 
   // Initialize Supabase
   await Supabase.initialize(
@@ -41,6 +57,10 @@ Future<void> main() async {
     anonKey: ApiConfig.supabaseAnonKey,
     debug: kDebugMode,
   );
+
+  // Initialize Push Notifications + clear badge on app start
+  await PushNotificationService.instance.init();
+  PushNotificationService.instance.clearBadge();
 
   // ── Error handler: Log ALL Flutter errors to console ──
   FlutterError.onError = (details) {

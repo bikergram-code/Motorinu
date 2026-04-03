@@ -28,6 +28,38 @@ class ApiConfig {
     defaultValue: 'https://www.bikergram.de',
   );
 
+  // ---------------------------------------------------------------------------
+  // Google Routes API (turn-by-turn navigation, TWO_WHEELER mode)
+  // ---------------------------------------------------------------------------
+  /// Pass at build time: --dart-define=GOOGLE_ROUTES_API_KEY=AIzaSy...
+  /// Empty = disabled, falls back to OSRM.
+  static const String googleRoutesApiKey = String.fromEnvironment(
+    'GOOGLE_ROUTES_API_KEY',
+    defaultValue: '',
+  );
+
+  // ---------------------------------------------------------------------------
+  // HERE API (speed limits fallback — automotive-grade accuracy)
+  // ---------------------------------------------------------------------------
+  /// Pass at build time: --dart-define=HERE_API_KEY=...
+  /// Get free key at https://developer.here.com
+  /// Free Tier: 1,000 requests/day
+  static const String hereApiKey = String.fromEnvironment(
+    'HERE_API_KEY',
+    defaultValue: '',
+  );
+
+  // ---------------------------------------------------------------------------
+  // Mapbox (maps & navigation)
+  // ---------------------------------------------------------------------------
+  /// Mapbox public token — injected at runtime from env / native config.
+  /// On Android: set in AndroidManifest or gradle.properties
+  /// On CI: pass --dart-define=MAPBOX_PUBLIC_TOKEN=pk.eyJ1...
+  /// Locally: loaded from shared_preferences on first launch.
+  static String _mapboxToken = const String.fromEnvironment('MAPBOX_PUBLIC_TOKEN');
+  static String get mapboxPublicToken => _mapboxToken;
+  static set mapboxPublicToken(String v) => _mapboxToken = v;
+
   /// Backwards-compat field
   static const String netcupBaseUrl = apiBaseUrl;
   static String baseUrl() => apiBaseUrl;

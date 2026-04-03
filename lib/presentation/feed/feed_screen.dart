@@ -1,21 +1,64 @@
+import 'dart:math';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../core/community.dart';
+import '../../providers/auth/auth_notifier.dart';
+import '../../providers/auth/auth_state.dart';
 import '../../providers/core/providers.dart';
 import '../../providers/core/speed_dial_provider.dart';
 import '../../providers/feed/feed_notifier.dart';
 import '../../providers/feed/reels_notifier.dart';
+import '../../providers/navigation_state.dart';
 import '../../theme/app_theme.dart';
+import '../dating/dating_screen.dart';
+import '../live/live_browse_screen.dart';
 import 'widgets/story_bar.dart';
 import 'widgets/create_post_sheet.dart';
 import 'widgets/comments_sheet.dart';
 import 'widgets/edit_post_sheet.dart';
 import 'widgets/post_card.dart';
 import 'widgets/reel_card.dart';
+
+const _bikerQuotes = [
+  'Vier R\u00e4der bewegen den K\u00f6rper. Zwei R\u00e4der bewegen die Seele.',
+  'Life is short. Ride hard.',
+  'Keine Therapie ist so gut wie eine Ausfahrt.',
+  'Born to ride. Forced to work.',
+  'Die besten Kurven findet man nicht auf der Karte.',
+  'Lean into the turn \u2014 im Leben und auf der Stra\u00dfe.',
+  'Helmhaar ist der Preis der Freiheit.',
+  'Es gibt kein schlechtes Wetter, nur falsche Motorradkleidung.',
+  'Der Weg ist das Ziel \u2014 besonders auf zwei R\u00e4dern.',
+  'Biker sein ist kein Hobby, es ist ein Lebensgef\u00fchl.',
+  'Schr\u00e4glage ist eine Frage der Einstellung.',
+  'Keep calm and twist the throttle.',
+  'Asphalt ist die sch\u00f6nste Leinwand.',
+  'Zwei R\u00e4der, ein Motor, unendliche Freiheit.',
+  'Wind im Gesicht, Sorgen im R\u00fcckspiegel.',
+];
+
+const _carQuotes = [
+  'Hubraum ist durch nichts zu ersetzen \u2014 au\u00dfer durch mehr Hubraum.',
+  'Life is too short for boring cars.',
+  'Vier R\u00e4der, ein Traum, keine Grenzen.',
+  'Stra\u00dfe frei, Kopf frei.',
+  'Wer lenkt, bestimmt die Richtung.',
+  'Racing is life. Everything else is just waiting.',
+  'PS sind nicht alles \u2014 aber ohne PS ist alles nichts.',
+  'Gib Gas, nicht auf.',
+  'Die Stra\u00dfe ruft \u2014 und ich muss gehen.',
+  'Kurven sind die Poesie der Stra\u00dfe.',
+  'Benzin im Blut, Asphalt im Herzen.',
+  'Der Motor singt, die Seele tanzt.',
+  'Ein Auto ist mehr als Blech \u2014 es ist Leidenschaft.',
+  'Jede Fahrt ein kleines Abenteuer.',
+  'Sound ist das beste Tuning.',
+];
 
 class FeedScreen extends ConsumerStatefulWidget {
   const FeedScreen({super.key});
@@ -35,6 +78,13 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
   final ScrollController _forYouScroll = ScrollController();
   final ScrollController _followingScroll = ScrollController();
 
+  /// FAB visibility — hides on scroll, shows when idle.
+  bool _fabVisible = true;
+
+  /// Whether the user has accepted the dating TOS (cached after first check).
+  bool? _datingTosAccepted;
+
+
   @override
   void initState() {
     super.initState();
@@ -53,7 +103,8 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
 
   @override
   void dispose() {
-    _infoOverlay?.remove();
+    NavigationState.instance.setFeedScrolling(false);
+    try { _infoOverlay?.remove(); } catch (_) {}
     _infoOverlay = null;
     _pageController.removeListener(_onPageScroll);
     _pageController.dispose();
@@ -89,6 +140,8 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
 
   void _onPageChanged(int page) {
     setState(() => _currentPage = page);
+    // Refresh stories on every tab switch
+    ref.invalidate(storyUsersProvider);
     if (page == 0) {
       // Erkunden — ForYou, alle Posts
       ref.read(feedNotifierProvider.notifier).loadFeed();
@@ -101,12 +154,261 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
     }
   }
 
+  // ── Dating Age Gate + TOS ─────────────────────────────────────────────────
+
+  /// Returns the user's age based on birth_year, or null if unknown.
+  int? _getUserAge() {
+    final authState = ref.read(authNotifierProvider);
+    if (authState is! Authenticated) return null;
+    final birthYear = authState.user.birthYear;
+    if (birthYear == null) return null;
+    return DateTime.now().year - birthYear;
+  }
+
+  /// Checks age (18+) and TOS acceptance before allowing dating tab access.
+  /// Returns true if access is granted.
+  Future<bool> _checkDatingAccess() async {
+    // 1. Age check
+    final age = _getUserAge();
+    if (age == null || age < 18) {
+      if (!mounted) return false;
+      _showUnderageDialog();
+      return false;
+    }
+
+    // 2. TOS check (cached)
+    if (_datingTosAccepted == true) return true;
+
+    try {
+      final uid = Supabase.instance.client.auth.currentUser?.id;
+      if (uid == null) return false;
+      final row = await Supabase.instance.client
+          .from('profiles')
+          .select('dating_tos_accepted_at')
+          .eq('id', uid)
+          .single();
+      if (row['dating_tos_accepted_at'] != null) {
+        _datingTosAccepted = true;
+        return true;
+      }
+    } catch (_) {
+      // Column might not exist yet — treat as not accepted
+    }
+
+    if (!mounted) return false;
+    final accepted = await _showDatingTosSheet();
+    if (accepted == true) {
+      _datingTosAccepted = true;
+      return true;
+    }
+    return false;
+  }
+
+  void _showUnderageDialog() {
+    final brightness = Theme.of(context).brightness;
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: brightness == Brightness.dark
+            ? const Color(0xFF1E1E1E)
+            : Colors.white,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Row(
+          children: [
+            const Icon(Icons.block_rounded, color: Colors.red, size: 28),
+            const SizedBox(width: 10),
+            Text(
+              'Zugang gesperrt',
+              style: GoogleFonts.inter(
+                fontSize: 18,
+                fontWeight: FontWeight.w700,
+                color: brightness == Brightness.dark ? Colors.white : const Color(0xFF1A1A1A),
+              ),
+            ),
+          ],
+        ),
+        content: Text(
+          'Du musst mindestens 18 Jahre alt sein, um die Dating-Funktion zu nutzen.',
+          style: GoogleFonts.inter(
+            fontSize: 14,
+            color: brightness == Brightness.dark
+                ? Colors.white.withValues(alpha: 0.7)
+                : const Color(0xFF6C757D),
+            height: 1.5,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: Text(
+              'Verstanden',
+              style: GoogleFonts.inter(fontWeight: FontWeight.w600),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<bool?> _showDatingTosSheet() {
+    final brightness = Theme.of(context).brightness;
+    final community = ref.read(communityProvider);
+    final accentColor = community?.accentColor ?? AppTheme.accentDark;
+    final isDark = brightness == Brightness.dark;
+    final textColor = isDark ? Colors.white : const Color(0xFF1A1A1A);
+    final mutedColor = isDark ? Colors.white.withValues(alpha: 0.6) : const Color(0xFF6C757D);
+    final cardBg = community?.cardFor(brightness) ??
+        (isDark ? const Color(0xFF1A1A1A) : Colors.white);
+
+    return showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => Container(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.of(ctx).size.height * 0.85,
+        ),
+        decoration: BoxDecoration(
+          color: cardBg,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Handle
+              const SizedBox(height: 12),
+              Container(
+                width: 40, height: 4,
+                decoration: BoxDecoration(
+                  color: isDark ? Colors.white24 : Colors.black12,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              const SizedBox(height: 20),
+
+              // Title
+              Icon(Icons.favorite_rounded, color: Colors.pinkAccent, size: 48),
+              const SizedBox(height: 12),
+              Text(
+                'Dating — Nutzungsbedingungen',
+                style: GoogleFonts.inter(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w800,
+                  color: textColor,
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 8),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 24),
+                child: Text(
+                  'Bitte lies und akzeptiere die folgenden Regeln, bevor du die Dating-Funktion nutzt.',
+                  style: GoogleFonts.inter(fontSize: 13, color: mutedColor, height: 1.4),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              const SizedBox(height: 20),
+
+              // Rules
+              Flexible(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.symmetric(horizontal: 24),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _tosRule(Icons.person_rounded, 'Mindestalter 18 Jahre',
+                          'Du bestätigst, dass du mindestens 18 Jahre alt bist.', textColor, mutedColor),
+                      _tosRule(Icons.verified_user_rounded, 'Echte Angaben',
+                          'Verwende nur echte Fotos und wahrheitsgemäße Profilangaben.', textColor, mutedColor),
+                      _tosRule(Icons.handshake_rounded, 'Respektvolles Verhalten',
+                          'Behandle andere mit Respekt. Belästigung, Hassrede oder Diskriminierung werden nicht toleriert.', textColor, mutedColor),
+                      _tosRule(Icons.no_adult_content_rounded, 'Keine expliziten Inhalte',
+                          'Nacktbilder, sexuelle oder gewaltverherrlichende Inhalte sind verboten.', textColor, mutedColor),
+                      _tosRule(Icons.report_rounded, 'Verstöße melden',
+                          'Melde unangemessenes Verhalten. Wir behalten uns vor, Accounts zu sperren.', textColor, mutedColor),
+                      _tosRule(Icons.shield_rounded, 'Datenschutz',
+                          'Deine Daten werden vertraulich behandelt. Matches sehen nur dein öffentliches Profil.', textColor, mutedColor),
+                      const SizedBox(height: 12),
+                    ],
+                  ),
+                ),
+              ),
+
+              // Accept button
+              Padding(
+                padding: const EdgeInsets.fromLTRB(24, 12, 24, 16),
+                child: SizedBox(
+                  width: double.infinity,
+                  height: 52,
+                  child: ElevatedButton(
+                    onPressed: () async {
+                      // Save acceptance to Supabase
+                      try {
+                        final uid = Supabase.instance.client.auth.currentUser?.id;
+                        if (uid != null) {
+                          await Supabase.instance.client
+                              .from('profiles')
+                              .update({'dating_tos_accepted_at': DateTime.now().toIso8601String()})
+                              .eq('id', uid);
+                        }
+                      } catch (_) {}
+                      if (ctx.mounted) Navigator.of(ctx).pop(true);
+                    },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: accentColor,
+                      foregroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                      elevation: 0,
+                    ),
+                    child: Text(
+                      'Ich akzeptiere und bin 18+',
+                      style: GoogleFonts.inter(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _tosRule(IconData icon, String title, String desc, Color textColor, Color mutedColor) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 22, color: Colors.pinkAccent),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: GoogleFonts.inter(fontSize: 14, fontWeight: FontWeight.w700, color: textColor)),
+                const SizedBox(height: 2),
+                Text(desc, style: GoogleFonts.inter(fontSize: 12.5, color: mutedColor, height: 1.4)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   /// Tab info explanations — shown as tooltip near the tab icon.
-  static const _tabTitles = ['Erkunden', 'Folge ich', 'Reels'];
+  static const _tabTitles = ['Erkunden', 'Folge ich', 'Reels', 'Live', 'Dating'];
   static const _tabDescs = [
     'Entdecke alle Beitr\u00e4ge der Community',
     'Beitr\u00e4ge von Leuten, denen du folgst',
     'Videos von Leuten, denen du folgst',
+    'Live-Streams von Leuten, denen du folgst',
+    'Finde deinen Biker-Match',
   ];
 
   OverlayEntry? _infoOverlay;
@@ -115,6 +417,19 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
     // Show info tooltip when tapping the already-active tab
     if (_currentPage == page) {
       _showTabInfo(page);
+      return;
+    }
+    // Dating tab (page 4): age gate + TOS required
+    if (page == 4) {
+      _checkDatingAccess().then((allowed) {
+        if (allowed && mounted) {
+          _pageController.animateToPage(
+            page,
+            duration: const Duration(milliseconds: 300),
+            curve: Curves.easeOutCubic,
+          );
+        }
+      });
       return;
     }
     _pageController.animateToPage(
@@ -240,22 +555,85 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
 
     return Scaffold(
       backgroundColor: scaffoldBg,
-      body: Column(
+      floatingActionButton: Padding(
+        padding: const EdgeInsets.only(bottom: 38),
+        child: AnimatedScale(
+          scale: _fabVisible ? 1.0 : 0.0,
+          duration: const Duration(milliseconds: 200),
+          child: FloatingActionButton(
+            backgroundColor: accentColor,
+            onPressed: () {
+              if (!mounted) return;
+              if (_currentPage == 2) {
+                CreatePostScreen.show(context, source: PostMediaSource.video);
+              } else {
+                CreatePostScreen.show(context);
+              }
+            },
+            child: const Icon(Icons.add_rounded, color: Colors.white),
+          ),
+        ),
+      ),
+      body: NotificationListener<ScrollNotification>(
+        onNotification: (notification) {
+          if (notification is ScrollUpdateNotification && notification.depth >= 1) {
+            final delta = notification.scrollDelta ?? 0;
+            if (delta > 0) {
+              // Scrolling DOWN → go fullscreen
+              if (!NavigationState.instance.feedScrolling) {
+                NavigationState.instance.setFeedScrolling(true);
+                setState(() => _fabVisible = false);
+              }
+            } else if (delta < -2) {
+              // Scrolling UP → restore UI
+              if (NavigationState.instance.feedScrolling) {
+                NavigationState.instance.setFeedScrolling(false);
+                setState(() => _fabVisible = true);
+              }
+            }
+          }
+          return false;
+        },
+        child: Column(
         children: [
-          // Spacer for global top bar
-          SizedBox(height: MediaQuery.of(context).padding.top + 52),
+          // Top spacer + StoryBar — collapse when scrolling
+          AnimatedContainer(
+            duration: const Duration(milliseconds: 200),
+            curve: Curves.easeOutCubic,
+            height: NavigationState.instance.feedScrolling
+                ? MediaQuery.of(context).padding.top
+                : MediaQuery.of(context).padding.top + 52,
+          ),
+          AnimatedCrossFade(
+            duration: const Duration(milliseconds: 200),
+            crossFadeState: NavigationState.instance.feedScrolling
+                ? CrossFadeState.showSecond
+                : CrossFadeState.showFirst,
+            firstChild: const StoryBar(),
+            secondChild: const SizedBox(width: double.infinity, height: 0),
+            sizeCurve: Curves.easeOutCubic,
+          ),
 
-          // Story bar
-          const StoryBar(),
-
-          // ── Swipeable tab indicator ──
-          _buildTabIndicator(accentColor, brightness, isDark, community),
-
-          Divider(
-            height: 0.5,
-            thickness: 0.5,
-            color: community?.faintColor(brightness) ??
-                Colors.white.withValues(alpha: 0.06),
+          // ── Tab indicator + divider — hide when scrolling (fullscreen) ──
+          AnimatedCrossFade(
+            duration: const Duration(milliseconds: 200),
+            crossFadeState: NavigationState.instance.feedScrolling
+                ? CrossFadeState.showSecond
+                : CrossFadeState.showFirst,
+            firstChild: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _buildTabIndicator(accentColor, brightness, isDark, community),
+                Divider(
+                  height: 0.5,
+                  thickness: 0.5,
+                  color: community?.faintColor(brightness) ??
+                      Colors.white.withValues(alpha: 0.06),
+                ),
+              ],
+            ),
+            secondChild: const SizedBox(width: double.infinity, height: 0),
+            sizeCurve: Curves.easeOutCubic,
           ),
 
           // ── PageView — swipeable feed ──
@@ -263,7 +641,13 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
             child: PageView(
               controller: _pageController,
               onPageChanged: _onPageChanged,
-              physics: const _TabletFriendlyPagePhysics(),
+              // Dating tab (page 4): disable swiping for card gestures.
+              // Also block swiping INTO dating (page 3→4) if not yet gated.
+              physics: _currentPage == 4
+                  ? const NeverScrollableScrollPhysics()
+                  : (_currentPage == 3 && _datingTosAccepted != true
+                      ? const _BlockRightSwipePhysics()
+                      : const _TabletFriendlyPagePhysics()),
               children: [
                 // Page 0: Erkunden (ForYou) — alle Posts sichtbar
                 RefreshIndicator(
@@ -289,10 +673,15 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
                 ),
                 // Page 2: Reels — nur Follower-Reels
                 _buildReelsPage(accentColor),
+                // Page 3: Live — Streams von gefolgten Leuten + Go-Live FAB
+                const LiveBrowseScreen(),
+                // Page 4: Dating — Swipe-Karten
+                const DatingScreen(),
               ],
             ),
           ),
         ],
+      ),
       ),
     );
   }
@@ -307,8 +696,10 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
       Icons.explore_rounded,        // For You — Entdecken
       Icons.people_rounded,         // Following — Folge ich
       Icons.play_circle_rounded,    // Reels — Videos
+      Icons.live_tv_rounded,        // Live — Streams
+      Icons.favorite_rounded,       // Dating — Herz
     ];
-    const tabCount = 3;
+    const tabCount = 5;
     // Indicator lives inside a centered zone (avoids edge-to-edge stretch)
     final screenWidth = MediaQuery.of(context).size.width;
     final zoneWidth = (screenWidth * 0.60).clamp(180.0, 280.0); // narrower for icons
@@ -317,7 +708,7 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
     const indicatorRadius = 1.5;
 
     // Indicator widths per tab (same size for icons)
-    const indicatorWidths = [24.0, 24.0, 24.0];
+    const indicatorWidths = [24.0, 24.0, 24.0, 24.0, 24.0];
 
     // Interpolate indicator position + width from _pageOffset
     final fromIdx = _pageOffset.floor().clamp(0, tabCount - 1);
@@ -552,28 +943,69 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
   /// Build a scrollable post list (Instagram-style ListView).
   /// [isFollowing] determines which provider to use for interactions.
   Widget _buildPostList(FeedState feedState, Color accentColor, {required bool isFollowing}) {
-    final totalItems = feedState.posts.length + (feedState.isLoadingMore ? 1 : 0);
+    final hasFooter = feedState.isLoadingMore || !feedState.hasMore;
+    final totalItems = feedState.posts.length + (hasFooter ? 1 : 0);
     final scrollCtrl = isFollowing ? _followingScroll : _forYouScroll;
+    final community = ref.read(communityProvider);
+    final brightness = Theme.of(context).brightness;
 
     return ListView.builder(
       controller: scrollCtrl,
       padding: EdgeInsets.zero,
+      cacheExtent: 800,
       physics: const ClampingScrollPhysics(
         parent: AlwaysScrollableScrollPhysics(),
       ),
       itemCount: totalItems,
       itemBuilder: (context, index) {
         if (index == feedState.posts.length) {
-          return Padding(
-            padding: const EdgeInsets.symmetric(vertical: 24),
-            child: Center(
-              child: SizedBox(
-                width: 24, height: 24,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2.5,
-                  color: accentColor,
+          if (feedState.isLoadingMore) {
+            return Padding(
+              padding: const EdgeInsets.symmetric(vertical: 24),
+              child: Center(
+                child: SizedBox(
+                  width: 24, height: 24,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2.5,
+                    color: accentColor,
+                  ),
                 ),
               ),
+            );
+          }
+          // End of feed — random racer quote
+          final mutedColor = community?.textMutedColor(brightness) ??
+              (brightness == Brightness.dark ? Colors.white54 : const Color(0xFF9E9E9E));
+          final isBiker = community == Community.bikergram;
+          final quotes = isBiker ? _bikerQuotes : _carQuotes;
+          final quote = quotes[Random().nextInt(quotes.length)];
+          return Padding(
+            padding: const EdgeInsets.symmetric(vertical: 32, horizontal: 32),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(children: [
+                  Expanded(child: Divider(color: accentColor.withValues(alpha: 0.3))),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    child: Icon(
+                      isBiker ? Icons.two_wheeler_rounded : Icons.directions_car_rounded,
+                      color: accentColor, size: 20,
+                    ),
+                  ),
+                  Expanded(child: Divider(color: accentColor.withValues(alpha: 0.3))),
+                ]),
+                const SizedBox(height: 10),
+                Text(
+                  quote,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontStyle: FontStyle.italic,
+                    color: mutedColor,
+                  ),
+                ),
+              ],
             ),
           );
         }
@@ -843,6 +1275,26 @@ class _TabletFriendlyPagePhysics extends PageScrollPhysics {
   /// accidentally trigger a horizontal tab change on tablets.
   @override
   double get dragStartDistanceMotionThreshold => 14.0; // default ~18
+}
+
+/// Blocks swiping right (toward next page) but allows swiping left (back).
+/// Used on page 3 (Live) to prevent swiping into Dating without age gate.
+class _BlockRightSwipePhysics extends PageScrollPhysics {
+  const _BlockRightSwipePhysics({super.parent});
+
+  @override
+  _BlockRightSwipePhysics applyTo(ScrollPhysics? ancestor) {
+    return _BlockRightSwipePhysics(parent: buildParent(ancestor));
+  }
+
+  @override
+  double applyBoundaryConditions(ScrollMetrics position, double value) {
+    // Block scrolling toward a higher page (right swipe = value > pixels)
+    if (value > position.pixels) {
+      return value - position.pixels;
+    }
+    return super.applyBoundaryConditions(position, value);
+  }
 }
 
 /// Animated tooltip bubble that appears near the tab icon.
