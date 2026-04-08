@@ -12,6 +12,7 @@ import '../../../providers/auth/auth_notifier.dart';
 import '../../../providers/auth/auth_state.dart';
 import '../../../providers/core/providers.dart';
 import '../../../theme/app_theme.dart';
+import 'swipe_card.dart';
 
 class EditDatingProfileSheet extends ConsumerStatefulWidget {
   const EditDatingProfileSheet({super.key});
@@ -34,6 +35,7 @@ class _EditDatingProfileSheetState
     extends ConsumerState<EditDatingProfileSheet> {
   final _bioController = TextEditingController();
   final _displayNameController = TextEditingController();
+  final _plzController = TextEditingController();
   String? _selectedGender;
   int? _birthYear;
   bool _isSubmitting = false;
@@ -44,9 +46,9 @@ class _EditDatingProfileSheetState
   final List<String> _photoUrls = [];
   static const _maxPhotos = 6;
 
-  // Vehicle (picked from garage)
+  // Vehicles (multi-select from garage)
   List<Map<String, dynamic>> _vehicles = [];
-  String? _selectedVehicleId;
+  List<String> _selectedVehicleIds = [];
 
   @override
   void initState() {
@@ -57,11 +59,13 @@ class _EditDatingProfileSheetState
       _displayNameController.text =
           user.displayName ?? user.bikername ?? user.username;
       _bioController.text = user.bio ?? '';
+      _plzController.text = user.postalCode ?? '';
       _selectedGender = user.gender;
       _birthYear = user.birthYear;
     }
     _loadVehicles();
     _loadDatingPhotos();
+    _loadDatingVehicleIds();
   }
 
   Future<void> _loadDatingPhotos() async {
@@ -92,6 +96,24 @@ class _EditDatingProfileSheetState
     } catch (_) {}
   }
 
+  Future<void> _loadDatingVehicleIds() async {
+    try {
+      final userId = Supabase.instance.client.auth.currentUser?.id;
+      if (userId == null) return;
+      final res = await Supabase.instance.client
+          .from('profiles')
+          .select('dating_vehicle_ids')
+          .eq('id', userId)
+          .single();
+      final ids = res['dating_vehicle_ids'];
+      if (mounted && ids is List) {
+        setState(() {
+          _selectedVehicleIds = ids.map((e) => e.toString()).toList();
+        });
+      }
+    } catch (_) {}
+  }
+
   Future<void> _loadVehicles() async {
     try {
       final userId = Supabase.instance.client.auth.currentUser?.id;
@@ -115,6 +137,7 @@ class _EditDatingProfileSheetState
   void dispose() {
     _bioController.dispose();
     _displayNameController.dispose();
+    _plzController.dispose();
     super.dispose();
   }
 
@@ -185,14 +208,33 @@ class _EditDatingProfileSheetState
             : null,
         gender: _selectedGender,
         birthYear: _birthYear,
+        postalCode: _plzController.text.trim().isNotEmpty
+            ? _plzController.text.trim()
+            : null,
       );
 
-      // Save dating photos separately (array column)
+      // Save dating photos (array column)
       if (userId != null) {
         await Supabase.instance.client
             .from('profiles')
             .update({'dating_photos': _photoUrls})
             .eq('id', userId);
+
+        // Save vehicle IDs (may fail if column not yet migrated)
+        if (_selectedVehicleIds.isNotEmpty) {
+          try {
+            final vehicleIntIds = _selectedVehicleIds
+                .map((id) => int.tryParse(id))
+                .where((id) => id != null)
+                .toList();
+            await Supabase.instance.client
+                .from('profiles')
+                .update({'dating_vehicle_ids': vehicleIntIds})
+                .eq('id', userId);
+          } catch (_) {
+            // Column not yet created — silently skip
+          }
+        }
       }
 
       // Also set first dating photo as avatar if user has no avatar
@@ -243,13 +285,25 @@ class _EditDatingProfileSheetState
     final cardBg = community?.cardFor(brightness) ??
         (isDark ? const Color(0xFF1A1A1A) : Colors.white);
 
+    final keyboardOpen = bottomInset > 50;
+    final topPad = MediaQuery.of(context).padding.top;
+
     return Container(
-      margin: EdgeInsets.only(bottom: bottomInset),
-      constraints:
-          BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.88),
+      margin: EdgeInsets.only(
+        bottom: bottomInset,
+        // When keyboard is open, push sheet below status bar
+        top: keyboardOpen ? topPad : 0,
+      ),
+      constraints: BoxConstraints(
+        maxHeight: keyboardOpen
+            ? MediaQuery.of(context).size.height - topPad
+            : MediaQuery.of(context).size.height * 0.88,
+      ),
       decoration: BoxDecoration(
         color: cardBg,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius: keyboardOpen
+            ? BorderRadius.zero
+            : const BorderRadius.vertical(top: Radius.circular(20)),
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -519,12 +573,40 @@ class _EditDatingProfileSheetState
 
                   const SizedBox(height: 20),
 
+                  // ── PLZ ──
+                  _label('Postleitzahl (PLZ)', textColor),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: _plzController,
+                    keyboardType: TextInputType.number,
+                    maxLength: 6,
+                    style: GoogleFonts.inter(fontSize: 15, color: textColor),
+                    decoration: InputDecoration(
+                      hintText: 'z.B. 80331',
+                      hintStyle: GoogleFonts.inter(fontSize: 14, color: mutedColor),
+                      counterText: '',
+                      filled: true,
+                      fillColor: faint,
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: BorderSide.none,
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: BorderSide(color: accentColor, width: 1.5),
+                      ),
+                    ),
+                  ),
+
+                  const SizedBox(height: 20),
+
                   // ── Meine Fahrzeuge (beide Communities) ──
                   if (_vehicles.isNotEmpty) ...[
-                    _label('Meine Fahrzeuge', textColor),
+                    _label('Meine Fahrzeuge (Mehrfachauswahl)', textColor),
                     const SizedBox(height: 4),
                     Text(
-                      'Bikes & Autos — wird auf deiner Karte angezeigt',
+                      'Tippe auf Fahrzeuge, die auf deiner Karte angezeigt werden',
                       style: GoogleFonts.inter(
                           fontSize: 12, color: mutedColor),
                     ),
@@ -536,12 +618,17 @@ class _EditDatingProfileSheetState
                       final hp = v['horsepower'];
                       final vCommunity = v['community'] as String?;
                       final isBike = vCommunity == 'bikergram';
-                      final isSelected = _selectedVehicleId == vid;
+                      final isSelected = _selectedVehicleIds.contains(vid);
                       return Padding(
                         padding: const EdgeInsets.only(bottom: 8),
                         child: GestureDetector(
-                          onTap: () => setState(() =>
-                              _selectedVehicleId = isSelected ? null : vid),
+                          onTap: () => setState(() {
+                              if (isSelected) {
+                                _selectedVehicleIds.remove(vid);
+                              } else {
+                                _selectedVehicleIds.add(vid);
+                              }
+                          }),
                           child: Container(
                             padding: const EdgeInsets.symmetric(
                                 horizontal: 14, vertical: 12),
@@ -622,6 +709,32 @@ class _EditDatingProfileSheetState
                   const SizedBox(height: 20),
 
                   // ── Save button ──
+                  // ── Preview button ──
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed: () => _showCardPreview(context, community!, accentColor),
+                      icon: const Icon(Icons.visibility_rounded, size: 18),
+                      label: Text(
+                        'Vorschau deiner Karte',
+                        style: GoogleFonts.inter(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: accentColor,
+                        side: BorderSide(color: accentColor.withValues(alpha: 0.4)),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+
+                  // ── Save button ──
                   SizedBox(
                     width: double.infinity,
                     child: ElevatedButton(
@@ -658,6 +771,85 @@ class _EditDatingProfileSheetState
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  void _showCardPreview(BuildContext context, Community community, Color accentColor) {
+    final authState = ref.read(authNotifierProvider);
+    final user = authState is Authenticated ? authState.user : null;
+
+    // Build vehicle list from selected vehicles
+    final selectedVehicles = _selectedVehicleIds.map((vid) {
+      final v = _vehicles.firstWhere(
+        (v) => v['id'].toString() == vid,
+        orElse: () => <String, dynamic>{},
+      );
+      if (v.isEmpty) return null;
+      return {
+        'brand': v['brand'],
+        'model': v['model'],
+        'horsepower': v['horsepower'],
+        'community': v['community'],
+      };
+    }).where((v) => v != null).toList();
+
+    final previewCandidate = <String, dynamic>{
+      'id': user?.id ?? '',
+      'display_name': _displayNameController.text.trim().isNotEmpty
+          ? _displayNameController.text.trim()
+          : user?.displayName ?? user?.bikername ?? '?',
+      'bio': _bioController.text.trim(),
+      'gender': _selectedGender,
+      'birth_year': _birthYear,
+      'dating_photos': _photoUrls,
+      'avatar_url': _photoUrls.isNotEmpty ? _photoUrls.first : user?.avatarUrl,
+      'xp_total': user?.xpTotal ?? 0,
+      'is_premium': user?.isPremium ?? false,
+      'dating_vehicles': selectedVehicles,
+    };
+
+    showDialog(
+      context: context,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.transparent,
+        insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 40),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Preview card
+            SizedBox(
+              height: MediaQuery.of(ctx).size.height * 0.6,
+              child: SwipeCard(
+                candidate: previewCandidate,
+                community: community,
+              ),
+            ),
+            const SizedBox(height: 16),
+            // Close button
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: accentColor,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+                child: Text(
+                  'Zurück zum Bearbeiten',
+                  style: GoogleFonts.inter(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

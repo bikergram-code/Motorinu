@@ -1,0 +1,78 @@
+workflows:
+  # ─── iOS Debug Build (TestFlight) ───
+  ios-build:
+    name: iOS Build
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+      groups:
+        - ios_credentials    # App Store Connect API key
+        - app_secrets        # MAPBOX_SECRET_TOKEN, SUPABASE keys etc.
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.bikergram.app
+      vars:
+        BUNDLE_ID: com.bikergram.app
+    scripts:
+      # Mapbox SDK requires a secret token for downloading the iOS SDK
+      - name: Set up Mapbox token
+        script: |
+          echo "machine api.mapbox.com" >> ~/.netrc
+          echo "login mapbox" >> ~/.netrc
+          echo "password ${MAPBOX_SECRET_TOKEN}" >> ~/.netrc
+          chmod 600 ~/.netrc
+
+      - name: Install dependencies
+        script: |
+          flutter pub get
+
+      - name: Install CocoaPods
+        script: |
+          cd ios && pod install
+
+      - name: Build iOS
+        script: |
+          flutter build ipa --release \
+            --dart-define=SUPABASE_URL=$SUPABASE_URL \
+            --dart-define=SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY \
+            --dart-define=GOOGLE_ROUTES_API_KEY=$GOOGLE_ROUTES_API_KEY \
+            --dart-define=HERE_API_KEY=$HERE_API_KEY \
+            --export-options-plist=/Users/builder/export_options.plist
+
+    artifacts:
+      - build/ios/ipa/*.ipa
+
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
+        beta_groups:
+          - Bikergram Tester
+
+  # ─── Android Debug APK (optional, for comparison) ───
+  android-build:
+    name: Android Build
+    max_build_duration: 30
+    instance_type: mac_mini_m2
+    environment:
+      flutter: stable
+      java: 17
+      groups:
+        - app_secrets
+    scripts:
+      - name: Install dependencies
+        script: flutter pub get
+
+      - name: Build APK
+        script: |
+          flutter build apk --release \
+            --dart-define=SUPABASE_URL=$SUPABASE_URL \
+            --dart-define=SUPABASE_ANON_KEY=$SUPABASE_ANON_KEY \
+            --dart-define=GOOGLE_ROUTES_API_KEY=$GOOGLE_ROUTES_API_KEY \
+            --dart-define=HERE_API_KEY=$HERE_API_KEY
+
+    artifacts:
+      - build/app/outputs/flutter-apk/app-release.apk

@@ -10,6 +10,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart' show LatLng;
 import 'package:permission_handler/permission_handler.dart';
 
 import '../../core/community.dart';
+import '../../services/push_notification_service.dart';
 import '../../providers/auth/auth_notifier.dart';
 import '../../providers/auth/auth_state.dart';
 import '../../providers/map/map_settings_provider.dart';
@@ -20,7 +21,11 @@ import '../../providers/messages/incoming_message_provider.dart';
 import '../../providers/messages/unread_messages_notifier.dart';
 import '../../providers/notifications/incoming_notification_provider.dart';
 import '../../providers/notifications/notification_notifier.dart';
+import '../../providers/navigation_state.dart';
+import '../../services/osrm_service.dart';
 import '../../services/live_location_service.dart';
+import '../../services/tts_alert_service.dart';
+import '../../services/vosk_wake_word_service.dart';
 import '../../theme/app_theme.dart';
 import '../widgets/community_switcher.dart';
 import '../widgets/message_notification_toast.dart';
@@ -36,32 +41,20 @@ class MainShell extends ConsumerStatefulWidget {
 
 class _MainShellState extends ConsumerState<MainShell>
     with TickerProviderStateMixin, WidgetsBindingObserver {
-  // Left tabs: Feed, Karte, Live
-  static const _tabsLeft = [
-    ('/feed', Icons.home_rounded, Icons.home_outlined, 'Feed'),
-    ('/map', Icons.map_rounded, Icons.map_outlined, 'Karte'),
-    ('/live', Icons.live_tv_rounded, Icons.live_tv_outlined, 'Live'),
+  // 3 tabs — Home, Karte, Profil/Garage (combined)
+  static const _allTabs = [
+    ('/feed', Icons.home_rounded, Icons.home_outlined),
+    ('/map', Icons.map_rounded, Icons.map_outlined),
+    ('/profile', Icons.person_rounded, Icons.person_outlined),
   ];
 
-  // Right tabs: Events, Markt, Garage
-  static const _tabsRight = [
-    ('/events', Icons.event_rounded, Icons.event_outlined, 'Events'),
-    ('/market', Icons.storefront_rounded, Icons.storefront_outlined, 'Markt'),
-    ('/garage', Icons.garage_rounded, Icons.garage_outlined, 'Garage'),
-  ];
-
-  // All tabs combined for index matching
-  static const _allTabs = [..._tabsLeft, ..._tabsRight];
-
-  // Tab title mapping
+  // Tab title mapping (for TopBar)
   static const _tabTitles = {
     '/feed': 'Feed',
     '/map': 'Karte',
-    '/live': 'Live',
-    '/events': 'Events',
-    '/garage': 'Garage',
-    '/market': 'Markt',
     '/profile': 'Profil',
+    '/garage': 'Meine Garage',
+    '/market': 'Marktplatz',
   };
 
   StreamSubscription<IncomingMessage>? _messageSub;
@@ -79,6 +72,7 @@ class _MainShellState extends ConsumerState<MainShell>
     super.initState();
     debugPrint('[MainShell] initState() called (hashCode=$hashCode)');
     WidgetsBinding.instance.addObserver(this);
+    NavigationState.instance.addListener(_onNavStateChanged);
 
     _speedDialAnimController = AnimationController(
       vsync: this,
@@ -88,6 +82,12 @@ class _MainShellState extends ConsumerState<MainShell>
       parent: _speedDialAnimController,
       curve: Curves.easeOutCubic,
     );
+
+    // ── Set initial route mode based on community ──
+    final initCommunity = ref.read(communityProvider);
+    if (initCommunity == Community.cargram) {
+      NavigationState.instance.setRouteMode(RouteMode.auto);
+    }
 
     // ── Initialize online users pipeline (ValueNotifier, no Riverpod) ──
     _initOnlineUsers();
@@ -107,6 +107,19 @@ class _MainShellState extends ConsumerState<MainShell>
 
     // ── Request notification permission (Android 13+) ──
     _requestNotificationPermission();
+
+    // ── Re-save FCM token now that user is logged in ──
+    PushNotificationService.instance.saveFcmToken();
+
+    // ── Process pending push notification navigation (cold start) ──
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      PushNotificationService.processPendingNavigation();
+    });
+
+    // Voice banner stays visible — directListenMode always on for tab nav
+
+    // ── Start Vosk for voice tab navigation ──
+    _initVoskForTabs();
 
     // Listen to incoming message events via the global bus.
     _messageSub = IncomingMessageBus.instance.stream.listen((message) {
@@ -188,6 +201,107 @@ class _MainShellState extends ConsumerState<MainShell>
     SystemSound.play(SystemSoundType.click);
   }
 
+  // ── Vosk Tab Navigation ──
+  // Tab name → route mapping for voice commands
+  /// Tab voice matching — each route has multiple Vosk variants.
+  /// Vosk German model often mishears short words, so we add fuzzy matches.
+  static const _voiceTabRoutes = <String, String>{
+    // Home / Feed
+    'home': '/feed',
+    'feed': '/feed',
+    'feet': '/feed',
+    'fied': '/feed',
+    'fiet': '/feed',
+    'fieb': '/feed',
+    'feat': '/feed',
+    // Karte
+    'karte': '/map',
+    'karten': '/map',
+    'kater': '/map',
+    'karat': '/map',
+    'carte': '/map',
+    // Profil / Garage
+    'profil': '/profile',
+    'profile': '/profile',
+    'profiel': '/profile',
+    'garage': '/profile',
+  };
+
+  bool _voskTabActive = false;
+
+  Future<void> _initVoskForTabs() async {
+    final ok = await VoskWakeWordService.instance.init();
+    if (!ok || !mounted) return;
+
+    // Set handler — when user enters a ride, GroupRideScreen overrides this
+    VoskWakeWordService.instance.onEvent = (event, text) {
+      if (!mounted) return;
+      switch (event) {
+        case VoskWakeEvent.wakeWordDetected:
+          debugPrint('[MainShell] Wake word detected!');
+          HapticFeedback.heavyImpact();
+          TtsAlertService.instance.clearQueue();
+          TtsAlertService.instance.stop();
+          VoskWakeWordService.instance.setPaused(true);
+          TtsAlertService.instance.speakText('Ja?').then((_) async {
+            await Future.delayed(const Duration(milliseconds: 800));
+            if (mounted) VoskWakeWordService.instance.setPaused(false);
+          });
+          break;
+
+        case VoskWakeEvent.commandRecognized:
+          debugPrint('[MainShell] Voice command: "$text"');
+          _handleVoiceTabNavigation(text);
+          break;
+
+        case VoskWakeEvent.commandTimeout:
+          break;
+      }
+    };
+
+    if (!VoskWakeWordService.instance.isListening) {
+      await VoskWakeWordService.instance.startListening();
+      _voskTabActive = true;
+      debugPrint('[MainShell] Vosk started for tab navigation');
+    }
+
+    // Wake word required — "Hi Moto" first, then tab name
+    VoskWakeWordService.instance.directListenMode = false;
+  }
+
+  DateTime? _lastVoiceMiss;
+
+  void _handleVoiceTabNavigation(String text) {
+    final lower = text.toLowerCase().trim();
+    // Skip very short noise (< 3 chars)
+    if (lower.length < 3) return;
+
+    // Split into words and check each against tab routes
+    final words = lower.split(RegExp(r'\s+'));
+    for (final word in words) {
+      final route = _voiceTabRoutes[word];
+      if (route != null) {
+        debugPrint('[MainShell] ✓ "$word" → $route');
+        HapticFeedback.mediumImpact();
+        if (mounted) context.go(route);
+        return;
+      }
+    }
+
+    // Also try full text match (for multi-word like "markt platz")
+    for (final entry in _voiceTabRoutes.entries) {
+      if (lower == entry.key) {
+        debugPrint('[MainShell] ✓ full match "$lower" → ${entry.value}');
+        HapticFeedback.mediumImpact();
+        if (mounted) context.go(entry.value);
+        return;
+      }
+    }
+
+    // No match — just log, don't speak (background noise causes constant TTS)
+    debugPrint('[MainShell] ✗ "$lower" (ignored)');
+  }
+
   /// Request POST_NOTIFICATIONS permission on Android 13+ (API 33).
   Future<void> _requestNotificationPermission() async {
     if (!Platform.isAndroid) return;
@@ -197,9 +311,14 @@ class _MainShellState extends ConsumerState<MainShell>
     }
   }
 
+  void _onNavStateChanged() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void dispose() {
     debugPrint('[MainShell] dispose() called');
+    NavigationState.instance.removeListener(_onNavStateChanged);
     WidgetsBinding.instance.removeObserver(this);
     _messageSub?.cancel();
     _notifSub?.cancel();
@@ -224,8 +343,14 @@ class _MainShellState extends ConsumerState<MainShell>
         service.goOffline();
         isLiveNotifier.value = false;
       }
+      // Update badge count when going to background
+      PushNotificationService.instance.updateBadge();
     } else if (state == AppLifecycleState.resumed) {
       debugPrint('[MainShell] App lifecycle: resumed — re-checking live state');
+      // Update badge from DB (statt clearBadge — sonst wird die Zahl gelöscht
+      // sobald der User die App nur kurz öffnet, auch wenn noch ungelesene
+      // Items in der DB sind. updateBadge setzt automatisch 0 wenn alles gelesen).
+      PushNotificationService.instance.updateBadge();
       // Re-start live if it was active before the pause
       _autoStartGlobalLive();
     }
@@ -259,6 +384,12 @@ class _MainShellState extends ConsumerState<MainShell>
       await service.goOffline();
       isLiveNotifier.value = false;
     }
+
+    // Sync route mode with community: Bikergram → Biker, Cargram → Auto
+    final community = ref.read(communityProvider);
+    final newMode = community == Community.cargram ? RouteMode.auto : RouteMode.biker;
+    debugPrint('[MainShell] Community → $community, setting RouteMode → $newMode');
+    NavigationState.instance.setRouteMode(newMode);
 
     // Reload online users with new community filter
     _initOnlineUsers();
@@ -416,7 +547,6 @@ class _MainShellState extends ConsumerState<MainShell>
 
     // Speed-Dial items from active tab screen
     final speedDialItems = ref.watch(speedDialItemsProvider);
-    final hasSpeedDial = speedDialItems.isNotEmpty;
 
     // Tab title
     final tabTitle = _tabTitles[location] ?? community?.displayName ?? '';
@@ -431,65 +561,77 @@ class _MainShellState extends ConsumerState<MainShell>
           // ── Tab content (full screen) ──
           widget.child,
 
-          // ── Global Top Bar ──
-          _buildGlobalTopBar(
-            community: community,
-            brightness: brightness,
-            accentColor: accentColor,
-            title: tabTitle,
-            location: location,
+          // ── Global Top Bar (animated slide for feed scroll, instant for navigation) ──
+          AnimatedSlide(
+            offset: NavigationState.instance.barsVisible ? Offset.zero : const Offset(0, -1),
+            duration: NavigationState.instance.feedScrolling || !NavigationState.instance.barsVisible
+                ? const Duration(milliseconds: 200)
+                : const Duration(milliseconds: 150),
+            curve: Curves.easeOutCubic,
+            child: AnimatedOpacity(
+              opacity: NavigationState.instance.barsVisible ? 1.0 : 0.0,
+              duration: const Duration(milliseconds: 200),
+              child: _buildGlobalTopBar(
+                community: community,
+                brightness: brightness,
+                accentColor: accentColor,
+                title: tabTitle,
+                location: location,
+              ),
+            ),
           ),
         ],
       ),
-      bottomNavigationBar: Container(
-        decoration: BoxDecoration(
-          color: community?.navBarFor(brightness) ?? (brightness == Brightness.dark ? const Color(0xFF0D0D0D) : const Color(0xFFF5F5F5)),
-          border: Border(
-            top: BorderSide(
-              color: community?.accentGlow ?? Colors.white.withValues(alpha: 0.06),
-              width: 0.5,
-            ),
-          ),
-        ),
-        child: SafeArea(
-          child: SizedBox(
-            height: 60,
-            child: Row(
-              children: [
-                // ── Left tabs ──
-                for (int i = 0; i < _tabsLeft.length; i++)
-                  _buildTab(
-                    context,
-                    tab: _tabsLeft[i],
-                    isActive: i == currentIndex,
-                    accentColor: accentColor,
-                  ),
+    ), // end Scaffold — no bottomNavigationBar (moved to Stack)
 
-                // ── Center "+" Smart Button ──
-                _buildCenterButton(
-                  location: location,
-                  accentColor: accentColor,
-                  isSpeedDialOpen: isSpeedDialOpen,
-                  hasSpeedDial: hasSpeedDial,
+          // ── Bottom Nav Bar (in Stack, slides down completely on scroll) ──
+          Positioned(
+            left: 0, right: 0, bottom: 0,
+            child: AnimatedSlide(
+              offset: NavigationState.instance.barsVisible ? Offset.zero : const Offset(0, 1),
+              duration: const Duration(milliseconds: 200),
+              curve: Curves.easeOutCubic,
+              child: AnimatedOpacity(
+                opacity: NavigationState.instance.barsVisible ? 1.0 : 0.0,
+                duration: const Duration(milliseconds: 200),
+                child: Material(
+                  color: community?.navBarFor(brightness) ?? (brightness == Brightness.dark ? const Color(0xFF0D0D0D) : const Color(0xFFF5F5F5)),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      border: Border(
+                        top: BorderSide(
+                          color: community?.accentGlow ?? Colors.white.withValues(alpha: 0.06),
+                          width: 0.5,
+                        ),
+                      ),
+                    ),
+                    child: Padding(
+                      padding: EdgeInsets.only(
+                        bottom: MediaQuery.of(context).viewPadding.bottom,
+                      ),
+                      child: SizedBox(
+                        height: 34,
+                        child: Row(
+                          children: [
+                            for (int i = 0; i < _allTabs.length; i++)
+                              _buildTab(
+                                context,
+                                tab: _allTabs[i],
+                                isActive: i == currentIndex,
+                                accentColor: accentColor,
+                              ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
                 ),
-
-                // ── Right tabs ──
-                for (int i = 0; i < _tabsRight.length; i++)
-                  _buildTab(
-                    context,
-                    tab: _tabsRight[i],
-                    isActive: (i + _tabsLeft.length) == currentIndex,
-                    accentColor: accentColor,
-                  ),
-              ],
+              ),
             ),
           ),
-        ),
-      ),
-    ), // end Scaffold
 
         // ── Speed-Dial Overlay (full-screen, covers BottomNav too) ──
-        if (isSpeedDialOpen && hasSpeedDial)
+        if (isSpeedDialOpen && speedDialItems.isNotEmpty)
           _buildSpeedDialOverlay(
             items: speedDialItems,
             accentColor: accentColor,
@@ -518,22 +660,23 @@ class _MainShellState extends ConsumerState<MainShell>
         ? Colors.white.withValues(alpha: 0.7)
         : const Color(0xFF6C757D);
 
-    // On map screen use transparent bg. On other tabs use scaffold bg.
-    final isMapScreen = location == '/map';
+    // On map screen: transparent (map shows through). On other tabs: scaffold bg.
+    final isMapScreen = location == '/map' || location == '/events';
+    final isDark = brightness == Brightness.dark;
     final bgColor = isMapScreen
-        ? (brightness == Brightness.dark
-            ? Colors.black.withValues(alpha: 0.6)
-            : Colors.white.withValues(alpha: 0.85))
+        ? (isDark ? const Color(0xFF0D0D0D) : Colors.white.withValues(alpha: 0.85))
         : (community?.scaffoldFor(brightness) ??
-            (brightness == Brightness.dark ? Colors.black : const Color(0xFFF5F5F5)));
+            (isDark ? Colors.black : const Color(0xFFF5F5F5)));
 
-    // Im Karten-Tab: Icons bekommen eine Hintergrundbox für bessere Lesbarkeit.
-    final mapIconColor = Colors.white.withValues(alpha: 0.9);
+    // Im Karten-Tab: Icons brauchen guten Kontrast gegen die Karte.
+    final mapIconColor = isDark
+        ? Colors.white.withValues(alpha: 0.9)
+        : const Color(0xFF1A1A1A);
     final effectiveIconColor = isMapScreen ? mapIconColor : iconColor;
 
-    final mapBoxColor = brightness == Brightness.dark
-        ? Colors.black.withValues(alpha: 0.30)
-        : Colors.white.withValues(alpha: 0.75);
+    final mapBoxColor = isDark
+        ? const Color(0xFF0D0D0D)
+        : Colors.white.withValues(alpha: 0.85);
 
     Widget iconRow = Row(
       mainAxisSize: MainAxisSize.min,
@@ -544,24 +687,17 @@ class _MainShellState extends ConsumerState<MainShell>
         _buildNotificationIcon(accentColor, effectiveIconColor),
         _buildMessageIcon(accentColor, effectiveIconColor),
         IconButton(
-          onPressed: () => context.push('/groups'),
-          icon: Icon(Icons.groups_rounded, color: effectiveIconColor, size: 16),
-          tooltip: 'Gruppen',
-          padding: EdgeInsets.zero,
-          constraints: const BoxConstraints(minWidth: 20, minHeight: 34),
-        ),
-        IconButton(
           onPressed: () => context.push('/search'),
           icon: Icon(Icons.search_rounded, color: effectiveIconColor, size: 16),
           padding: EdgeInsets.zero,
-          constraints: const BoxConstraints(minWidth: 20, minHeight: 34),
+          constraints: const BoxConstraints(minWidth: 24, minHeight: 34),
         ),
         if (location == '/profile')
           IconButton(
             onPressed: () => context.push('/settings'),
             icon: Icon(Icons.settings_outlined, color: effectiveIconColor, size: 16),
             padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 20, minHeight: 34),
+            constraints: const BoxConstraints(minWidth: 24, minHeight: 34),
           )
         else
           GestureDetector(
@@ -572,43 +708,21 @@ class _MainShellState extends ConsumerState<MainShell>
       ],
     );
 
-    // Karten-Tab: Pill-Box um Icons
-    if (isMapScreen) {
-      iconRow = Container(
-        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-        decoration: BoxDecoration(
-          color: mapBoxColor,
-          borderRadius: BorderRadius.circular(28),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.25),
-              blurRadius: 12,
-              offset: const Offset(0, 2),
-            ),
-          ],
-        ),
-        child: iconRow,
-      );
-    }
-
     return Positioned(
       top: 0, left: 0, right: 0,
       child: SafeArea(
         bottom: false,
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          child: Row(
-            children: [
-              const CommunitySwitcher(),
-              const SizedBox(width: 4),
-              Flexible(
-                child: FittedBox(
-                  fit: BoxFit.scaleDown,
-                  alignment: Alignment.centerRight,
-                  child: iconRow,
-                ),
-              ),
-            ],
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          child: SizedBox(
+            height: 38,
+            child: Row(
+              children: [
+                const CommunitySwitcher(),
+                const Spacer(),
+                iconRow,
+              ],
+            ),
           ),
         ),
       ),
@@ -622,26 +736,26 @@ class _MainShellState extends ConsumerState<MainShell>
     return IconButton(
       onPressed: () => context.push('/notifications'),
       padding: EdgeInsets.zero,
-      constraints: const BoxConstraints(minWidth: 20, minHeight: 34),
+      constraints: const BoxConstraints(minWidth: 24, minHeight: 34),
       icon: Stack(
         clipBehavior: Clip.none,
         children: [
           Icon(Icons.notifications_outlined, color: iconColor, size: 16),
           if (unreadCount > 0)
             Positioned(
-              right: -6, top: -4,
+              right: -4, top: -4,
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
+                padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1),
+                constraints: const BoxConstraints(minWidth: 12, minHeight: 12),
                 decoration: BoxDecoration(
                   color: accentColor,
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: Colors.black, width: 1.5),
+                  borderRadius: BorderRadius.circular(7),
+                  border: Border.all(color: Colors.black, width: 1),
                 ),
                 child: Center(
                   child: Text(
                     unreadCount > 99 ? '99+' : '$unreadCount',
-                    style: GoogleFonts.inter(fontSize: 9, fontWeight: FontWeight.w700, color: Colors.white),
+                    style: GoogleFonts.inter(fontSize: 7, fontWeight: FontWeight.w700, color: Colors.white, height: 1),
                   ),
                 ),
               ),
@@ -657,26 +771,26 @@ class _MainShellState extends ConsumerState<MainShell>
     return IconButton(
       onPressed: () => context.push('/messages'),
       padding: EdgeInsets.zero,
-      constraints: const BoxConstraints(minWidth: 20, minHeight: 34),
+      constraints: const BoxConstraints(minWidth: 24, minHeight: 34),
       icon: Stack(
         clipBehavior: Clip.none,
         children: [
           Icon(Icons.chat_bubble_outline_rounded, color: iconColor, size: 16),
           if (unreadCount > 0)
             Positioned(
-              right: -6, top: -4,
+              right: -4, top: -4,
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
+                padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1),
+                constraints: const BoxConstraints(minWidth: 12, minHeight: 12),
                 decoration: BoxDecoration(
                   color: accentColor,
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: Colors.black, width: 1.5),
+                  borderRadius: BorderRadius.circular(7),
+                  border: Border.all(color: Colors.black, width: 1),
                 ),
                 child: Center(
                   child: Text(
                     unreadCount > 99 ? '99+' : '$unreadCount',
-                    style: GoogleFonts.inter(fontSize: 9, fontWeight: FontWeight.w700, color: Colors.white),
+                    style: GoogleFonts.inter(fontSize: 7, fontWeight: FontWeight.w700, color: Colors.white, height: 1),
                   ),
                 ),
               ),
@@ -699,10 +813,10 @@ class _MainShellState extends ConsumerState<MainShell>
 
     if (avatarUrl != null && avatarUrl.isNotEmpty) {
       return Container(
-        width: 20, height: 20,
+        width: 28, height: 28,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
-          border: Border.all(color: accentColor.withValues(alpha: 0.8), width: 1.5),
+          border: Border.all(color: accentColor, width: 2),
         ),
         child: ClipOval(
           child: Image.network(avatarUrl, fit: BoxFit.cover,
@@ -715,13 +829,13 @@ class _MainShellState extends ConsumerState<MainShell>
 
   Widget _buildInitialAvatar(String initial, Color accentColor) {
     return Container(
-      width: 20, height: 20,
+      width: 28, height: 28,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
         gradient: LinearGradient(colors: [accentColor, accentColor.withValues(alpha: 0.6)]),
       ),
       child: Center(
-        child: Text(initial, style: GoogleFonts.inter(fontSize: 10, fontWeight: FontWeight.w700, color: Colors.white)),
+        child: Text(initial, style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700, color: Colors.white)),
       ),
     );
   }
@@ -864,56 +978,50 @@ class _MainShellState extends ConsumerState<MainShell>
     );
   }
 
-  // ─── Center "+" Button ─────────────────────────────────────────────────
+  // ─── Tab Button ─────────────────────────────────────────────────────────
 
-  Widget _buildCenterButton({
-    required String location,
-    required Color accentColor,
-    required bool isSpeedDialOpen,
-    required bool hasSpeedDial,
-  }) {
-    return Expanded(
-      child: GestureDetector(
-        onTap: () {
-          if (hasSpeedDial) {
-            _toggleSpeedDial();
-          }
-        },
-        behavior: HitTestBehavior.opaque,
-        child: Center(
-          child: Container(
-            width: 40, height: 40,
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [accentColor, accentColor.withValues(alpha: 0.7)],
-              ),
-              borderRadius: BorderRadius.circular(12),
-              boxShadow: [
-                BoxShadow(
-                  color: accentColor.withValues(alpha: 0.4),
-                  blurRadius: 12,
-                  offset: const Offset(0, 4),
-                ),
-              ],
-            ),
-            child: AnimatedRotation(
-              turns: isSpeedDialOpen ? 0.125 : 0.0,
-              duration: const Duration(milliseconds: 250),
-              child: const Icon(Icons.add_rounded, color: Colors.white, size: 22),
+  /// Combined Profil/Garage icon — person silhouette with small car badge
+  Widget _buildProfileGarageIcon(bool isActive, Color accentColor) {
+    final inactiveColor = Theme.of(context).brightness == Brightness.dark
+        ? Colors.white.withValues(alpha: 0.4)
+        : const Color(0xFF6C757D);
+    final color = isActive ? accentColor : inactiveColor;
+
+    return SizedBox(
+      key: ValueKey('profile_garage_$isActive'),
+      width: 32,
+      height: 28,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          // Main person icon
+          Positioned(
+            left: 0,
+            top: 0,
+            child: Icon(
+              isActive ? Icons.person_rounded : Icons.person_outlined,
+              color: color,
+              size: 26,
             ),
           ),
-        ),
+          // Small car badge bottom-right
+          Positioned(
+            right: -2,
+            bottom: -2,
+            child: Icon(
+              Icons.directions_car_rounded,
+              color: color,
+              size: 14,
+            ),
+          ),
+        ],
       ),
     );
   }
 
-  // ─── Tab Button ─────────────────────────────────────────────────────────
-
   Widget _buildTab(
     BuildContext context, {
-    required (String, IconData, IconData, String) tab,
+    required (String, IconData, IconData) tab,
     required bool isActive,
     required Color accentColor,
   }) {
@@ -921,12 +1029,11 @@ class _MainShellState extends ConsumerState<MainShell>
       child: InkWell(
         onTap: () {
           if (!isActive) {
+            // Reset immersive scroll when switching tabs
+            NavigationState.instance.setFeedScrolling(false);
             if (ref.read(blitzerSpeedDialProvider)) _closeSpeedDial();
             if (_onlineSheetVisible) {
               _closeOnlineSheet();
-              // Wait for the setState rebuild to finish before navigating.
-              // This prevents a grey frame caused by GoRouter starting
-              // its transition while the overlay is still being removed.
               WidgetsBinding.instance.addPostFrameCallback((_) {
                 if (mounted) context.go(tab.$1);
               });
@@ -937,34 +1044,20 @@ class _MainShellState extends ConsumerState<MainShell>
         },
         splashColor: Colors.transparent,
         highlightColor: Colors.transparent,
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            AnimatedSwitcher(
-              duration: const Duration(milliseconds: 200),
-              child: Icon(
-                isActive ? tab.$2 : tab.$3,
-                key: ValueKey('${tab.$4}_$isActive'),
-                color: isActive
-                    ? accentColor
-                    : (Theme.of(context).brightness == Brightness.dark ? Colors.white.withValues(alpha: 0.4) : const Color(0xFF6C757D)),
-                size: 22,
-              ),
-            ),
-            const SizedBox(height: 3),
-            Text(
-              tab.$4,
-              style: GoogleFonts.inter(
-                fontSize: 10,
-                fontWeight: isActive ? FontWeight.w600 : FontWeight.w400,
-                color: isActive
-                    ? accentColor
-                    : (Theme.of(context).brightness == Brightness.dark ? Colors.white.withValues(alpha: 0.4) : const Color(0xFF6C757D)),
-              ),
-              overflow: TextOverflow.ellipsis,
-              maxLines: 1,
-            ),
-          ],
+        child: Center(
+          child: AnimatedSwitcher(
+            duration: const Duration(milliseconds: 200),
+            child: tab.$1 == '/profile'
+                ? _buildProfileGarageIcon(isActive, accentColor)
+                : Icon(
+                    isActive ? tab.$2 : tab.$3,
+                    key: ValueKey('${tab.$1}_$isActive'),
+                    color: isActive
+                        ? accentColor
+                        : (Theme.of(context).brightness == Brightness.dark ? Colors.white.withValues(alpha: 0.4) : const Color(0xFF6C757D)),
+                    size: 26,
+                  ),
+          ),
         ),
       ),
     );
@@ -1042,7 +1135,7 @@ class _MainShellState extends ConsumerState<MainShell>
                         ),
                         const SizedBox(width: 10),
                         Text(
-                          '${users.length + (isLiveNotifier.value ? 1 : 0)} Biker online',
+                          '${users.length} Biker online',
                           style: GoogleFonts.inter(
                             fontSize: 20, fontWeight: FontWeight.w800, color: textColor,
                             letterSpacing: -0.3,
@@ -1095,16 +1188,8 @@ class _MainShellState extends ConsumerState<MainShell>
                                   child: InkWell(
                                     borderRadius: BorderRadius.circular(16),
                                     onTap: () {
-                                      ref.read(focusMapTargetProvider.notifier).focusOn(
-                                        FocusMapTarget(
-                                          position: LatLng(u.lat, u.lng),
-                                          userId: u.userId,
-                                          displayName: u.displayName,
-                                          zoom: 15,
-                                        ),
-                                      );
                                       _closeOnlineSheet();
-                                      context.go('/map');
+                                      context.push('/profile/${u.userId}');
                                     },
                                     child: Container(
                                       padding: const EdgeInsets.all(12),
@@ -1211,6 +1296,7 @@ class _MainShellState extends ConsumerState<MainShell>
       ]),
     );
   }
+
 }
 
 /// Standalone widget for the live online badge.
@@ -1230,9 +1316,8 @@ class _LiveOnlineBadgeWidget extends StatelessWidget {
         return ValueListenableBuilder<bool>(
           valueListenable: isLiveNotifier,
           builder: (context, isLive, _) {
-            // Anzahl online User — immer mindestens 1 (der eigene User)
-            final othersCount = onlineUsers.length;
-            final liveCount = othersCount > 0 ? othersCount + 1 : 1;
+            // Nur gefolgte User zählen — sich selbst NICHT mitzählen
+            final liveCount = onlineUsers.length;
             // Badge ist IMMER sichtbar neben der Glocke
 
             final isDark = Theme.of(context).brightness == Brightness.dark;

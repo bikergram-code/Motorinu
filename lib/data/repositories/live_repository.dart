@@ -17,19 +17,36 @@ class LiveRepository {
   //  BROWSE / DISCOVERY
   // ═══════════════════════════════════════════════════
 
-  /// Get active live streams for a community, ordered by viewer count.
+  /// Get active live streams from followed users, ordered by viewer count.
   Future<List<LiveStream>> getActiveStreams({
     String? community,
     int limit = 20,
     int offset = 0,
   }) async {
+    final userId = _currentUserId;
+    if (userId == null) return [];
+
     final communityFilter = community ?? 'bikergram';
+
+    // Get followed user IDs
+    final followData = await _supabase
+        .from('follows')
+        .select('following_id')
+        .eq('follower_id', userId)
+        .eq('community', communityFilter);
+
+    final followingIds = followData
+        .map<String>((f) => f['following_id'] as String)
+        .toList();
+
+    if (followingIds.isEmpty) return [];
 
     final data = await _supabase
         .from('live_sessions')
         .select(_profileSelect)
         .eq('community', communityFilter)
         .eq('status', 'live')
+        .inFilter('host_user_id', followingIds)
         .order('viewer_count', ascending: false)
         .order('started_at', ascending: false)
         .range(offset, offset + limit - 1);
@@ -62,6 +79,20 @@ class LiveRepository {
     }
 
     final data = await query
+        .order('ended_at', ascending: false)
+        .limit(limit);
+
+    return data.map<LiveStream>(
+      (d) => LiveStream.fromSupabase(d as Map<String, dynamic>),
+    ).toList();
+  }
+
+  /// Get recent ended streams from all users.
+  Future<List<LiveStream>> getRecentStreams({int limit = 30}) async {
+    final data = await _supabase
+        .from('live_sessions')
+        .select(_profileSelect)
+        .eq('status', 'ended')
         .order('ended_at', ascending: false)
         .limit(limit);
 

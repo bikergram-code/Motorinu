@@ -472,12 +472,24 @@ class _CreateGroupSheetState extends ConsumerState<CreateGroupSheet> {
                 rideColor: _rideColor,
               );
 
-      // Add selected friends
+      // Add selected friends + send notifications
       if (_selectedFriendIds.isNotEmpty) {
         try {
           final repo = ref.read(groupRepositoryProvider);
           await repo.addMembersToGroup(
               groupId, _selectedFriendIds.toList());
+          // Notify each invited user
+          final notifRepo = ref.read(notificationRepositoryProvider);
+          for (final userId in _selectedFriendIds) {
+            notifRepo.createNotification(
+              targetUserId: userId,
+              type: 'system',
+              title: 'Du wurdest zur Gruppe "$name" eingeladen',
+              body: 'Tippe hier um die Gruppe zu öffnen',
+              data: {'group_id': groupId},
+              community: ref.read(communityProvider)?.name ?? 'bikergram',
+            );
+          }
         } catch (e) {
           debugPrint('[CreateGroup] Add members error: $e');
         }

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -27,6 +28,7 @@ class IncomingNotification {
         'mention' => '📢',
         'xp' => '⭐',
         'system' => 'ℹ️',
+        'vehicle_offer' => '💰',
         _ => '🔔',
       };
 }
@@ -45,7 +47,28 @@ class IncomingNotificationBus {
   void emit(Map<String, dynamic> newNotif) {
     final type = newNotif['type']?.toString() ?? 'system';
     final title = newNotif['title']?.toString() ?? '';
-    final body = newNotif['body']?.toString();
+    var body = newNotif['body']?.toString();
+
+    // Parse vehicle_offer JSON body into human-readable text
+    if (type == 'vehicle_offer' && body != null && body.startsWith('{')) {
+      try {
+        final data = json.decode(body) as Map<String, dynamic>;
+        final offerType = data['type'] as String? ?? 'offer';
+        final vehicleName = data['vehicle_name'] as String? ?? '';
+        final amount = (data['price'] as num?)?.toDouble() ?? (data['amount'] as num?)?.toDouble() ?? 0;
+        body = switch (offerType) {
+          'like' => '\u2764\ufe0f $vehicleName gefällt mir',
+          'offer' => '\ud83d\udcb0 Angebot: ${amount.toStringAsFixed(0)} \u20ac für $vehicleName',
+          'counter' => '\ud83d\udd04 Gegenangebot: ${amount.toStringAsFixed(0)} \u20ac für $vehicleName',
+          'accepted' => '\u2705 Angebot angenommen! $vehicleName',
+          'declined' => '\u274c Angebot abgelehnt: $vehicleName',
+          'direct_buy' => '\ud83d\uded2 Direktkauf: $vehicleName',
+          _ => '\ud83d\udcb0 Angebot für $vehicleName',
+        };
+      } catch (_) {
+        body = 'Fahrzeug-Angebot';
+      }
+    }
 
     debugPrint('[NotifBus] Toast: $type → $title');
 

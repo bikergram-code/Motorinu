@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:io';
 
+import 'package:audio_session/audio_session.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 
@@ -26,8 +28,17 @@ class TtsAlertService {
   final Set<String> _spokenAlerts = {};
 
   /// Minimum time between any TTS announcements (prevents overlapping speech).
+  /// 1s is enough gap — 3s was blocking sequential nav announcements.
   DateTime? _lastSpeakTime;
-  static const _minInterval = Duration(seconds: 3);
+  static const _minInterval = Duration(milliseconds: 1500);
+
+  /// Queue for sequential speech (used by speakQueued).
+  final List<String> _speechQueue = [];
+  bool _processingQueue = false;
+  Completer<void>? _speechCompleter;
+
+  /// Whether the queue is currently processing speech.
+  bool get isQueueActive => _processingQueue;
 
   /// Initialize TTS engine with German language.
   /// On Chinese phones: tries to find a Google TTS engine that supports German.
@@ -37,6 +48,24 @@ class TtsAlertService {
 
     if (Platform.isAndroid) {
       await _selectBestEngine();
+    }
+
+    // Configure AudioSession for Bluetooth/media routing
+    try {
+      final session = await AudioSession.instance;
+      await session.configure(const AudioSessionConfiguration(
+        avAudioSessionCategory: AVAudioSessionCategory.playback,
+        avAudioSessionMode: AVAudioSessionMode.spokenAudio,
+        androidAudioAttributes: AndroidAudioAttributes(
+          contentType: AndroidAudioContentType.speech,
+          usage: AndroidAudioUsage.media, // Routes through Bluetooth/media
+          flags: AndroidAudioFlags.none,
+        ),
+        androidAudioFocusGainType: AndroidAudioFocusGainType.gainTransientMayDuck,
+      ));
+      debugPrint('[TTS] AudioSession configured for Bluetooth/media routing');
+    } catch (e) {
+      debugPrint('[TTS] AudioSession config failed: $e');
     }
 
     // Try setting German
@@ -57,23 +86,118 @@ class TtsAlertService {
       debugPrint('[TTS] Falling back to en-US: $enResult');
     }
 
-    await _tts.setSpeechRate(0.55); // Slightly faster, still clear for riding
-    await _tts.setVolume(1.0);
-    await _tts.setPitch(1.0);
+    // Select best quality German voice available
+    await _selectBestGermanVoice();
 
-    // Use a completion handler to track speaking state
+    await _tts.setSpeechRate(0.52); // Natural pace, clear for riding
+    await _tts.setVolume(1.0);
+    await _tts.setPitch(0.9); // Deeper pitch — mature, professional navi voice
+
+    // Use a completion handler to track speaking state + resolve queue completer.
+    // Guard against completing an already-completed completer (race condition).
     _tts.setCompletionHandler(() {
       _isSpeaking = false;
+      if (_speechCompleter != null && !_speechCompleter!.isCompleted) {
+        _speechCompleter!.complete();
+      }
+      _speechCompleter = null;
     });
     _tts.setCancelHandler(() {
       _isSpeaking = false;
+      if (_speechCompleter != null && !_speechCompleter!.isCompleted) {
+        _speechCompleter!.complete();
+      }
+      _speechCompleter = null;
     });
     _tts.setErrorHandler((msg) {
       _isSpeaking = false;
       debugPrint('[TTS] Error: $msg');
+      if (_speechCompleter != null && !_speechCompleter!.isCompleted) {
+        _speechCompleter!.complete();
+      }
+      _speechCompleter = null;
     });
 
     debugPrint('[TTS] Initialized (german=$_germanAvailable)');
+  }
+
+  /// Select the highest quality German voice on the device.
+  /// Prefers: Network/HD voices > female voices > any German voice.
+  Future<void> _selectBestGermanVoice() async {
+    try {
+      final voices = await _tts.getVoices;
+      if (voices == null) return;
+      final voiceList = (voices as List).map((v) => Map<String, String>.from(
+        (v as Map).map((k, val) => MapEntry(k.toString(), val.toString())),
+      )).toList();
+
+      // Filter German voices
+      final deVoices = voiceList.where((v) {
+        final locale = (v['locale'] ?? v['language'] ?? '').toLowerCase();
+        return locale.startsWith('de');
+      }).toList();
+
+      debugPrint('[TTS-Alert] Deutsche Stimmen: ${deVoices.length}');
+      for (final v in deVoices) {
+        debugPrint('[TTS-Alert]   ${v['name']} (locale: ${v['locale']})');
+      }
+
+      if (deVoices.isEmpty) return;
+
+      Map<String, String>? bestVoice;
+
+      // 1st priority: Network/HD male voice (deep, mature — like a navi)
+      for (final v in deVoices) {
+        final name = (v['name'] ?? '').toLowerCase();
+        if ((name.contains('network') || name.contains('hd')) &&
+            (name.contains('dea') || name.contains('dec') || name.contains('deg') ||
+             name.contains('male') || name.contains('m00') || name.contains('m01')) &&
+            !name.contains('female')) {
+          bestVoice = v;
+          break;
+        }
+      }
+
+      // 2nd priority: Any male voice (local)
+      if (bestVoice == null) {
+        for (final v in deVoices) {
+          final name = (v['name'] ?? '').toLowerCase();
+          if ((name.contains('dea') || name.contains('dec') || name.contains('deg') ||
+               name.contains('male') || name.contains('m00') || name.contains('m01')) &&
+              !name.contains('female')) {
+            bestVoice = v;
+            break;
+          }
+        }
+      }
+
+      // 3rd priority: Network/HD mature female voice (fallback)
+      if (bestVoice == null) {
+        for (final v in deVoices) {
+          final name = (v['name'] ?? '').toLowerCase();
+          if (name.contains('network') || name.contains('hd')) {
+            bestVoice = v;
+            break;
+          }
+        }
+      }
+
+      // 4th priority: Any "local" (offline HD) voice
+      if (bestVoice == null) {
+        bestVoice = deVoices.cast<Map<String, String>?>().firstWhere(
+          (v) => (v?['name'] ?? '').toLowerCase().contains('local'),
+          orElse: () => null,
+        );
+      }
+
+      // 5th: any German voice
+      bestVoice ??= deVoices.first;
+
+      await _tts.setVoice({'name': bestVoice['name']!, 'locale': bestVoice['locale'] ?? 'de-DE'});
+      debugPrint('[TTS-Alert] Stimme gewählt: ${bestVoice['name']}');
+    } catch (e) {
+      debugPrint('[TTS-Alert] Stimmenauswahl fehlgeschlagen: $e');
+    }
   }
 
   /// On Android: try to select Google TTS engine (supports German).
@@ -207,9 +331,89 @@ class TtsAlertService {
     return _speak(text, priority: true);
   }
 
+  /// Add text to a sequential speech queue.
+  /// Each message waits for the previous one to finish — no cutting off.
+  /// Use this for multi-sentence flows (Events, POI lists, Blitzer).
+  void speakQueued(String text) {
+    _speechQueue.add(text);
+    if (!_processingQueue) {
+      _processQueue();
+    }
+  }
+
+  /// Clear the speech queue and stop current queued speech.
+  /// Also resets throttle so next speak call isn't blocked.
+  void clearQueue() {
+    _speechQueue.clear();
+    _processingQueue = false;
+    _lastSpeakTime = null; // Reset throttle — next TTS call goes through immediately
+  }
+
+  /// Process queued speech items sequentially.
+  Future<void> _processQueue() async {
+    if (_processingQueue) return;
+    _processingQueue = true;
+
+    if (!_initialized) await init();
+
+    // Set language ONCE before processing the queue (not per item!)
+    // Setting language mid-speech can abort the current utterance.
+    if (_germanAvailable) {
+      await _tts.setLanguage('de-DE');
+    }
+
+    while (_speechQueue.isNotEmpty) {
+      final text = _speechQueue.removeAt(0);
+
+      // Wait for any current speech to finish first (don't kill it)
+      if (_isSpeaking && _speechCompleter != null) {
+        await _speechCompleter!.future.timeout(
+          const Duration(seconds: 15),
+          onTimeout: () {},
+        );
+      }
+
+      // Set up completer BEFORE speaking so completion handler can resolve it
+      _speechCompleter = Completer<void>();
+
+      _lastSpeakTime = DateTime.now();
+      _isSpeaking = true;
+      debugPrint('[TTS] Speaking [QUEUED]: $text');
+      await _tts.speak(text);
+
+      // Wait for this speech to complete — with safety timeout
+      try {
+        await _speechCompleter?.future.timeout(
+          const Duration(seconds: 10),
+          onTimeout: () {
+            debugPrint('[TTS] Queue timeout for: $text');
+          },
+        );
+      } catch (_) {
+        debugPrint('[TTS] Completer error for: $text');
+      }
+      // Always reset speaking state after each item
+      _isSpeaking = false;
+      _speechCompleter = null;
+
+      // 800ms pause between queued items — fast enough to feel responsive
+      await Future.delayed(const Duration(milliseconds: 800));
+    }
+
+    _processingQueue = false;
+    // Reset throttle so nav announcements can fire right after queue ends
+    _lastSpeakTime = null;
+  }
+
   /// Internal: speak text with throttling.
   Future<bool> _speak(String text, {bool priority = false}) async {
     if (!_initialized) await init();
+
+    // Don't interrupt queued speech with non-priority calls
+    if (_processingQueue && !priority) {
+      debugPrint('[TTS] Skipped (queue active): $text');
+      return false;
+    }
 
     // Throttle (skip for priority messages)
     if (!priority) {
@@ -221,9 +425,16 @@ class TtsAlertService {
       }
     }
 
-    // If already speaking, stop previous and speak new
+    // If already speaking: priority interrupts, normal calls wait or skip
     if (_isSpeaking) {
-      await _tts.stop();
+      if (priority) {
+        // Priority: interrupt current speech immediately
+        await _tts.stop();
+      } else {
+        // Non-priority: skip — don't cut off current announcement
+        debugPrint('[TTS] Skipped (already speaking): $text');
+        return false;
+      }
     }
 
     // Re-set language before each speak (some engines reset it)

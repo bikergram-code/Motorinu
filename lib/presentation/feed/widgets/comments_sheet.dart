@@ -101,6 +101,7 @@ class _CommentsSheetState extends ConsumerState<CommentsSheet> {
         _isSending = false;
       });
       ref.read(feedNotifierProvider.notifier).updateCommentCount(widget.postId, 1);
+      ref.read(followingFeedProvider.notifier).updateCommentCount(widget.postId, 1);
       // Create notification for the post author
       if (widget.postUserId != null && widget.postUserId!.isNotEmpty) {
         final authState = ref.read(authNotifierProvider);
@@ -137,6 +138,7 @@ class _CommentsSheetState extends ConsumerState<CommentsSheet> {
         _comments.removeWhere((c) => c.id == comment.id);
       });
       ref.read(feedNotifierProvider.notifier).updateCommentCount(widget.postId, -1);
+      ref.read(followingFeedProvider.notifier).updateCommentCount(widget.postId, -1);
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(

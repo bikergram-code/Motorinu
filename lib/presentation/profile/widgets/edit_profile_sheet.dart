@@ -73,6 +73,7 @@ class _EditProfileSheetState extends ConsumerState<EditProfileSheet> {
   int? _motoStartAge;
   int? _carStartAge;
   bool _hasTrackExperience = false;
+  String? _selectedGender;
 
   @override
   void initState() {
@@ -97,6 +98,7 @@ class _EditProfileSheetState extends ConsumerState<EditProfileSheet> {
       _motoStartAge = authState.user.motoStartAge;
       _carStartAge = authState.user.carStartAge;
       _hasTrackExperience = authState.user.hasTrackExperience;
+      _selectedGender = authState.user.gender;
     }
   }
 
@@ -185,6 +187,7 @@ class _EditProfileSheetState extends ConsumerState<EditProfileSheet> {
         motoStartAge: _motoStartAge,
         carStartAge: _carStartAge,
         hasTrackExperience: _hasTrackExperience,
+        gender: _selectedGender,
         homeLat: homeLat,
         homeLng: homeLng,
       );
@@ -334,7 +337,7 @@ class _EditProfileSheetState extends ConsumerState<EditProfileSheet> {
                   _input(_bikernameController, 'Dein Spitzname', accentColor: accentColor),
 
                   const SizedBox(height: 20),
-                  _label('Bio'),
+                  _label('Info'),
                   const SizedBox(height: 8),
                   _input(_bioController, 'Erzähl etwas über dich...', maxLines: 3, accentColor: accentColor),
 
@@ -363,6 +366,24 @@ class _EditProfileSheetState extends ConsumerState<EditProfileSheet> {
                           style: GoogleFonts.inter(fontSize: 15, color: textOnCard)),
                     )).toList(),
                     onChanged: (v) => setState(() => _selectedCountry = v),
+                    accentColor: accentColor,
+                    textOnCard: textOnCard,
+                  ),
+
+                  const SizedBox(height: 20),
+
+                  // ── Geschlecht ──
+                  _label('Geschlecht'),
+                  const SizedBox(height: 8),
+                  _dropdown<String>(
+                    value: _selectedGender,
+                    hint: 'Nicht angeben',
+                    items: [
+                      DropdownMenuItem<String>(value: 'male', child: Text('Männlich', style: GoogleFonts.inter(fontSize: 15, color: textOnCard))),
+                      DropdownMenuItem<String>(value: 'female', child: Text('Weiblich', style: GoogleFonts.inter(fontSize: 15, color: textOnCard))),
+                      DropdownMenuItem<String>(value: 'other', child: Text('Divers', style: GoogleFonts.inter(fontSize: 15, color: textOnCard))),
+                    ],
+                    onChanged: (v) => setState(() => _selectedGender = v),
                     accentColor: accentColor,
                     textOnCard: textOnCard,
                   ),

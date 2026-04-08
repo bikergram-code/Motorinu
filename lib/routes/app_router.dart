@@ -11,6 +11,7 @@ import '../presentation/onboarding/community_selection_screen.dart';
 import '../presentation/onboarding/login_screen.dart';
 import '../presentation/onboarding/complete_profile_screen.dart';
 import '../presentation/onboarding/register_screen.dart';
+import '../presentation/onboarding/app_tour_screen.dart';
 import '../presentation/shell/main_shell.dart';
 import '../presentation/feed/feed_screen.dart';
 import '../presentation/garage/garage_screen.dart';
@@ -32,6 +33,14 @@ import '../presentation/profile/saved_posts_screen.dart';
 import '../presentation/groups/group_detail_screen.dart';
 import '../presentation/groups/group_ride_screen.dart';
 import '../presentation/groups/groups_screen.dart';
+import '../presentation/navigation/mapbox_nav_screen.dart';
+import '../presentation/navigation/mapbox_ride_screen.dart';
+import '../presentation/tracker/ride_history_screen.dart';
+import '../presentation/marketplace/marketplace_detail_screen.dart';
+import '../presentation/dating/dating_screen.dart';
+
+/// Global navigator key for push notification navigation.
+final rootNavigatorKey = GlobalKey<NavigatorState>(debugLabel: 'root');
 
 // ---------------------------------------------------------------------------
 // Motorsport-style page transition — fast diagonal slide + fade.
@@ -41,8 +50,10 @@ import '../presentation/groups/groups_screen.dart';
 Page<T> _motoPage<T>({required LocalKey key, required Widget child}) {
   return CustomTransitionPage<T>(
     key: key,
-    child: child,
+    // Wrap child in black container so the transition never shows white
+    child: ColoredBox(color: const Color(0xFF000000), child: child),
     opaque: true,
+    barrierColor: const Color(0xFF000000),
     transitionDuration: const Duration(milliseconds: 260),
     reverseTransitionDuration: const Duration(milliseconds: 200),
     transitionsBuilder: (context, animation, secondaryAnimation, child) {
@@ -64,11 +75,11 @@ Page<T> _motoPage<T>({required LocalKey key, required Widget child}) {
         curve: Curves.easeInCubic,
       ));
 
-      // Fade starts at 0.6 to avoid grey flash through opaque background
-      final fade = Tween<double>(begin: 0.6, end: 1.0).animate(
+      // Fade starts at 0.85 — nearly opaque from start, no white flash
+      final fade = Tween<double>(begin: 0.85, end: 1.0).animate(
         CurvedAnimation(
           parent: animation,
-          curve: const Interval(0.0, 0.5, curve: Curves.easeOut),
+          curve: const Interval(0.0, 0.4, curve: Curves.easeOut),
         ),
       );
 
@@ -118,6 +129,7 @@ final appRouterProvider = Provider<GoRouter>((ref) {
   });
 
   return GoRouter(
+    navigatorKey: rootNavigatorKey,
     initialLocation: '/',
     refreshListenable: refreshNotifier,
     redirect: (context, state) {
@@ -138,6 +150,7 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       final isAuthRoute =
           loc == '/' || loc == '/login' || loc == '/register';
       final isOnboarding = loc == '/complete-profile';
+      final isAppTour = loc == '/app-tour';
 
       // Still checking auth on startup → don't redirect.
       // IMPORTANT: Don't redirect away from the current page during a
@@ -149,13 +162,16 @@ final appRouterProvider = Provider<GoRouter>((ref) {
 
       // Definitively not authenticated → go to login
       if (authState is Unauthenticated || authState is AuthError) {
-        if (!isAuthRoute && !isOnboarding) return '/login';
+        if (!isAuthRoute && !isOnboarding && !isAppTour) return '/login';
         return null;
       }
 
       // Authenticated → check if profile is complete
       if (authState is Authenticated) {
         final needsOnboarding = authState.user.birthYear == null;
+
+        // App tour is always allowed for authenticated users
+        if (isAppTour) return null;
 
         // On auth route (login/register/community) → go to onboarding or feed
         if (isAuthRoute) {
@@ -188,56 +204,62 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         builder: (_, __) => const RegisterScreen(),
       ),
 
+      // App tour after registration
+      GoRoute(
+        path: '/app-tour',
+        builder: (_, __) => const AppTourScreen(),
+      ),
+
       // Complete profile after social sign-in
       GoRoute(
         path: '/complete-profile',
         builder: (_, __) => const CompleteProfileScreen(),
       ),
 
-      // Main app with bottom navigation shell
+      // Main app with bottom navigation shell — 3 tabs: Home, Karte, Profil/Garage
       ShellRoute(
         builder: (_, __, child) => MainShell(child: child),
         routes: [
           GoRoute(
             path: '/feed',
-            pageBuilder: (_, __) => const NoTransitionPage(
-              child: FeedScreen(),
-            ),
-          ),
-          GoRoute(
-            path: '/garage',
-            pageBuilder: (_, __) => const NoTransitionPage(
-              child: GarageScreen(),
+            pageBuilder: (_, state) => NoTransitionPage(
+              key: state.pageKey,
+              child: const FeedScreen(),
             ),
           ),
           GoRoute(
             path: '/map',
-            pageBuilder: (_, __) => const NoTransitionPage(
-              child: CommunityMapScreen(),
-            ),
-          ),
-          GoRoute(
-            path: '/live',
-            pageBuilder: (_, __) => const NoTransitionPage(
-              child: LiveBrowseScreen(),
-            ),
-          ),
-          GoRoute(
-            path: '/events',
-            pageBuilder: (_, __) => const NoTransitionPage(
-              child: EventsScreen(),
-            ),
-          ),
-          GoRoute(
-            path: '/market',
-            pageBuilder: (_, __) => const NoTransitionPage(
-              child: MarketplaceScreen(),
+            pageBuilder: (_, state) => NoTransitionPage(
+              key: state.pageKey,
+              child: const MapboxRideScreen(), // Freie Fahrt — Mapbox statt Google Maps
             ),
           ),
           GoRoute(
             path: '/profile',
-            pageBuilder: (_, __) => const NoTransitionPage(
-              child: ProfileScreen(),
+            pageBuilder: (_, state) => NoTransitionPage(
+              key: state.pageKey,
+              child: const ProfileScreen(),
+            ),
+          ),
+          GoRoute(
+            path: '/events',
+            pageBuilder: (_, state) => NoTransitionPage(
+              key: state.pageKey,
+              child: const EventsScreen(),
+            ),
+          ),
+          GoRoute(
+            path: '/garage',
+            pageBuilder: (_, state) => NoTransitionPage(
+              key: state.pageKey,
+              child: const GarageScreen(),
+            ),
+          ),
+          GoRoute(
+            path: '/market',
+            pageBuilder: (_, state) => NoTransitionPage(
+              key: state.pageKey,
+              child: const MarketplaceScreen(),
             ),
           ),
         ],
@@ -245,11 +267,52 @@ final appRouterProvider = Provider<GoRouter>((ref) {
 
       // Full-screen routes (no bottom nav) — motorsport transition
       GoRoute(
-        path: '/messages',
+        path: '/live',
         pageBuilder: (_, state) => _motoPage(
           key: state.pageKey,
-          child: const MessagesScreen(),
+          child: const LiveBrowseScreen(),
         ),
+      ),
+      GoRoute(
+        path: '/garage/:userId',
+        pageBuilder: (_, state) => _motoPage(
+          key: state.pageKey,
+          child: GarageScreen(userId: state.pathParameters['userId']),
+        ),
+      ),
+      GoRoute(
+        path: '/market/:userId',
+        pageBuilder: (_, state) => _motoPage(
+          key: state.pageKey,
+          child: MarketplaceScreen(userId: state.pathParameters['userId']),
+        ),
+      ),
+      GoRoute(
+        path: '/listing/:id',
+        pageBuilder: (_, state) {
+          final id = int.parse(state.pathParameters['id']!);
+          return _motoPage(
+            key: state.pageKey,
+            child: MarketplaceDetailScreen(listingId: id),
+          );
+        },
+      ),
+      GoRoute(
+        path: '/achievements/:userId',
+        pageBuilder: (_, state) => _motoPage(
+          key: state.pageKey,
+          child: GarageScreen(userId: state.pathParameters['userId']), // TODO: AchievementsScreen
+        ),
+      ),
+      GoRoute(
+        path: '/messages',
+        pageBuilder: (_, state) {
+          final filter = state.uri.queryParameters['filter'];
+          return _motoPage(
+            key: state.pageKey,
+            child: MessagesScreen(initialFilter: filter),
+          );
+        },
       ),
       GoRoute(
         path: '/messages/:conversationId',
@@ -282,9 +345,10 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         path: '/group-ride/:groupId',
         pageBuilder: (_, state) {
           final groupId = int.parse(state.pathParameters['groupId']!);
+          // Use Mapbox ride screen (native 60fps tracking)
           return _motoPage(
             key: state.pageKey,
-            child: GroupRideScreen(groupId: groupId),
+            child: MapboxRideScreen(groupId: groupId),
           );
         },
       ),
@@ -292,9 +356,10 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         path: '/profile/:userId',
         pageBuilder: (_, state) {
           final userId = state.pathParameters['userId']!;
+          final showDating = state.uri.queryParameters['showDating'] == 'true';
           return _motoPage(
             key: state.pageKey,
-            child: ProfileScreen(userId: userId),
+            child: ProfileScreen(userId: userId, showDatingCard: showDating),
           );
         },
       ),
@@ -359,6 +424,27 @@ final appRouterProvider = Provider<GoRouter>((ref) {
           key: state.pageKey,
           child: const MapSettingsScreen(),
         ),
+      ),
+      GoRoute(
+        path: '/ride-history',
+        pageBuilder: (_, state) => _motoPage(
+          key: state.pageKey,
+          child: const RideHistoryScreen(),
+        ),
+      ),
+      GoRoute(
+        path: '/mapbox-nav',
+        pageBuilder: (_, state) {
+          final extra = state.extra as Map<String, dynamic>? ?? {};
+          return _motoPage(
+            key: state.pageKey,
+            child: MapboxNavScreen(
+              destLat: (extra['destLat'] as num?)?.toDouble() ?? 0,
+              destLng: (extra['destLng'] as num?)?.toDouble() ?? 0,
+              destName: extra['destName'] as String? ?? 'Ziel',
+            ),
+          );
+        },
       ),
     ],
   );

@@ -64,6 +64,11 @@ class SpeedLimitService {
   DateTime? _lastQueryTime;
   SpeedLimitResult _lastResult = SpeedLimitResult.unknown;
 
+  double _currentSpeedKmh = 0;
+
+  /// Set current speed for smart road filtering
+  void setCurrentSpeed(double kmh) => _currentSpeedKmh = kmh;
+
   /// Get speed limit for current position.
   /// Returns cached result if position hasn't moved much.
   Future<SpeedLimitResult> getSpeedLimit(double lat, double lon) async {
@@ -106,10 +111,10 @@ class SpeedLimitService {
 
   Future<SpeedLimitResult> _queryOverpass(double lat, double lon) async {
     // Find nearest road (`way` with `highway` tag) and get its maxspeed
-    // `around:30` = within 30m of position → should find the current road
+    // `around:50` = within 50m of position (30m was too small for Autobahn)
     final query = '[out:json][timeout:5];'
-        'way["highway"~"motorway|trunk|primary|secondary|tertiary|residential|living_street|unclassified"](around:30,$lat,$lon);'
-        'out tags 1;'; // Only 1 result, tags only (fast)
+        'way["highway"~"motorway|motorway_link|trunk|trunk_link|primary|secondary|tertiary|residential|living_street|unclassified"](around:50,$lat,$lon);'
+        'out tags;'; // All nearby roads — we pick the best one
 
     final response = await http.post(
       Uri.parse(_overpassUrl),
@@ -127,8 +132,34 @@ class SpeedLimitService {
 
     if (elements.isEmpty) return SpeedLimitResult.unknown;
 
-    // Take first result (closest road)
-    final el = elements.first as Map<String, dynamic>;
+    // Rank roads by importance — prefer higher-class roads
+    // (Overpass may return nearby side streets alongside the actual road)
+    const roadRank = {
+      'motorway': 0, 'motorway_link': 1,
+      'trunk': 2, 'trunk_link': 3,
+      'primary': 4, 'secondary': 5, 'tertiary': 6,
+      'unclassified': 7, 'residential': 8, 'living_street': 9,
+    };
+
+    // Sort by road class — highest class first
+    var sorted = List<Map<String, dynamic>>.from(elements);
+    sorted.sort((a, b) {
+      final aType = (a['tags'] as Map?)?['highway']?.toString() ?? '';
+      final bType = (b['tags'] as Map?)?['highway']?.toString() ?? '';
+      return (roadRank[aType] ?? 99).compareTo(roadRank[bType] ?? 99);
+    });
+
+    // At high speed (>70 km/h), filter out residential/tertiary roads
+    // The GPS is on a highway but Overpass also finds nearby small streets
+    if (_currentSpeedKmh > 70) {
+      final highwayOnly = sorted.where((e) {
+        final t = ((e['tags'] as Map?)?['highway']?.toString()) ?? '';
+        return t == 'motorway' || t == 'motorway_link' || t == 'trunk' || t == 'trunk_link' || t == 'primary';
+      }).toList();
+      if (highwayOnly.isNotEmpty) sorted = highwayOnly;
+    }
+
+    final el = sorted.first;
     final tags = el['tags'] as Map<String, dynamic>? ?? {};
 
     final highway = tags['highway'] as String?;

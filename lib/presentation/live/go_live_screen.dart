@@ -1137,94 +1137,105 @@ class _LiveStatsScreen extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 24),
           child: Column(
             children: [
-              const SizedBox(height: 40),
+              // Scrollbarer Content — vermeidet Overflow auf kleinen Geraeten
+              Expanded(
+                child: SingleChildScrollView(
+                  physics: const BouncingScrollPhysics(),
+                  child: Column(
+                    children: [
+                      const SizedBox(height: 32),
 
-              // Header icon
-              Container(
-                width: 72,
-                height: 72,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: accentColor.withValues(alpha: 0.15),
-                ),
-                child: Icon(
-                  Icons.check_circle_rounded,
-                  size: 40,
-                  color: accentColor,
-                ),
-              ),
-              const SizedBox(height: 20),
+                      // Header icon
+                      Container(
+                        width: 72,
+                        height: 72,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: accentColor.withValues(alpha: 0.15),
+                        ),
+                        child: Icon(
+                          Icons.check_circle_rounded,
+                          size: 40,
+                          color: accentColor,
+                        ),
+                      ),
+                      const SizedBox(height: 16),
 
-              Text(
-                'Stream beendet',
-                style: GoogleFonts.inter(
-                  fontSize: 24,
-                  fontWeight: FontWeight.w800,
-                  color: Colors.white,
-                ),
-              ),
-              const SizedBox(height: 6),
-              Text(
-                stats.title,
-                style: GoogleFonts.inter(
-                  fontSize: 15,
-                  color: Colors.white.withValues(alpha: 0.5),
-                ),
-                textAlign: TextAlign.center,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-              ),
+                      Text(
+                        'Stream beendet',
+                        style: GoogleFonts.inter(
+                          fontSize: 24,
+                          fontWeight: FontWeight.w800,
+                          color: Colors.white,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        stats.title,
+                        style: GoogleFonts.inter(
+                          fontSize: 15,
+                          color: Colors.white.withValues(alpha: 0.5),
+                        ),
+                        textAlign: TextAlign.center,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
 
-              const SizedBox(height: 36),
+                      const SizedBox(height: 28),
 
-              // Stats grid (2x2)
-              Row(
-                children: [
-                  Expanded(
-                    child: _StatCard(
-                      icon: Icons.timer_rounded,
-                      label: 'Dauer',
-                      value: _formatDuration(duration),
-                      color: accentColor,
-                    ),
+                      // Stats grid (2x2)
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Expanded(
+                            child: _StatCard(
+                              icon: Icons.timer_rounded,
+                              label: 'Dauer',
+                              value: _formatDuration(duration),
+                              color: accentColor,
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: _StatCard(
+                              icon: Icons.trending_up_rounded,
+                              label: 'Peak Zuschauer',
+                              value: '${stats.peakViewerCount}',
+                              color: Colors.orange,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Expanded(
+                            child: _StatCard(
+                              icon: Icons.people_rounded,
+                              label: 'Zuschauer gesamt',
+                              value: '${stats.totalUniqueViewers}',
+                              color: Colors.blue,
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: _StatCard(
+                              icon: Icons.chat_bubble_rounded,
+                              label: 'Nachrichten',
+                              value: '${stats.totalChatMessages}',
+                              color: Colors.green,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 16),
+                    ],
                   ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: _StatCard(
-                      icon: Icons.trending_up_rounded,
-                      label: 'Peak Zuschauer',
-                      value: '${stats.peakViewerCount}',
-                      color: Colors.orange,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  Expanded(
-                    child: _StatCard(
-                      icon: Icons.people_rounded,
-                      label: 'Zuschauer gesamt',
-                      value: '${stats.totalUniqueViewers}',
-                      color: Colors.blue,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: _StatCard(
-                      icon: Icons.chat_bubble_rounded,
-                      label: 'Nachrichten',
-                      value: '${stats.totalChatMessages}',
-                      color: Colors.green,
-                    ),
-                  ),
-                ],
+                ),
               ),
 
-              const Spacer(),
-
-              // Done button
+              // Done button — immer sichtbar am unteren Rand
               SizedBox(
                 width: double.infinity,
                 height: 52,
@@ -1247,7 +1258,7 @@ class _LiveStatsScreen extends StatelessWidget {
                   ),
                 ),
               ),
-              const SizedBox(height: 24),
+              const SizedBox(height: 16),
             ],
           ),
         ),
@@ -1306,17 +1317,26 @@ class _StatCard extends StatelessWidget {
             child: Icon(icon, color: color, size: 18),
           ),
           const SizedBox(height: 12),
-          Text(
-            value,
-            style: GoogleFonts.inter(
-              fontSize: 28,
-              fontWeight: FontWeight.w800,
-              color: Colors.white,
+          // FittedBox verhindert Wrap/Overflow bei langen Werten ("1m 38s")
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: Text(
+              value,
+              maxLines: 1,
+              softWrap: false,
+              style: GoogleFonts.inter(
+                fontSize: 26,
+                fontWeight: FontWeight.w800,
+                color: Colors.white,
+              ),
             ),
           ),
-          const SizedBox(height: 2),
+          const SizedBox(height: 4),
           Text(
             label,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
             style: GoogleFonts.inter(
               fontSize: 12,
               fontWeight: FontWeight.w500,

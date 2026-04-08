@@ -63,6 +63,39 @@ ios/Runner/GoogleService-Info.plist
 .env
 .env.*
 env.json
+**/.env
+**/.env.*
+
+# Firebase Service Accounts — NIEMALS ins Repo!
+**/firebase-sa*.json
+**/firebase-adminsdk*.json
+**/service-account*.json
+
+# ----------------------------
+# Temp / scratch workspace (enthaelt oft Secrets)
+# ----------------------------
+tmp/
+*.tmp
+
+# ----------------------------
+# Scraper / dev helpers
+# ----------------------------
+tmp_nginx_osrm.conf
+test_push.json
+bikergram_web.zip
+bikergram_android.zip
+bikergram_android_mock.zip
+
+# ----------------------------
+# Supabase CLI cache
+# ----------------------------
+supabase/.temp/
+supabase/.branches/
+
+# ----------------------------
+# Kotlin cache
+# ----------------------------
+android/.kotlin/
 
 # ----------------------------
 # Windows reserved device file (kann Git killen)

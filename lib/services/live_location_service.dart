@@ -61,6 +61,9 @@ class LiveLocationService {
   bool _isLive = false;
   bool get isLive => _isLive;
 
+  bool _isListening = false;
+  bool get isListening => _isListening;
+
   String? _userId;
   String? _displayName;
   String? _avatarUrl;
@@ -121,6 +124,89 @@ class LiveLocationService {
   Map<String, LiveUserPosition> get nearbyUsers =>
       Map.unmodifiable(_nearbyUsers);
 
+  /// Listen-only mode: subscribe to the channel to see other users,
+  /// but do NOT broadcast own position. Call this when GPS toggle is OFF
+  /// but we still want to show online users on the map.
+  Future<void> startListening({required String userId}) async {
+    if (_isListening || _isLive) return; // Already connected
+    _userId = userId;
+    _isListening = true;
+    debugPrint('[LiveGPS] Starting listen-only mode (no broadcast)');
+    await _connectListenOnly();
+  }
+
+  /// Stop listen-only mode. Does NOT affect goLive/goOffline.
+  Future<void> stopListening() async {
+    if (!_isListening || _isLive) return; // Don't disconnect if broadcasting
+    _isListening = false;
+    if (_channel != null) {
+      try {
+        await _supabase.removeChannel(_channel!);
+      } catch (_) {}
+      _channel = null;
+    }
+    debugPrint('[LiveGPS] Listen-only stopped');
+  }
+
+  /// Connect channel in listen-only mode (subscribe but don't track).
+  Future<void> _connectListenOnly() async {
+    if (_channel != null) {
+      try {
+        await _supabase.removeChannel(_channel!);
+      } catch (_) {}
+      _channel = null;
+    }
+
+    final channel = _supabase.channel('live_gps:all');
+
+    channel.onPresenceSync((_) {
+      _handlePresenceSync(channel);
+    }).onPresenceJoin((payload) {
+      for (final presence in payload.newPresences) {
+        final uid = presence.payload['user_id'] as String?;
+        if (uid != null && _leaveTimers.containsKey(uid)) {
+          _leaveTimers[uid]!.cancel();
+          _leaveTimers.remove(uid);
+        }
+      }
+      _handlePresenceSync(channel);
+    }).onPresenceLeave((payload) {
+      bool anyImmediate = false;
+      for (final presence in payload.leftPresences) {
+        final data = presence.payload;
+        final uid = data['user_id'] as String?;
+        if (uid == null || uid == _userId) continue;
+        final goingOffline = data['going_offline'] == true;
+        if (goingOffline) {
+          _leaveTimers[uid]?.cancel();
+          _leaveTimers.remove(uid);
+          _nearbyUsers.remove(uid);
+          anyImmediate = true;
+          _goingOfflineController.add(uid);
+          continue;
+        }
+        if (_leaveTimers[uid]?.isActive == true) continue;
+        _leaveTimers[uid] = Timer(const Duration(seconds: 1), () {
+          _leaveTimers.remove(uid);
+          if (_nearbyUsers.containsKey(uid)) {
+            _nearbyUsers.remove(uid);
+            _controller.add(Map.from(_nearbyUsers));
+          }
+        });
+      }
+      if (anyImmediate) _controller.add(Map.from(_nearbyUsers));
+    });
+
+    channel.subscribe((status, [error]) async {
+      debugPrint('[LiveGPS] Listen-only channel status: $status');
+      if (status == RealtimeSubscribeStatus.subscribed) {
+        _consecutiveEmptySyncs = 0;
+      }
+    });
+
+    _channel = channel;
+  }
+
   /// Start broadcasting live position.
   Future<void> goLive({
     required String userId,
@@ -134,6 +220,12 @@ class LiveLocationService {
     String community = 'bikergram',
   }) async {
     if (_isLive) return;
+
+    // Stop listen-only if active — goLive replaces it with full connection
+    if (_isListening) {
+      _isListening = false;
+      // Channel will be replaced by _connectChannel below
+    }
 
     _userId = userId;
     _displayName = displayName;
@@ -394,6 +486,16 @@ class LiveLocationService {
         await _supabase.removeChannel(_channel!);
       } catch (_) {}
       _channel = null;
+    }
+
+    // Delete live_locations DB entry so other users don't see stale data
+    if (_userId != null) {
+      try {
+        await _supabase.from('live_locations').delete().eq('user_id', _userId!);
+        debugPrint('[LiveGPS] Deleted live_locations entry for $_userId');
+      } catch (e) {
+        debugPrint('[LiveGPS] Failed to delete live_locations: $e');
+      }
     }
 
     _nearbyUsers.clear();

@@ -19,6 +19,7 @@ import 'reaction_picker.dart';
 import 'report_sheet.dart';
 import 'repost_sheet.dart';
 import 'user_moderation_sheet.dart';
+import '../../marketplace/widgets/create_listing_sheet.dart';
 
 /// Data class for comment previews displayed below posts.
 class CommentPreview {
@@ -316,7 +317,7 @@ class PostCard extends StatelessWidget {
               color: mutedColor,
               size: 22,
             ),
-            color: const Color(0xFF2A2A2A),
+            color: isDark ? const Color(0xFF2A2A2A) : Colors.white,
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(12),
             ),
@@ -325,9 +326,9 @@ class PostCard extends StatelessWidget {
                 PopupMenuItem(
                   value: 'edit',
                   child: Row(children: [
-                    Icon(Icons.edit_rounded, size: 18, color: Colors.white.withValues(alpha: 0.7)),
+                    Icon(Icons.edit_rounded, size: 18, color: isDark ? Colors.white.withValues(alpha: 0.7) : Colors.black54),
                     const SizedBox(width: 10),
-                    Text('Bearbeiten', style: GoogleFonts.inter(fontSize: 14, color: Colors.white)),
+                    Text('Bearbeiten', style: GoogleFonts.inter(fontSize: 14, color: isDark ? Colors.white : const Color(0xFF1A1A1A))),
                   ]),
                 ),
                 PopupMenuItem(
@@ -563,9 +564,9 @@ class PostCard extends StatelessWidget {
       isScrollControlled: true,
       builder: (ctx) => SafeArea(
         child: Container(
-          decoration: const BoxDecoration(
-            color: Color(0xFF1A1A1A),
-            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+          decoration: BoxDecoration(
+            color: Theme.of(context).brightness == Brightness.dark ? const Color(0xFF1A1A1A) : Colors.white,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
           ),
           child: SingleChildScrollView(
             child: Column(
@@ -698,9 +699,9 @@ class PostCard extends StatelessWidget {
                             builder: (innerCtx) => SafeArea(
                               child: Container(
                                 padding: const EdgeInsets.all(24),
-                                decoration: const BoxDecoration(
-                                  color: Color(0xFF1A1A1A),
-                                  borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+                                decoration: BoxDecoration(
+                                  color: Theme.of(context).brightness == Brightness.dark ? const Color(0xFF1A1A1A) : Colors.white,
+                                  borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
                                 ),
                                 child: Column(
                                   mainAxisSize: MainAxisSize.min,
@@ -751,6 +752,21 @@ class PostCard extends StatelessWidget {
                     }
                   },
                 ),
+                if (isOwnPost)
+                  _UserActionItem(
+                    icon: Icons.storefront_rounded,
+                    label: 'Als Artikel verkaufen',
+                    color: accentColor,
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      CreateListingSheet.showFromPost(
+                        context,
+                        body: post.body,
+                        imageUrl: post.imageUrl,
+                        attachmentUrls: post.attachmentUrls,
+                      );
+                    },
+                  ),
                 if (!isOwnPost)
                   _UserActionItem(
                     icon: Icons.flag_outlined,

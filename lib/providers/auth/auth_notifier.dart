@@ -8,7 +8,10 @@ import 'package:google_sign_in/google_sign_in.dart';
 import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' hide AuthState;
 
+import '../../services/push_notification_service.dart';
+
 import '../../core/community.dart';
+import '../../domain/xp_calculator.dart';
 import '../../domain/models/user.dart' as app;
 import '../core/providers.dart';
 import '../map/live_location_provider.dart';
@@ -28,7 +31,11 @@ class AuthNotifier extends Notifier<AuthState> {
       switch (event) {
         case AuthChangeEvent.signedIn:
         case AuthChangeEvent.tokenRefreshed:
-          _loadProfile();
+          if (!_isRegistering) {
+            _loadProfile();
+          } else {
+            debugPrint('[Auth] Skipping _loadProfile during registration');
+          }
           break;
         case AuthChangeEvent.signedOut:
           state = const Unauthenticated();
@@ -80,6 +87,10 @@ class AuthNotifier extends Notifier<AuthState> {
     }
   }
 
+  /// Flag to prevent the auth listener from calling _loadProfile() during
+  /// registration — we do it manually after the profile update.
+  bool _isRegistering = false;
+
   Future<void> register({
     required String email,
     required String password,
@@ -89,21 +100,51 @@ class AuthNotifier extends Notifier<AuthState> {
     int? motoStartAge,
     int? carStartAge,
     bool? hasTrackExperience,
+    bool? interestedInDating,
     double? homeLat,
     double? homeLng,
   }) async {
     state = const AuthLoading();
+    _isRegistering = true;
     try {
+      // Persist selected community
+      final community = ref.read(communityProvider);
+
+      // Pass ALL registration data as user_metadata so the DB trigger
+      // can populate the profile even before email confirmation.
       final response = await _supabase.auth.signUp(
         email: email,
         password: password,
         data: {
           if (username != null) 'username': username,
           if (username != null) 'display_name': username,
+          if (birthYear != null) 'birth_year': birthYear,
+          if (postalCode != null) 'postal_code': postalCode,
+          if (motoStartAge != null) 'moto_start_age': motoStartAge,
+          if (carStartAge != null) 'car_start_age': carStartAge,
+          if (hasTrackExperience != null)
+            'has_track_experience': hasTrackExperience,
+          if (interestedInDating != null)
+            'interested_in_dating': interestedInDating,
+          if (community != null) 'community': community.name,
+          if (homeLat != null) 'home_lat': homeLat,
+          if (homeLng != null) 'home_lng': homeLng,
         },
       );
 
-      // After signup, update profile with experience data
+      // Check if email confirmation is required (session is null)
+      if (response.session == null && response.user != null) {
+        debugPrint('[Auth] SignUp OK but no session — email confirmation required');
+        _isRegistering = false;
+        state = const AuthError(
+          'Fast geschafft! Bitte bestätige deine E-Mail und melde dich dann an.',
+        );
+        return;
+      }
+
+      // After signup (with session), also update profile via API as fallback.
+      // The DB trigger already reads user_metadata, but this ensures any
+      // columns the trigger doesn't know about are set too.
       final userId = response.user?.id;
       if (userId != null) {
         final updates = <String, dynamic>{
@@ -116,14 +157,33 @@ class AuthNotifier extends Notifier<AuthState> {
         if (hasTrackExperience != null) {
           updates['has_track_experience'] = hasTrackExperience;
         }
+        if (interestedInDating != null) {
+          updates['interested_in_dating'] = interestedInDating;
+        }
+        if (community != null) {
+          updates['community'] = community.name;
+        }
 
         if (updates.length > 1) {
-          // Wait a moment for the trigger to create the profile row
-          await Future.delayed(const Duration(milliseconds: 500));
-          await _supabase
-              .from('profiles')
-              .update(updates)
-              .eq('id', userId);
+          // Wait for the DB trigger to create the profile row
+          await Future.delayed(const Duration(milliseconds: 800));
+
+          try {
+            await _supabase
+                .from('profiles')
+                .update(updates)
+                .eq('id', userId);
+            debugPrint('[Auth] Profile updated with ${updates.keys.join(', ')}');
+          } catch (e) {
+            debugPrint('[Auth] Profile update failed: $e — trying upsert');
+            try {
+              updates['id'] = userId;
+              await _supabase.from('profiles').upsert(updates);
+              debugPrint('[Auth] Profile upserted successfully');
+            } catch (e2) {
+              debugPrint('[Auth] Profile upsert also failed: $e2');
+            }
+          }
         }
 
         // home_lat / home_lng separat — Spalten existieren evtl. noch nicht
@@ -139,10 +199,14 @@ class AuthNotifier extends Notifier<AuthState> {
         }
       }
 
-      // Auth state change listener will call _loadProfile()
+      // NOW load profile with the updated data — bypasses the race condition
+      _isRegistering = false;
+      await _loadProfile();
     } on AuthException catch (e) {
+      _isRegistering = false;
       state = AuthError(_friendlyAuthError(e));
     } catch (e) {
+      _isRegistering = false;
       state = AuthError(_friendlyError(e));
     }
   }
@@ -156,6 +220,10 @@ class AuthNotifier extends Notifier<AuthState> {
     isLiveNotifier.value = false;
     onlineUsersNotifier.value = {};
 
+    // Remove FCM token so device stops receiving pushes for this user
+    try {
+      await PushNotificationService.instance.removeToken();
+    } catch (_) {}
     try {
       // Also sign out from Google so account picker shows next time
       await GoogleSignIn().signOut();
@@ -320,6 +388,9 @@ class AuthNotifier extends Notifier<AuthState> {
       state = Authenticated(user);
       debugPrint('[Auth] Authenticated as: ${user.username} (${user.id}), avatar: ${user.avatarUrl}');
 
+      // ── Daily Login XP + Streak ──
+      _checkDailyLogin(authUser.id, profileData);
+
       // Restore saved community selection
       if (user.community != null && ref.read(communityProvider) == null) {
         final saved = Community.values.where((c) => c.name == user.community);
@@ -340,6 +411,55 @@ class AuthNotifier extends Notifier<AuthState> {
       } else {
         state = const Unauthenticated();
       }
+    }
+  }
+
+  /// Daily Login XP + Streak. Called once per _loadProfile().
+  void _checkDailyLogin(String userId, Map<String, dynamic>? profileData) async {
+    try {
+      final today = DateTime.now();
+      final todayStr = '${today.year}-${today.month.toString().padLeft(2, '0')}-${today.day.toString().padLeft(2, '0')}';
+      final lastLoginStr = profileData?['last_login_date'] as String?;
+      final oldStreak = profileData?['login_streak'] as int? ?? 0;
+
+      // Already logged in today → skip
+      if (lastLoginStr == todayStr) return;
+
+      int newStreak;
+      if (lastLoginStr != null) {
+        final lastDate = DateTime.tryParse(lastLoginStr);
+        final yesterday = today.subtract(const Duration(days: 1));
+        final isConsecutive = lastDate != null &&
+            lastDate.year == yesterday.year &&
+            lastDate.month == yesterday.month &&
+            lastDate.day == yesterday.day;
+        newStreak = isConsecutive ? oldStreak + 1 : 1;
+      } else {
+        newStreak = 1;
+      }
+
+      // Update profile
+      await _supabase.from('profiles').update({
+        'last_login_date': todayStr,
+        'login_streak': newStreak,
+      }).eq('id', userId);
+
+      // +3 XP for daily login
+      XpCalculator.awardXp(userId, XpCalculator.xpDailyLogin, 'daily_login');
+
+      // Streak bonuses
+      if (newStreak == 7) {
+        XpCalculator.awardXp(userId, XpCalculator.xpStreak7, 'streak_7');
+        debugPrint('[XP] 🔥 7-Tage-Streak! +${XpCalculator.xpStreak7} Bonus');
+      }
+      if (newStreak == 30) {
+        XpCalculator.awardXp(userId, XpCalculator.xpStreak30, 'streak_30');
+        debugPrint('[XP] 🔥🔥 30-Tage-Streak! +${XpCalculator.xpStreak30} Bonus');
+      }
+
+      debugPrint('[XP] Daily Login: streak=$newStreak, +${XpCalculator.xpDailyLogin} XP');
+    } catch (e) {
+      debugPrint('[XP] Daily login check failed: $e');
     }
   }
 

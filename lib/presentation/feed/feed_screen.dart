@@ -217,12 +217,14 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
           children: [
             const Icon(Icons.block_rounded, color: Colors.red, size: 28),
             const SizedBox(width: 10),
-            Text(
-              'Zugang gesperrt',
-              style: GoogleFonts.inter(
-                fontSize: 18,
-                fontWeight: FontWeight.w700,
-                color: brightness == Brightness.dark ? Colors.white : const Color(0xFF1A1A1A),
+            Flexible(
+              child: Text(
+                'Zugang gesperrt',
+                style: GoogleFonts.inter(
+                  fontSize: 18,
+                  fontWeight: FontWeight.w700,
+                  color: brightness == Brightness.dark ? Colors.white : const Color(0xFF1A1A1A),
+                ),
               ),
             ),
           ],
@@ -555,7 +557,7 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
 
     return Scaffold(
       backgroundColor: scaffoldBg,
-      floatingActionButton: Padding(
+      floatingActionButton: (_currentPage == 3 || _currentPage == 4) ? null : Padding(
         padding: const EdgeInsets.only(bottom: 38),
         child: AnimatedScale(
           scale: _fabVisible ? 1.0 : 0.0,
@@ -641,15 +643,9 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
             child: PageView(
               controller: _pageController,
               onPageChanged: _onPageChanged,
-              // Dating tab (page 4): disable swiping for card gestures.
-              // Also block swiping INTO dating (page 3→4) if not yet gated.
-              physics: _currentPage == 4
-                  ? const NeverScrollableScrollPhysics()
-                  : (_currentPage == 3 && _datingTosAccepted != true
-                      ? const _BlockRightSwipePhysics()
-                      : const _TabletFriendlyPagePhysics()),
+              physics: const _TabletFriendlyPagePhysics(),
               children: [
-                // Page 0: Erkunden (ForYou) — alle Posts sichtbar
+                // Page 0: Erkunden (ForYou)
                 RefreshIndicator(
                   color: accentColor,
                   backgroundColor: community?.cardFor(brightness) ?? (isDark ? const Color(0xFF1A1A1A) : Colors.white),
@@ -660,7 +656,7 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
                           ? _buildEmptyState(accentColor, FeedMode.forYou)
                           : _buildPostList(forYouState, accentColor, isFollowing: false),
                 ),
-                // Page 1: Folge ich — nur Follower-Content
+                // Page 1: Folge ich
                 RefreshIndicator(
                   color: accentColor,
                   backgroundColor: community?.cardFor(brightness) ?? (isDark ? const Color(0xFF1A1A1A) : Colors.white),
@@ -671,11 +667,11 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
                           ? _buildEmptyState(accentColor, FeedMode.following)
                           : _buildPostList(followingState, accentColor, isFollowing: true),
                 ),
-                // Page 2: Reels — nur Follower-Reels
+                // Page 2: Reels
                 _buildReelsPage(accentColor),
-                // Page 3: Live — Streams von gefolgten Leuten + Go-Live FAB
+                // Page 3: Live
                 const LiveBrowseScreen(),
-                // Page 4: Dating — Swipe-Karten
+                // Page 4: Dating
                 const DatingScreen(),
               ],
             ),
@@ -802,11 +798,24 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
   }
 
   Widget _buildShimmerCard() {
-    final community = ref.read(communityProvider);
     final brightness = Theme.of(context).brightness;
     final isDark = brightness == Brightness.dark;
+    // Theme-aware shimmer colors — visible on BOTH dark and light backgrounds.
+    final cardBg = isDark ? Colors.black : Colors.white;
+    final shimmerStrong = isDark
+        ? Colors.white.withValues(alpha: 0.08)
+        : Colors.black.withValues(alpha: 0.08);
+    final shimmerMedium = isDark
+        ? Colors.white.withValues(alpha: 0.05)
+        : Colors.black.withValues(alpha: 0.06);
+    final shimmerSoft = isDark
+        ? Colors.white.withValues(alpha: 0.03)
+        : Colors.black.withValues(alpha: 0.04);
+    final dividerColor = isDark
+        ? Colors.white.withValues(alpha: 0.06)
+        : Colors.black.withValues(alpha: 0.08);
     return Container(
-      color: isDark ? Colors.black : Colors.white,
+      color: cardBg,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -818,7 +827,7 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
                 Container(
                   width: 42, height: 42,
                   decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: 0.05),
+                    color: shimmerStrong,
                     shape: BoxShape.circle,
                   ),
                 ),
@@ -826,7 +835,7 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
                 Container(
                   width: 120, height: 14,
                   decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: 0.05),
+                    color: shimmerMedium,
                     borderRadius: BorderRadius.circular(4),
                   ),
                 ),
@@ -836,7 +845,7 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
           // Media shimmer
           Container(
             width: double.infinity, height: 300,
-            color: Colors.white.withValues(alpha: 0.03),
+            color: shimmerSoft,
           ),
           // Actions shimmer
           Padding(
@@ -847,7 +856,7 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
                 child: Container(
                   width: 26, height: 26,
                   decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: 0.05),
+                    color: shimmerMedium,
                     borderRadius: BorderRadius.circular(6),
                   ),
                 ),
@@ -860,12 +869,12 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
             child: Container(
               width: 200, height: 14,
               decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.04),
+                color: shimmerSoft,
                 borderRadius: BorderRadius.circular(4),
               ),
             ),
           ),
-          Divider(height: 0.5, thickness: 0.5, color: Colors.white.withValues(alpha: 0.06)),
+          Divider(height: 0.5, thickness: 0.5, color: dividerColor),
         ],
       ),
     );
@@ -1274,7 +1283,7 @@ class _TabletFriendlyPagePhysics extends PageScrollPhysics {
   /// Higher than before (was 3.0!) so vertical scrolling doesn't
   /// accidentally trigger a horizontal tab change on tablets.
   @override
-  double get dragStartDistanceMotionThreshold => 14.0; // default ~18
+  double get dragStartDistanceMotionThreshold => 8.0; // lower = easier horizontal swipe
 }
 
 /// Blocks swiping right (toward next page) but allows swiping left (back).

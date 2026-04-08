@@ -28,9 +28,9 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
   final _plzController = TextEditingController();
   bool _obscurePassword = true;
 
-  // 7 steps: 0=name, 1=email, 2=birthYear, 3=plz, 4=experience, 5=track, 6=password
+  // 8 steps: 0=name, 1=email, 2=birthYear, 3=plz, 4=experience, 5=track, 6=interests, 7=password
   int _currentStep = 0;
-  static const _totalSteps = 7;
+  static const _totalSteps = 8;
 
   // New fields
   int _birthYear = 1990;
@@ -40,6 +40,10 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
   bool _hasCar = true;
   bool _hasTrackExperience = false;
   bool _celebrationShown = false;
+  bool _interestedInDating = false;
+  bool _interestedInMarketplace = true;
+  bool _interestedInEvents = true;
+  bool _interestedInNavigation = true;
 
   int get _currentAge => DateTime.now().year - _birthYear;
 
@@ -60,7 +64,7 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
     final isLoading = authState is AuthLoading;
     final accentColor = community?.accentColor ?? AppTheme.accentDark;
 
-    ref.listen<AuthState>(authNotifierProvider, (_, state) {
+    ref.listen<AuthState>(authNotifierProvider, (prev, state) {
       if (state is AuthError) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -69,186 +73,209 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
           ),
         );
       }
+      // After successful registration → show app tour
+      if (prev is AuthLoading && state is Authenticated) {
+        context.go('/app-tour');
+      }
     });
 
     return Scaffold(
       backgroundColor: Colors.black,
       body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 32),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const SizedBox(height: 16),
-
-              // Top bar
-              Row(
+        child: Column(
+          children: [
+            // ── Fixed header: back button + step counter + progress ──
+            Padding(
+              padding: const EdgeInsets.fromLTRB(32, 16, 32, 0),
+              child: Column(
                 children: [
-                  IconButton(
-                    onPressed: () {
-                      if (_currentStep > 0) {
-                        setState(() => _currentStep--);
-                      } else {
-                        context.go('/login');
-                      }
-                    },
-                    icon: const Icon(Icons.arrow_back_rounded,
-                        color: Colors.white),
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(),
+                  Row(
+                    children: [
+                      IconButton(
+                        onPressed: () {
+                          if (_currentStep > 0) {
+                            setState(() => _currentStep--);
+                          } else {
+                            context.go('/login');
+                          }
+                        },
+                        icon: const Icon(Icons.arrow_back_rounded,
+                            color: Colors.white),
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(),
+                      ),
+                      const Spacer(),
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(8),
+                        child: Image.asset(
+                          'assets/images/motorino_icon.png',
+                          width: 28,
+                          height: 28,
+                          fit: BoxFit.cover,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Text(
+                        'Schritt ${_currentStep + 1} von $_totalSteps',
+                        style: GoogleFonts.inter(
+                          fontSize: 13,
+                          color: Colors.white.withValues(alpha: 0.4),
+                        ),
+                      ),
+                    ],
                   ),
-                  const Spacer(),
-                  Text(
-                    'Schritt ${_currentStep + 1} von $_totalSteps',
-                    style: GoogleFonts.inter(
-                      fontSize: 13,
-                      color: Colors.white.withValues(alpha: 0.4),
+                  const SizedBox(height: 16),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(4),
+                    child: LinearProgressIndicator(
+                      value: (_currentStep + 1) / _totalSteps,
+                      backgroundColor: Colors.white.withValues(alpha: 0.08),
+                      valueColor: AlwaysStoppedAnimation<Color>(accentColor),
+                      minHeight: 3,
                     ),
                   ),
                 ],
               ),
+            ),
 
-              const SizedBox(height: 16),
-
-              // Progress bar
-              ClipRRect(
-                borderRadius: BorderRadius.circular(4),
-                child: LinearProgressIndicator(
-                  value: (_currentStep + 1) / _totalSteps,
-                  backgroundColor: Colors.white.withValues(alpha: 0.08),
-                  valueColor: AlwaysStoppedAnimation<Color>(accentColor),
-                  minHeight: 3,
-                ),
-              ),
-
-              const SizedBox(height: 32),
-
-              // Step content
-              Expanded(
-                child: AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 250),
-                  child: _buildStep(accentColor),
-                ),
-              ),
-
-              // Bottom button
-              SizedBox(
-                width: double.infinity,
-                height: 52,
-                child: ElevatedButton(
-                  onPressed: isLoading ? null : _handleNext,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: accentColor,
-                    foregroundColor: Colors.white,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(14),
-                    ),
-                    elevation: 0,
-                  ),
-                  child: isLoading
-                      ? const SizedBox(
-                          width: 22,
-                          height: 22,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2.5,
-                            color: Colors.white,
-                          ),
-                        )
-                      : Text(
-                          _currentStep < _totalSteps - 1
-                              ? 'Weiter'
-                              : 'Konto erstellen',
-                          style: GoogleFonts.inter(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                ),
-              ),
-
-              // Show social buttons only on first 2 steps
-              if (_currentStep < 2) ...[
-                const SizedBox(height: 20),
-                Row(
+            // ── Scrollable content area ──
+            Expanded(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.symmetric(horizontal: 32),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Expanded(
-                      child: Divider(
-                          color: Colors.white.withValues(alpha: 0.1)),
+                    const SizedBox(height: 32),
+
+                    // Step content (no inner scroll!)
+                    AnimatedSwitcher(
+                      duration: const Duration(milliseconds: 250),
+                      child: _buildStepNoScroll(accentColor),
                     ),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      child: Text(
-                        'oder',
-                        style: GoogleFonts.inter(
-                          fontSize: 13,
-                          color: Colors.white.withValues(alpha: 0.35),
+
+                    const SizedBox(height: 24),
+
+                    // Bottom button
+                    SizedBox(
+                      width: double.infinity,
+                      height: 52,
+                      child: ElevatedButton(
+                        onPressed: isLoading ? null : _handleNext,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: accentColor,
+                          foregroundColor: Colors.white,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          elevation: 0,
+                        ),
+                        child: isLoading
+                            ? const SizedBox(
+                                width: 22,
+                                height: 22,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2.5,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : Text(
+                                _currentStep < _totalSteps - 1
+                                    ? 'Weiter'
+                                    : 'Konto erstellen',
+                                style: GoogleFonts.inter(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                      ),
+                    ),
+
+                    // Show social buttons only on first 2 steps
+                    if (_currentStep < 2) ...[
+                      const SizedBox(height: 20),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Divider(
+                                color: Colors.white.withValues(alpha: 0.1)),
+                          ),
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 16),
+                            child: Text(
+                              'oder',
+                              style: GoogleFonts.inter(
+                                fontSize: 13,
+                                color: Colors.white.withValues(alpha: 0.35),
+                              ),
+                            ),
+                          ),
+                          Expanded(
+                            child: Divider(
+                                color: Colors.white.withValues(alpha: 0.1)),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 20),
+                      SocialSignInButtons(
+                        isLoading: isLoading,
+                        onGooglePressed: () {
+                          ref
+                              .read(authNotifierProvider.notifier)
+                              .signInWithGoogle();
+                        },
+                        onApplePressed: () {
+                          ref
+                              .read(authNotifierProvider.notifier)
+                              .signInWithApple();
+                        },
+                      ),
+                    ],
+
+                    const SizedBox(height: 16),
+
+                    // Login link
+                    Center(
+                      child: TextButton(
+                        onPressed: () => context.go('/login'),
+                        child: RichText(
+                          text: TextSpan(
+                            style: GoogleFonts.inter(
+                              fontSize: 14,
+                              color: Colors.white.withValues(alpha: 0.4),
+                            ),
+                            children: [
+                              const TextSpan(text: 'Bereits ein Konto? '),
+                              TextSpan(
+                                text: 'Anmelden',
+                                style: TextStyle(
+                                  color: accentColor,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ),
-                    Expanded(
-                      child: Divider(
-                          color: Colors.white.withValues(alpha: 0.1)),
-                    ),
+
+                    const SizedBox(height: 16),
                   ],
                 ),
-                const SizedBox(height: 20),
-                SocialSignInButtons(
-                  isLoading: isLoading,
-                  onGooglePressed: () {
-                    ref
-                        .read(authNotifierProvider.notifier)
-                        .signInWithGoogle();
-                  },
-                  onApplePressed: () {
-                    ref
-                        .read(authNotifierProvider.notifier)
-                        .signInWithApple();
-                  },
-                ),
-              ],
-
-              const SizedBox(height: 16),
-
-              // Login link
-              Center(
-                child: TextButton(
-                  onPressed: () => context.go('/login'),
-                  child: RichText(
-                    text: TextSpan(
-                      style: GoogleFonts.inter(
-                        fontSize: 14,
-                        color: Colors.white.withValues(alpha: 0.4),
-                      ),
-                      children: [
-                        const TextSpan(text: 'Bereits ein Konto? '),
-                        TextSpan(
-                          text: 'Anmelden',
-                          style: TextStyle(
-                            color: accentColor,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
               ),
-
-              const SizedBox(height: 16),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );
   }
 
-  // ── Step Builder ─────────────────────────────────────────────────
+  // ── Step Builder (no inner scroll — parent handles scrolling) ───
 
-  Widget _buildStep(Color accentColor) {
+  Widget _buildStepNoScroll(Color accentColor) {
     switch (_currentStep) {
       case 0:
-        return _StepContent(
-          key: const ValueKey('step_name'),
+        return _stepColumn(
+          key: 'step_name',
           title: 'W\u00e4hle deinen\nBenutzernamen',
           subtitle: 'So wirst du in der Community angezeigt',
           child: _buildTextField(
@@ -261,8 +288,8 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
         );
 
       case 1:
-        return _StepContent(
-          key: const ValueKey('step_email'),
+        return _stepColumn(
+          key: 'step_email',
           title: 'Deine\nE-Mail Adresse',
           subtitle: 'Wir senden dir eine Best\u00e4tigung',
           child: _buildTextField(
@@ -279,8 +306,8 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
         return _buildBirthYearStep(accentColor);
 
       case 3:
-        return _StepContent(
-          key: const ValueKey('step_plz'),
+        return _stepColumn(
+          key: 'step_plz',
           title: 'Deine\nPostleitzahl',
           subtitle: 'F\u00fcr die Rider Map und lokale Events',
           child: _buildTextField(
@@ -300,8 +327,11 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
         return _buildTrackStep(accentColor);
 
       case 6:
-        return _StepContent(
-          key: const ValueKey('step_password'),
+        return _buildInterestsStep(accentColor);
+
+      case 7:
+        return _stepColumn(
+          key: 'step_password',
           title: 'Erstelle ein\nsicheres Passwort',
           subtitle: 'Mindestens 8 Zeichen',
           child: Column(
@@ -341,14 +371,49 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
     }
   }
 
+  /// Simple column with title + subtitle + child — NO scroll wrapper.
+  Widget _stepColumn({
+    required String key,
+    required String title,
+    required String subtitle,
+    required Widget child,
+  }) {
+    return Column(
+      key: ValueKey(key),
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          title,
+          style: GoogleFonts.inter(
+            fontSize: 28,
+            fontWeight: FontWeight.w700,
+            color: Colors.white,
+            height: 1.2,
+            letterSpacing: -0.5,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          subtitle,
+          style: GoogleFonts.inter(
+            fontSize: 15,
+            color: Colors.white.withValues(alpha: 0.45),
+          ),
+        ),
+        const SizedBox(height: 28),
+        child,
+      ],
+    );
+  }
+
   // ── Step 2: Birth Year ──────────────────────────────────────────
 
   Widget _buildBirthYearStep(Color accentColor) {
     final age = _currentAge;
     final ageBadge = BadgeCalculator.getAgeBadge(_birthYear);
 
-    return _StepContent(
-      key: const ValueKey('step_birth'),
+    return _stepColumn(
+      key: 'step_birth',
       title: 'Wie alt\nbist du?',
       subtitle: 'Dein Alter bestimmt deinen Alters-Badge',
       child: Column(
@@ -471,12 +536,11 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
   Widget _buildExperienceStep(Color accentColor) {
     final age = _currentAge;
 
-    return _StepContent(
-      key: const ValueKey('step_experience'),
+    return _stepColumn(
+      key: 'step_experience',
       title: 'Deine\nFahrerfahrung',
       subtitle: 'Seit wann f\u00e4hrst du?',
-      child: SingleChildScrollView(
-        child: Column(
+      child: Column(
           children: [
             // ── Motorrad Section ──
             _buildExperienceSection(
@@ -557,7 +621,6 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
             ],
           ],
         ),
-      ),
     );
   }
 
@@ -622,15 +685,15 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
             Row(
               children: [
                 Text(
-                  'Seit ich ',
+                  'Seit ',
                   style: GoogleFonts.inter(
-                    fontSize: 14,
+                    fontSize: 13,
                     color: Colors.white.withValues(alpha: 0.6),
                   ),
                 ),
                 Container(
                   padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                   decoration: BoxDecoration(
                     color: accentColor.withValues(alpha: 0.15),
                     borderRadius: BorderRadius.circular(8),
@@ -638,25 +701,28 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
                   child: Text(
                     '$startAge',
                     style: GoogleFonts.inter(
-                      fontSize: 18,
+                      fontSize: 16,
                       fontWeight: FontWeight.w700,
                       color: accentColor,
                     ),
                   ),
                 ),
                 Text(
-                  ' bin  \u2192  ',
+                  ' J. \u2192 ',
                   style: GoogleFonts.inter(
-                    fontSize: 14,
+                    fontSize: 13,
                     color: Colors.white.withValues(alpha: 0.6),
                   ),
                 ),
-                Text(
-                  '$experienceYears Jahre',
-                  style: GoogleFonts.inter(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w700,
-                    color: Colors.white,
+                Flexible(
+                  child: Text(
+                    '$experienceYears Jahre Erfahrung',
+                    style: GoogleFonts.inter(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700,
+                      color: Colors.white,
+                    ),
+                    overflow: TextOverflow.ellipsis,
                   ),
                 ),
               ],
@@ -720,8 +786,8 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
   // ── Step 5: Track Experience ────────────────────────────────────
 
   Widget _buildTrackStep(Color accentColor) {
-    return _StepContent(
-      key: const ValueKey('step_track'),
+    return _stepColumn(
+      key: 'step_track',
       title: 'Warst du schon\nauf der Rennstrecke?',
       subtitle: 'Track Days, Rennstreckentraining etc.',
       child: Column(
@@ -771,14 +837,17 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  const Text('\u{1F3C1}', style: TextStyle(fontSize: 24)),
+                  const Text('\u{1F3C1}', style: TextStyle(fontSize: 20)),
                   const SizedBox(width: 8),
-                  Text(
-                    'Track Racer Badge freigeschaltet!',
-                    style: GoogleFonts.inter(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600,
-                      color: const Color(0xFFE53935),
+                  Flexible(
+                    child: Text(
+                      'Track Racer Badge freigeschaltet!',
+                      style: GoogleFonts.inter(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: const Color(0xFFE53935),
+                      ),
+                      overflow: TextOverflow.ellipsis,
                     ),
                   ),
                 ],
@@ -845,6 +914,152 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
             if (isSelected)
               Icon(Icons.check_circle_rounded,
                   color: accentColor, size: 24),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ── Step 6: Interests ───────────────────────────────────────────
+
+  Widget _buildInterestsStep(Color accentColor) {
+    return _stepColumn(
+      key: 'step_interests',
+      title: 'Was interessiert\ndich?',
+      subtitle: 'Wir passen die App an deine Interessen an',
+      child: Column(
+          children: [
+            _buildInterestTile(
+              emoji: '\u{1F6E3}\uFE0F',
+              title: 'Navigation & Touren',
+              subtitle: 'Routen planen, Gruppenfahrten, GPS-Tracking',
+              isSelected: _interestedInNavigation,
+              accentColor: accentColor,
+              onTap: () => setState(() => _interestedInNavigation = !_interestedInNavigation),
+            ),
+            const SizedBox(height: 10),
+            _buildInterestTile(
+              emoji: '\u{1F6D2}',
+              title: 'Marktplatz',
+              subtitle: 'Bikes, Teile & Zubeh\u00f6r kaufen/verkaufen',
+              isSelected: _interestedInMarketplace,
+              accentColor: accentColor,
+              onTap: () => setState(() => _interestedInMarketplace = !_interestedInMarketplace),
+            ),
+            const SizedBox(height: 10),
+            _buildInterestTile(
+              emoji: '\u{1F3AD}',
+              title: 'Events & Treffen',
+              subtitle: 'Biker-Treffen, Stammtische, Ausfahrten',
+              isSelected: _interestedInEvents,
+              accentColor: accentColor,
+              onTap: () => setState(() => _interestedInEvents = !_interestedInEvents),
+            ),
+            const SizedBox(height: 10),
+            _buildInterestTile(
+              emoji: '\u2764\uFE0F',
+              title: 'Dating / Lovo',
+              subtitle: 'Biker & Bikerinnen kennenlernen',
+              isSelected: _interestedInDating,
+              accentColor: accentColor,
+              onTap: () {
+                setState(() => _interestedInDating = !_interestedInDating);
+                if (_interestedInDating) {
+                  HapticFeedback.mediumImpact();
+                }
+              },
+            ),
+            if (_interestedInDating && _currentAge < 18) ...[
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: AppTheme.errorDark.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: AppTheme.errorDark.withValues(alpha: 0.4),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.info_outline, color: AppTheme.errorDark, size: 18),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Dating ist erst ab 18 Jahren verf\u00fcgbar',
+                        style: GoogleFonts.inter(fontSize: 13, color: AppTheme.errorDark),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ],
+        ),
+    );
+  }
+
+  Widget _buildInterestTile({
+    required String emoji,
+    required String title,
+    required String subtitle,
+    required bool isSelected,
+    required Color accentColor,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: () {
+        HapticFeedback.selectionClick();
+        onTap();
+      },
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        decoration: BoxDecoration(
+          color: isSelected
+              ? accentColor.withValues(alpha: 0.08)
+              : const Color(0xFF1A1A1A),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: isSelected
+                ? accentColor.withValues(alpha: 0.5)
+                : Colors.white.withValues(alpha: 0.06),
+            width: isSelected ? 1.5 : 1,
+          ),
+        ),
+        child: Row(
+          children: [
+            Text(emoji, style: const TextStyle(fontSize: 26)),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: GoogleFonts.inter(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.white,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    subtitle,
+                    style: GoogleFonts.inter(
+                      fontSize: 12,
+                      color: Colors.white.withValues(alpha: 0.4),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            AnimatedSwitcher(
+              duration: const Duration(milliseconds: 200),
+              child: isSelected
+                  ? Icon(Icons.check_circle_rounded, color: accentColor, size: 22, key: const ValueKey('on'))
+                  : Icon(Icons.circle_outlined, color: Colors.white.withValues(alpha: 0.15), size: 22, key: const ValueKey('off')),
+            ),
           ],
         ),
       ),
@@ -964,7 +1179,14 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
       case 5: // Track — always valid
         break;
 
-      case 6: // Password
+      case 6: // Interests — always valid
+        // Enforce: dating only 18+
+        if (_interestedInDating && _currentAge < 18) {
+          setState(() => _interestedInDating = false);
+        }
+        break;
+
+      case 7: // Password
         if (_passwordController.text.length < 8) {
           _showError('Passwort muss mindestens 8 Zeichen lang sein');
           return;
@@ -983,6 +1205,7 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
               motoStartAge: _hasMoto ? _motoStartAge : null,
               carStartAge: _hasCar ? _carStartAge : null,
               hasTrackExperience: _hasTrackExperience,
+              interestedInDating: _interestedInDating && _currentAge >= 18,
             );
         return;
     }

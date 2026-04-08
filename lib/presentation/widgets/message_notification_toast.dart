@@ -130,7 +130,7 @@ class _ToastWrapperState extends State<_ToastWrapper>
     return Positioned(
       left: 12,
       right: 12,
-      top: safeTop + 8,
+      top: safeTop + 90,
       child: SlideTransition(
         position: _slide,
         child: FadeTransition(
@@ -174,18 +174,30 @@ class _MessageToastContent extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final bgColor = isDark
+        ? const Color(0xFF1A1A1A).withValues(alpha: 0.92)
+        : Colors.white.withValues(alpha: 0.95);
+    final textColor = isDark ? Colors.white : const Color(0xFF1A1A1A);
+    final subtextColor = isDark
+        ? Colors.white.withValues(alpha: 0.65)
+        : const Color(0xFF6C757D);
+    final mutedColor = isDark
+        ? Colors.white.withValues(alpha: 0.35)
+        : Colors.black.withValues(alpha: 0.35);
+
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       decoration: BoxDecoration(
-        color: const Color(0xFF1A1A1A).withValues(alpha: 0.92),
+        color: bgColor,
         borderRadius: BorderRadius.circular(16),
         border: Border.all(
-          color: accentColor.withValues(alpha: 0.25),
+          color: isDark ? accentColor.withValues(alpha: 0.25) : Colors.black.withValues(alpha: 0.08),
           width: 0.5,
         ),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: 0.5),
+            color: Colors.black.withValues(alpha: isDark ? 0.5 : 0.15),
             blurRadius: 20,
             offset: const Offset(0, 8),
           ),
@@ -211,7 +223,7 @@ class _MessageToastContent extends StatelessWidget {
                         style: GoogleFonts.inter(
                           fontSize: 14,
                           fontWeight: FontWeight.w700,
-                          color: Colors.white,
+                          color: textColor,
                         ),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
@@ -221,7 +233,7 @@ class _MessageToastContent extends StatelessWidget {
                       'Jetzt',
                       style: GoogleFonts.inter(
                         fontSize: 11,
-                        color: Colors.white.withValues(alpha: 0.35),
+                        color: mutedColor,
                       ),
                     ),
                   ],
@@ -231,7 +243,7 @@ class _MessageToastContent extends StatelessWidget {
                   message.body,
                   style: GoogleFonts.inter(
                     fontSize: 13,
-                    color: Colors.white.withValues(alpha: 0.65),
+                    color: subtextColor,
                   ),
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
@@ -301,18 +313,30 @@ class _NotificationToastContent extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final bgColor = isDark
+        ? const Color(0xFF1A1A1A).withValues(alpha: 0.92)
+        : Colors.white.withValues(alpha: 0.95);
+    final textColor = isDark ? Colors.white : const Color(0xFF1A1A1A);
+    final subtextColor = isDark
+        ? Colors.white.withValues(alpha: 0.65)
+        : const Color(0xFF6C757D);
+    final mutedColor = isDark
+        ? Colors.white.withValues(alpha: 0.35)
+        : Colors.black.withValues(alpha: 0.35);
+
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       decoration: BoxDecoration(
-        color: const Color(0xFF1A1A1A).withValues(alpha: 0.92),
+        color: bgColor,
         borderRadius: BorderRadius.circular(16),
         border: Border.all(
-          color: accentColor.withValues(alpha: 0.25),
+          color: isDark ? accentColor.withValues(alpha: 0.25) : Colors.black.withValues(alpha: 0.08),
           width: 0.5,
         ),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: 0.5),
+            color: Colors.black.withValues(alpha: isDark ? 0.5 : 0.15),
             blurRadius: 20,
             offset: const Offset(0, 8),
           ),
@@ -356,7 +380,7 @@ class _NotificationToastContent extends StatelessWidget {
                         style: GoogleFonts.inter(
                           fontSize: 14,
                           fontWeight: FontWeight.w700,
-                          color: Colors.white,
+                          color: textColor,
                         ),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
@@ -366,7 +390,7 @@ class _NotificationToastContent extends StatelessWidget {
                       'Jetzt',
                       style: GoogleFonts.inter(
                         fontSize: 11,
-                        color: Colors.white.withValues(alpha: 0.35),
+                        color: mutedColor,
                       ),
                     ),
                   ],
@@ -378,7 +402,7 @@ class _NotificationToastContent extends StatelessWidget {
                     notification.body!,
                     style: GoogleFonts.inter(
                       fontSize: 13,
-                      color: Colors.white.withValues(alpha: 0.65),
+                      color: subtextColor,
                     ),
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,

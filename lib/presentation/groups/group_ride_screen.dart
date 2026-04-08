@@ -18,6 +18,7 @@ import '../../services/vosk_wake_word_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 import '../../providers/auth/auth_notifier.dart';
 import '../../providers/auth/auth_state.dart';
 import '../../providers/core/providers.dart';
@@ -29,10 +30,12 @@ import '../../services/live_location_service.dart';
 import '../../services/livekit_service.dart';
 import '../../services/marker_icon_service.dart';
 import '../../services/osrm_service.dart';
+import '../../services/google_routes_service.dart';
 import '../../services/speed_limit_service.dart';
 import '../../services/tts_alert_service.dart';
 import '../../services/heading_sensor_service.dart';
 import '../../providers/map/map_settings_provider.dart';
+import '../../services/racer_events_service.dart';
 import '../../services/voice_command_service.dart';
 import '../../services/alert_audio_service.dart';
 import '../../data/repositories/blitzer_repository.dart';
@@ -41,6 +44,7 @@ import '../../services/biker_ai_service.dart';
 import '../../services/fast_answer_service.dart';
 import '../../services/kalman_filter.dart';
 import '../../providers/map/live_location_provider.dart';
+import '../../navigation/navigation.dart';
 
 /// Full-screen Group Ride experience.
 ///
@@ -106,6 +110,8 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
 
   // OSRM routing
   final OsrmService _osrmService = OsrmService();
+  final GoogleRoutesService _googleRoutes = GoogleRoutesService();
+  late final NavEngine _navEngine = NavEngine(osrmService: _osrmService);
   OsrmRoute? _currentRoute;
   bool _isCalculatingRoute = false;
   RouteMode _routeMode = RouteMode.biker;
@@ -126,6 +132,7 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
   bool _navUiHidden = false; // true = hide search/buttons during navigation
   Timer? _navUiShowTimer; // auto-hide UI after tap
   BitmapDescriptor? _navVehicleIcon; // Waze-style arrow marker
+  BitmapDescriptor? _navDotIcon; // Small dot for navigation mode
 
   // ── Route alternatives ──
   List<OsrmRoute> _alternativeRoutes = [];
@@ -165,23 +172,24 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
   bool _isSpeeding = false;
   DateTime? _lastSpeedingAlert;
 
-  // ── Smoothed GPS speed (simple EMA, responsive) ──
+  // ── GPS state ──
   double _gpsSpeedKmh = 0;
-  double _smoothedSpeed = 0; // EMA-smoothed speed for display
-  double _displaySpeed = 0; // display value (direct copy of smoothed)
-
-  // ── Position interpolation (60fps smooth movement between GPS ticks) ──
-  Timer? _extrapolationTimer;
+  double _smoothedSpeed = 0;
+  double _displaySpeed = 0;
   DateTime _lastGpsTimestamp = DateTime.now();
-  double _lastGpsSpeedMs = 0; // m/s from GPS
-  LatLng? _prevGpsPos;          // previous GPS fix
-  LatLng? _targetGpsPos;        // current GPS fix (interpolation target)
-  double _prevHeading = 0;      // heading at previous fix
-  double _targetHeading = 0;    // heading at current fix
-  DateTime _prevGpsTime = DateTime.now();
-  DateTime _targetGpsTime = DateTime.now();
-  LatLng? _interpolatedPos;     // current interpolated position
-  double _interpolatedHeading = 0;
+  double _targetHeading = 0;    // heading from GPS/gyro (target for camera)
+  bool _hasEverDriven = false;
+  int _lastSnapSegIdx = 0;
+
+  // ── 30fps camera loop (Waze-style: smooth bearing, dead-zone) ──
+  Timer? _cameraAnimTimer;
+  double _smoothBearing = 0;      // interpolated bearing for smooth rotation
+  double _committedBearing = 0;   // Waze dead-zone: only updates past threshold
+  double _smoothZoom = 17.0;
+  bool _navCameraDirty = false;
+  LatLng? _smoothCamPos; // EMA-smoothed camera position (anti-stutter)
+  LatLng? _lastCamTarget; // last camera target sent to animateCamera
+  double _lastCamBearing = -1; // last bearing sent to animateCamera
 
   // ── Non-nav heading follow (compass rotation without navigation) ──
   Timer? _headingFollowTimer;
@@ -194,6 +202,16 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
   LatLng? _lastSnapResult;
   double _lastSnapDist = double.infinity; // distance to route at last snap
 
+  // ── OSRM Map Matching (HMM-based GPS→Road snap) ──
+  /// Ring buffer of recent GPS positions for OSRM /match API
+  final List<LatLng> _gpsMatchBuffer = [];
+  final List<int> _gpsMatchTimestamps = [];
+  static const _gpsMatchBufferSize = 8; // Keep last 8 positions
+  int _gpsMatchTickCounter = 0;
+  static const _gpsMatchInterval = 3; // Call OSRM every 3rd GPS tick (~3Hz → 1 match/sec)
+  LatLng? _osrmMatchedPos; // Latest OSRM-matched position (null = no match yet)
+  bool _osrmMatchInFlight = false; // Prevent concurrent match requests
+
   // ── Cached polylines (only rebuild when route changes) ──
   Set<Polyline>? _cachedPolylines;
   OsrmRoute? _cachedPolylineRoute;
@@ -201,12 +219,13 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
 
   // ── Turn-by-turn navigation ──
   int _lastAnnouncedStepIndex = -1;
-  int _lastPreAnnouncedIdx = -1;
+  // (old level indices removed — now using _announcedTtsPairs Set)
   DateTime? _lastNavAnnouncement;
 
   // ── Next turn display (live during navigation) ──
   OsrmStep? _nextTurnStep;        // next non-straight step
   double _nextTurnDistanceM = 0;  // distance to it in meters
+  OsrmStep? _afterNextTurnStep;   // step after next (for "Danach:" preview)
 
   // ── Off-route detection ──
   int _offRouteCount = 0; // consecutive off-route GPS fixes
@@ -302,6 +321,57 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
       routeModeKey: modeKey,
     );
     if (mounted) setState(() => _navVehicleIcon = icon);
+    // Also create small nav dot icon
+    _createNavDotIcon();
+  }
+
+  Future<void> _createNavDotIcon() async {
+    final modeColor = _routeMode == RouteMode.biker
+        ? const Color(0xFF00BCD4)
+        : _routeMode == RouteMode.pedestrian
+            ? const Color(0xFF4CAF50)
+            : const Color(0xFF2196F3);
+    // ── Waze-style arrow with visible ring ──
+    const double size = 80;
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder, const Rect.fromLTWH(0, 0, size, size));
+
+    // Outer ring — clearly visible circle around the icon
+    canvas.drawCircle(const Offset(size / 2, size / 2), 36, Paint()
+      ..color = modeColor.withValues(alpha: 0.3)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 3.0);
+
+    // Soft glow behind arrow
+    canvas.drawCircle(const Offset(size / 2, size / 2), 30, Paint()
+      ..color = modeColor.withValues(alpha: 0.12)
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 10));
+
+    // White border (slightly larger)
+    final borderPath = Path();
+    borderPath.moveTo(size / 2, 10);
+    borderPath.lineTo(size / 2 + 20, 58);
+    borderPath.lineTo(size / 2, 46);
+    borderPath.lineTo(size / 2 - 20, 58);
+    borderPath.close();
+    canvas.drawPath(borderPath, Paint()..color = Colors.white);
+
+    // Colored arrow fill
+    final arrowPath = Path();
+    arrowPath.moveTo(size / 2, 14);
+    arrowPath.lineTo(size / 2 + 17, 55);
+    arrowPath.lineTo(size / 2, 44);
+    arrowPath.lineTo(size / 2 - 17, 55);
+    arrowPath.close();
+    canvas.drawPath(arrowPath, Paint()..color = modeColor);
+
+    final img = await recorder.endRecording().toImage(size.toInt(), size.toInt());
+    final bytes = await img.toByteData(format: ui.ImageByteFormat.png);
+    if (bytes != null && mounted) {
+      setState(() {
+        _navDotIcon = BitmapDescriptor.bytes(bytes.buffer.asUint8List());
+      });
+    }
   }
 
   Future<void> _loadSearchHistory() async {
@@ -393,6 +463,12 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
             // If waiting for POI choice, DON'T cancel — user might say "Hi Moto drei"
             debugPrint('[Vosk] Wake word! (pendingChoices=${_pendingFuelChoices != null})');
             HapticFeedback.heavyImpact();
+
+            // ── INTERRUPT: Stop any current TTS immediately ──
+            // User said "Hi Moto" again → they want to ask something new
+            TtsAlertService.instance.clearQueue();
+            TtsAlertService.instance.stop();
+
             setState(() {
               _wakeWordTriggered = true;
               _wakeWordActive = true;
@@ -414,8 +490,10 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
               _wakeWordTriggered = false;
               _listenText = text;
             });
-            // Nav voice commands ("Zurück", "Navigation beenden") — highest priority
-            if (_handleNavVoiceCommand(text)) {
+            // Off-route reroute choice ("Weiter"/"Zurück") — highest priority
+            if (_awaitingRerouteChoice) {
+              _handleRerouteChoice(text);
+            } else if (_handleNavVoiceCommand(text)) {
               // handled
             } else if (_awaitingOffRouteAnswer) {
               _handleOffRouteVoiceAnswer(text);
@@ -453,8 +531,6 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
       if (pos != null && mounted && _currentGpsPos == null) {
         setState(() {
           _currentGpsPos = LatLng(pos.latitude, pos.longitude);
-          _targetGpsPos = _currentGpsPos;
-          _prevGpsPos = _currentGpsPos;
         });
         // GPS available immediately — load blitzers
         if (!_blitzerLoadedWithGps) {
@@ -479,19 +555,36 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
     _headingGpsSub = Geolocator.getPositionStream(
       locationSettings: const LocationSettings(
         accuracy: LocationAccuracy.bestForNavigation, // Max: GPS+WLAN+Cell+Sensors
-        distanceFilter: 1, // 1m between fixes
+        distanceFilter: 0, // Every GPS fix — max accuracy, ignore battery
       ),
     ).listen((pos) {
       if (!mounted) return;
 
       // ── Kalman filter for position + speed accuracy ──
       final smoothed = _navKalman.update(pos);
-      final newPos = LatLng(smoothed.smoothedLat, smoothed.smoothedLng);
+      var newPos = LatLng(smoothed.smoothedLat, smoothed.smoothedLng);
       final speedKmh = smoothed.smoothedSpeed; // Kalman-EMA smoothed
       final rawSpeedKmh = pos.speed * 3.6;
 
       // Skip bad GPS fixes (accuracy > 25m) for navigation
       if (pos.accuracy > 25) return;
+
+      // ── Stillstands-Filter ──
+      // Biker/Auto: GPS noise at standstill = 2-4 km/h → filter below 4 km/h.
+      // Pedestrian: NO early return — always process position updates so icon moves.
+      //   Speed display filtered separately below.
+      final standstillThreshold = _routeMode == RouteMode.pedestrian ? 1.0 : 4.0;
+      if (rawSpeedKmh < standstillThreshold && speedKmh < standstillThreshold && _currentGpsPos != null) {
+        _currentGpsPos = newPos;
+        _gpsSpeedKmh = 0;
+        _lastGpsTimestamp = DateTime.now();
+        _smoothedSpeed = 0;
+        _displaySpeed = 0;
+        _navCameraDirty = true;
+        _navEngine.updateGps(newPos, 0, _currentHeading);
+        if (!_userTouchingMap && mounted) setState(() {});
+        return;
+      }
 
       // Feed GPS heading + speed to sensor fusion service
       HeadingSensorService.instance.updateFromGps(
@@ -499,54 +592,67 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
         speedKmh: rawSpeedKmh,
       );
 
-      // Use fused heading (gyro+GPS) instead of raw GPS heading
-      final newHeading = HeadingSensorService.instance.isGyroAvailable
-          ? _fusedHeading
-          : (rawSpeedKmh > 3 && pos.heading >= 0 ? pos.heading : _currentHeading);
+      // Use fused heading (gyro+GPS) or raw GPS heading
+      // Pedestrian: accept heading at lower speed (walking ~5 km/h)
+      final headingMinSpeed = _routeMode == RouteMode.pedestrian ? 2.0 : 5.0;
+      final newHeading = rawSpeedKmh > headingMinSpeed
+          ? (HeadingSensorService.instance.isGyroAvailable
+              ? _fusedHeading
+              : (pos.heading >= 0 ? pos.heading : _currentHeading))
+          : _currentHeading;
 
-      // Update interpolation targets (prev → target shift)
-      _prevGpsPos = _targetGpsPos ?? newPos;
-      _prevHeading = _targetHeading;
-      _prevGpsTime = _targetGpsTime;
-      _targetGpsPos = newPos;
-      _targetHeading = newHeading;
-      _targetGpsTime = DateTime.now();
-
-      // Update internal state for off-route, speed limit etc.
+      // Update state
       final wasGpsNull = _currentGpsPos == null;
       _currentGpsPos = newPos;
       _currentHeading = newHeading;
+      _targetHeading = newHeading;
 
-      // First GPS fix: load blitzers now (they need position)
       if (wasGpsNull && !_blitzerLoadedWithGps) {
         _blitzerLoadedWithGps = true;
         _loadNearbyBlitzers();
       }
       _gpsSpeedKmh = rawSpeedKmh;
       _lastGpsTimestamp = DateTime.now();
-      _lastGpsSpeedMs = pos.speed;
-      // Invalidate snap cache for new GPS position
-      _lastSnapInput = null;
+      _lastSnapInput = null; // Invalidate snap cache
 
-      // ── Speed from Kalman filter (accurate, handles standstill jitter) ──
+      if (_isNavigating) {
+        _feedGpsMatchBuffer(newPos);
+      }
+
+      // Speed: use Kalman-filtered speed directly (alpha=0.7, fast follow).
+      // Speed display: instant zero when stopping, Kalman-filtered when moving.
+      // Raw speed is the fastest indicator of deceleration.
       _smoothedSpeed = speedKmh;
-      _displaySpeed = speedKmh < 3 ? 0 : speedKmh;
+      final speedZeroThreshold = _routeMode == RouteMode.pedestrian ? 2.5 : 4.0;
+      if (rawSpeedKmh < speedZeroThreshold) {
+        _displaySpeed = 0; // Instant zero — no decay lag
+      } else {
+        _displaySpeed = speedKmh;
+      }
 
-      // Camera follow is handled by the extrapolation timer (~3.3Hz)
+      // Feed NavEngine FIRST, then read state
+      _navEngine.updateGps(newPos, rawSpeedKmh, newHeading);
 
-      // Throttle UI rebuilds — skip entirely while user is touching the map
-      // (setState rebuilds GoogleMap widget which kills pinch/pan gestures)
+      // Turn distance + step driven by NavEngine
+      if (_isNavigating) {
+        _nextTurnStep = _navEngine.state.nextTurn;
+        _nextTurnDistanceM = _navEngine.state.nextTurnDistM;
+        _afterNextTurnStep = _navEngine.state.afterNextTurn;
+      }
+
+      // Mark camera dirty for 30fps loop
+      _navCameraDirty = true;
+      if (rawSpeedKmh > 5) _hasEverDriven = true;
+
+      // Throttle UI rebuilds
       if (!_userTouchingMap) {
         final now = DateTime.now();
         final throttleMs = _isNavigating ? 50 : 250;
         if (now.difference(_lastUiUpdate).inMilliseconds > throttleMs) {
           _lastUiUpdate = now;
-          setState(() {}); // Minimal rebuild for speed display + marker position
+          setState(() {});
         }
       }
-
-      // NOTE: Off-route check + speed limit queries moved to _navPeriodicTimer
-      // to avoid blocking the GPS→camera pipeline.
     });
   }
 
@@ -557,8 +663,9 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
       if (!mounted || _currentGpsPos == null) return;
       if (_isNavigating) {
         _checkOffRoute(_currentGpsPos!);
-        _announceNextStep(_currentGpsPos!);
-        _updateNextTurn(_currentGpsPos!);
+        // TTS + turn tracking now handled by NavEngine (no double-announcements)
+        // _announceNextStep(_currentGpsPos!);
+        // _updateNextTurn(_currentGpsPos!);
       }
       _updateSpeedLimit(
         _currentGpsPos!.latitude, _currentGpsPos!.longitude, _gpsSpeedKmh);
@@ -567,107 +674,166 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
     });
   }
 
-  /// Announce upcoming turns via TTS — multi-level announcements like Waze/Maps.
+  /// Announce upcoming turns via TTS — multi-level, motorcycle-optimized.
+  /// Designed for riders who can't look at the display.
   ///
-  /// Announcement levels (motorcycle-optimized: earlier = safer):
-  /// 1. After completing a step: "Weiter für 1,6 km, dann links auf Mülheimer Straße"
-  /// 2. 800m pre-warning: "In 800 Metern links abbiegen auf Berliner Straße"
-  /// 3. 300m pre-announcement: "In 300 Metern links abbiegen"
-  /// 4. 50m now-announcement: "Jetzt links abbiegen"
-  /// 5. Arrival: "Du hast dein Ziel erreicht"
-  int _lastEarlyAnnouncedIdx = -1;
-  int _lastFarPreAnnouncedIdx = -1; // 800m pre-warning
+  /// Announcement levels:
+  /// 1.  Segment start: "Gut. Weiter auf Berliner Str. für 1,6 km, dann links auf Mülheimer Str."
+  /// 1b. Periodic straight: "Weiter geradeaus für 800 Meter, dann links auf Berliner Str."
+  /// 2.  600m pre-warning: "Achtung, in 500 Metern links abbiegen auf Berliner Str."
+  /// 3.  200m pre-announcement: "Bitte gleich links auf Berliner Str."
+  /// 3b. 100m warning: "In 100 Metern links abbiegen!"
+  /// 4.  50m now: "Jetzt links abbiegen"
+  /// 5.  Arrival: "Du hast dein Ziel erreicht"
+  // TTS dedup: tracks (stepIndex:threshold) pairs already announced
+  final Set<String> _announcedTtsPairs = {};
 
+  /// Clean 3-threshold announcement system (like backup NavigationTtsService):
+  /// - 500m: "In 500 Metern, [instruction] auf [road]"
+  /// - 200m: "In 200 Metern, [instruction] auf [road]"
+  /// - <40m: "Jetzt, [instruction]!"
+  /// Each (step, threshold) pair is announced exactly once (dedup via Set).
   void _announceNextStep(LatLng pos) {
     if (_currentRoute == null || _currentRoute!.steps.isEmpty) return;
+    // Don't interrupt queued speech (nav start, reroute, etc.)
+    if (TtsAlertService.instance.isQueueActive) return;
+
     final steps = _currentRoute!.steps;
 
     for (int i = _lastAnnouncedStepIndex + 1; i < steps.length; i++) {
       final step = steps[i];
-      final distToStep = _distLatLng(pos, step.location);
+      if (step.maneuver.startsWith('depart')) continue;
 
-      // Skip "depart" maneuver
-      if (step.maneuver == 'depart') continue;
+      final distToStep = _distAlongRoute(pos, step.location);
 
-      // Build instruction with road name if available
-      final roadInfo = step.roadName != null && step.roadName!.isNotEmpty
+      // Build instruction with road name (dedup: don't repeat if already in instruction)
+      final hasRoadInInstruction = step.roadName != null && step.roadName!.isNotEmpty
+          && step.instruction.toLowerCase().contains(step.roadName!.toLowerCase());
+      final roadInfo = (step.roadName != null && step.roadName!.isNotEmpty && !hasRoadInInstruction)
           ? ' auf ${step.roadName}' : '';
 
-      // ── Arrival announcement ──
+      // ── Arrival ──
       if (step.maneuver == 'arrive' && distToStep < 50) {
         _lastAnnouncedStepIndex = i;
-        TtsAlertService.instance.speakPriority('Du hast dein Ziel erreicht.');
+        TtsAlertService.instance.clearQueue();
+        TtsAlertService.instance.speakQueued('Du hast dein Ziel erreicht. Viel Spaß noch!');
         return;
       }
 
-      // ── Level 1: Early announcement when entering a long segment ──
-      if (distToStep > 500 && i != _lastEarlyAnnouncedIdx) {
-        final prevStepDist = i > 1 ? _distLatLng(pos, steps[i - 1].location) : 999.0;
-        if (prevStepDist < 80) {
-          _lastEarlyAnnouncedIdx = i;
-          final distText = _formatDistance(distToStep);
-          TtsAlertService.instance.speakText(
-            'Weiter für $distText, dann ${step.instruction}$roadInfo',
-          );
-          return;
+      // ── Determine threshold ──
+      String? threshold;
+      String? distanceText;
+      if (distToStep <= 40) {
+        threshold = 'now';
+        distanceText = 'Jetzt';
+      } else if (distToStep <= 200) {
+        threshold = '200m';
+        distanceText = 'In 200 Metern';
+      } else if (distToStep <= 500) {
+        threshold = '500m';
+        distanceText = 'In 500 Metern';
+      }
+
+      if (threshold == null) return; // Not close enough yet
+
+      // Deduplication: each (step, threshold) announced exactly once
+      final key = '$i:$threshold';
+      if (_announcedTtsPairs.contains(key)) {
+        if (threshold == 'now') {
+          // Step done — advance index
+          _lastAnnouncedStepIndex = i;
         }
-      }
-
-      // ── Level 2: 800m far pre-warning (motorcycle needs early notice) ──
-      if (distToStep < 800 && distToStep > 400 && i != _lastFarPreAnnouncedIdx) {
-        _lastFarPreAnnouncedIdx = i;
-        final distRounded = (distToStep / 100).round() * 100;
-        TtsAlertService.instance.speakText(
-          'In $distRounded Metern, ${step.instruction}$roadInfo',
-        );
         return;
       }
+      _announcedTtsPairs.add(key);
 
-      // ── Level 3: 300m pre-announcement ──
-      if (distToStep < 300 && distToStep > 80 && i != _lastPreAnnouncedIdx) {
-        _lastPreAnnouncedIdx = i;
-        final distRounded = (distToStep / 50).round() * 50;
-        TtsAlertService.instance.speakText(
-          'In $distRounded Metern, ${step.instruction}',
-        );
-        return;
-      }
-
-      // ── Level 4: 50m now-announcement ──
-      if (distToStep < 50) {
+      if (threshold == 'now') {
         _lastAnnouncedStepIndex = i;
-        TtsAlertService.instance.speakText('Jetzt ${step.instruction}');
-        return;
+        TtsAlertService.instance.speakText('Jetzt, ${step.instruction}$roadInfo!');
+      } else {
+        TtsAlertService.instance.speakText(
+          '$distanceText, ${step.instruction}$roadInfo',
+        );
       }
-
-      // Only check the next relevant step
       return;
     }
   }
 
   /// Update next turn step + distance for the turn banner display.
+  /// Uses distance along route polyline (not air-line) for accuracy.
   void _updateNextTurn(LatLng pos) {
     if (_currentRoute == null || _currentRoute!.steps.isEmpty) {
       _nextTurnStep = null;
+      _afterNextTurnStep = null;
       return;
     }
     final steps = _currentRoute!.steps;
+    bool foundFirst = false;
     for (int i = _lastAnnouncedStepIndex + 1; i < steps.length; i++) {
       final step = steps[i];
-      if (step.maneuver == 'depart') continue;
-      final dist = _distLatLng(pos, step.location);
-      _nextTurnStep = step;
-      _nextTurnDistanceM = dist;
-      return;
+      if (step.maneuver.startsWith('depart')) continue;
+      if (!foundFirst) {
+        // First upcoming turn
+        final dist = _distAlongRoute(pos, step.location);
+        _nextTurnStep = step;
+        _nextTurnDistanceM = dist;
+        foundFirst = true;
+      } else {
+        // Second upcoming turn → "Danach:" preview
+        if (!step.maneuver.startsWith('depart') && step.maneuver != 'arrive') {
+          _afterNextTurnStep = step;
+        }
+        return;
+      }
     }
-    _nextTurnStep = null;
+    if (!foundFirst) _nextTurnStep = null;
+    _afterNextTurnStep = null;
+  }
+
+  /// Calculate distance along the route polyline between current pos and target.
+  /// Falls back to air-line distance if route is unavailable.
+  double _distAlongRoute(LatLng from, LatLng to) {
+    if (_currentRoute == null || _currentRoute!.polylinePoints.length < 2) {
+      return _distLatLng(from, to);
+    }
+    final pts = _currentRoute!.polylinePoints;
+
+    // Find nearest point on route to current position
+    int nearestIdx = 0;
+    double nearestDist = double.infinity;
+    for (int i = 0; i < pts.length; i++) {
+      final d = _distLatLng(from, pts[i]);
+      if (d < nearestDist) {
+        nearestDist = d;
+        nearestIdx = i;
+      }
+    }
+
+    // Find nearest point on route to target (step location)
+    int targetIdx = nearestIdx;
+    double targetDist = double.infinity;
+    for (int i = nearestIdx; i < pts.length; i++) {
+      final d = _distLatLng(to, pts[i]);
+      if (d < targetDist) {
+        targetDist = d;
+        targetIdx = i;
+      }
+    }
+
+    // Sum distances along route segments
+    double total = _distLatLng(from, pts[nearestIdx]); // gap to route
+    for (int i = nearestIdx; i < targetIdx && i + 1 < pts.length; i++) {
+      total += _distLatLng(pts[i], pts[i + 1]);
+    }
+    return total;
   }
 
   /// Format distance for TTS: "200 Meter", "1,5 Kilometer"
   String _formatDistance(double meters) {
     if (meters < 1000) {
       final rounded = (meters / 50).round() * 50;
-      return '$rounded Meter';
+      // Never say "0 Meter" — minimum 50
+      return '${rounded < 50 ? 50 : rounded} Meter';
     } else {
       final km = (meters / 100).round() / 10; // round to 0.1 km
       final kmStr = km.toStringAsFixed(1).replaceAll('.', ',');
@@ -675,66 +841,62 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
     }
   }
 
-  /// Start 60fps interpolation timer — smooth movement between GPS fixes.
-  int _frameCount = 0; // Counter for marker update throttle
-
-  void _startExtrapolationTimer() {
-    _extrapolationTimer?.cancel();
-    _frameCount = 0;
+  /// Camera follow: simple, stable, no jitter.
+  /// - Position: RAW GPS (not snapped — snap causes segment jumps)
+  /// - Bearing: ONLY from route polyline (GPS heading is garbage at low speed)
+  /// - Update: 1× per second, let Google Maps animate internally at 60fps
+  /// - No manual offset — use GoogleMap padding instead
+  void _startNavCameraLoop() {
+    _cameraAnimTimer?.cancel();
     _isProgrammaticMove = true;
 
-    // ── 10fps timer: marker rotation + camera follow (every 3rd tick = ~3.3Hz) ──
-    _extrapolationTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
-      if (_mapController == null) return;
+    _cameraAnimTimer = Timer.periodic(const Duration(milliseconds: 800), (_) {
+      if (_mapController == null || !mounted) return;
+      if (!_isNavFollowing || _userTouchingMap) return;
 
-      // ── Heading: use GPS heading when driving, compass when stationary ──
-      if (_gpsSpeedKmh > 5 && _targetHeading >= 0) {
-        // At speed: GPS heading is more reliable than magnetometer
-        _interpolatedHeading = _targetHeading;
-      } else {
-        // Stationary: use fused compass heading for marker rotation
-        _interpolatedHeading = _fusedHeading;
-      }
+      // ── POSITION: always raw GPS — no snap, no dead reckoning ──
+      // Snap-to-route caused position jumps between parallel segments.
+      // Raw GPS is noisy but Google animateCamera smooths it at 60fps.
+      final pos = _currentGpsPos;
+      if (pos == null) return;
 
-      // Interpolate position between GPS fixes for smooth marker movement
-      if (_prevGpsPos != null && _targetGpsPos != null) {
-        final gpsInterval = _targetGpsTime.difference(_prevGpsTime).inMilliseconds;
-        if (gpsInterval > 0) {
-          final elapsed = DateTime.now().difference(_prevGpsTime).inMilliseconds;
-          final t = (elapsed / gpsInterval).clamp(0.0, 1.5);
-          final lat = _prevGpsPos!.latitude +
-              (_targetGpsPos!.latitude - _prevGpsPos!.latitude) * t;
-          final lng = _prevGpsPos!.longitude +
-              (_targetGpsPos!.longitude - _prevGpsPos!.longitude) * t;
-          _interpolatedPos = LatLng(lat, lng);
+      // ── BEARING: route-only during navigation ──
+      // GPS heading at <30 km/h is ±90° noise → camera flips.
+      // Route heading from polyline is stable and predictive.
+      if (_isNavigating && _gpsSpeedKmh > 3) {
+        final routeHdg = _routeHeadingAhead(pos);
+        if (routeHdg != null) {
+          double delta = (routeHdg - _committedBearing) % 360;
+          if (delta > 180) delta -= 360;
+          if (delta < -180) delta += 360;
+          // Only commit if real turn (>20°) — prevents micro-corrections
+          if (delta.abs() > 20) {
+            _committedBearing = routeHdg;
+          }
         }
+      } else if (!_isNavigating && _gpsSpeedKmh > 8) {
+        // Outside nav: use GPS heading, but only at higher speed
+        _committedBearing = _targetHeading;
       }
+      _smoothBearing = _committedBearing;
+      _smoothCamPos = pos;
 
-      final pos = _interpolatedPos ?? _currentGpsPos;
-
-      // ── Camera follow every 3rd tick (~3.3Hz) — smooth but not blocking ──
-      _frameCount++;
-      if (_isNavFollowing && !_userTouchingMap && pos != null && _frameCount % 3 == 0) {
-        _navCameraFollow(pos);
-      }
-
-      // setState for marker rotation
-      if (mounted && !_userTouchingMap) {
-        setState(() {});
-      }
+      _lastProgrammaticMoveTime = DateTime.now();
+      _mapController!.animateCamera(
+        CameraUpdate.newCameraPosition(gmaps.CameraPosition(
+          target: pos,
+          zoom: _smoothZoom,
+          bearing: _smoothBearing,
+          tilt: 50,
+        )),
+      );
+      _navCameraDirty = false;
     });
   }
 
-  /// Move camera to follow user — always offset so user sits at bottom center.
-  void _navCameraFollow(LatLng pos) {
-    if (_mapController == null || !_isNavFollowing) return;
-    // When driving: offset in travel direction. When stationary: offset north.
-    final heading = _gpsSpeedKmh > 5 ? _targetHeading : 0.0;
-    final cameraCenter = _offsetPositionAhead(pos, heading, 210);
-    _lastProgrammaticMoveTime = DateTime.now();
-    _mapController!.moveCamera(
-      CameraUpdate.newLatLngZoom(cameraCenter, _currentZoom),
-    );
+  void _stopNavCameraLoop() {
+    _cameraAnimTimer?.cancel();
+    _cameraAnimTimer = null;
   }
 
   /// Linearly interpolate between two angles via shortest arc.
@@ -745,18 +907,65 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
     return (a + diff * t) % 360;
   }
 
+  /// Compute heading from route polyline at current snap position, looking ~60m ahead.
+  /// This gives instant, predictive heading through curves — no GPS delay.
+  double? _routeHeadingAhead(LatLng snappedPos) {
+    if (_currentRoute == null || _currentRoute!.polylinePoints.length < 2) return null;
+    final pts = _currentRoute!.polylinePoints;
+    final segIdx = _lastSnapSegIdx.clamp(0, pts.length - 2);
+
+    // Walk ~60m ahead on the polyline from current segment
+    const lookAheadM = 60.0;
+    double walked = 0;
+    LatLng aheadPt = snappedPos;
+    for (int i = segIdx; i < pts.length - 1 && walked < lookAheadM; i++) {
+      final segLen = _distLatLng(pts[i], pts[i + 1]);
+      if (walked + segLen >= lookAheadM) {
+        // Interpolate within this segment to hit exactly lookAheadM
+        final remaining = lookAheadM - walked;
+        final frac = segLen > 0 ? remaining / segLen : 0.0;
+        aheadPt = LatLng(
+          pts[i].latitude + (pts[i + 1].latitude - pts[i].latitude) * frac,
+          pts[i].longitude + (pts[i + 1].longitude - pts[i].longitude) * frac,
+        );
+        walked = lookAheadM;
+        break;
+      }
+      walked += segLen;
+      aheadPt = pts[i + 1];
+    }
+
+    if (walked < 10) return null; // Too close to end of route
+
+    // Compute bearing from snapped position to look-ahead point
+    final dLat = aheadPt.latitude - snappedPos.latitude;
+    final dLng = aheadPt.longitude - snappedPos.longitude;
+    if (dLat.abs() < 1e-9 && dLng.abs() < 1e-9) return null;
+
+    final cosLat = math.cos(snappedPos.latitude * math.pi / 180);
+    final bearing = math.atan2(dLng * cosLat, dLat) * 180 / math.pi;
+    return (bearing + 360) % 360;
+  }
+
   /// Start heading-follow timer for non-navigation mode.
   /// 10fps marker rotation — rotates user marker, map stays north-up.
   void _startHeadingFollowTimer() {
     double lastBearing = -999;
     _headingFollowTimer?.cancel();
     _headingFollowTimer = Timer.periodic(const Duration(milliseconds: 100), (_) {
-      if (_isNavigating || _extrapolationTimer != null) return;
+      if (_isNavigating || _cameraAnimTimer != null) return;
       if (_currentGpsPos == null) return;
 
-      final heading = HeadingSensorService.instance.isGyroAvailable
-          ? _fusedHeading
-          : _currentHeading;
+      // GPS heading when driving, compass until first drive, freeze after
+      double heading;
+      if (_gpsSpeedKmh > 5 && _targetHeading >= 0) {
+        heading = _targetHeading;
+        _hasEverDriven = true;
+      } else if (!_hasEverDriven) {
+        heading = _fusedHeading; // First use: compass for initial direction
+      } else {
+        heading = _currentHeading; // Driven before, now stopped: freeze
+      }
 
       // Skip if heading barely changed (< 3°) — reduces marker rebuilds
       var diff = (heading - lastBearing).abs();
@@ -823,25 +1032,31 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
 
   @override
   void dispose() {
+    // Cancel ALL timers FIRST — prevents setState after dispose
+    _headingFollowTimer?.cancel();
+    _navPeriodicTimer?.cancel();
+    _searchDebounce?.cancel();
+    _sosBlinkTimer?.cancel();
+    _navUiShowTimer?.cancel();
+    _mapIdleTimer?.cancel();
+    _wakeWordRestartTimer?.cancel();
+    _autoStartTimer?.cancel();
+    _stopNavCameraLoop();
+    _navEngine.dispose();
+
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     _headingGpsSub?.cancel();
     _fusedHeadingSub?.cancel();
     HeadingSensorService.instance.stop();
-    _headingFollowTimer?.cancel();
-    _extrapolationTimer?.cancel();
-    _navPeriodicTimer?.cancel();
-    _searchDebounce?.cancel();
+    _speech.stop();
+    VoskWakeWordService.instance.stopListening();
+    _blitzerRealtimeChannel?.unsubscribe();
+
+    // Dispose controllers LAST (after all timers cancelled)
     _mapController?.dispose();
     _alertPulseController.dispose();
     _searchController.dispose();
     _overlaySearchCtrl.dispose();
-    _speech.stop();
-    _wakeWordRestartTimer?.cancel();
-    _sosBlinkTimer?.cancel();
-    _navUiShowTimer?.cancel();
-    _mapIdleTimer?.cancel();
-    _blitzerRealtimeChannel?.unsubscribe();
-    VoskWakeWordService.instance.stopListening();
     _panelScrollController.dispose();
     super.dispose();
   }
@@ -1011,19 +1226,28 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
       ));
     }
 
-    // ── Vehicle marker on map (always visible) ──
-    // Uses interpolated position during navigation for smooth 60fps movement.
-    // The camera offset makes the map move under the cursor (Waze/Google Maps style).
+    // ── Vehicle marker on map ──
     if (_currentGpsPos != null && _navVehicleIcon != null) {
-      final markerPos = _isNavigating && _interpolatedPos != null
-          ? _snapToRoute(_interpolatedPos!)
+      // During nav: use smooth camera position (same as camera target) for perfect sync.
+      // The marker must sit exactly where the camera thinks the vehicle is,
+      // otherwise it drifts off-center.
+      final markerPos = _isNavigating
+          ? (_smoothCamPos ?? _snapToRoute(_currentGpsPos!))
           : _currentGpsPos!;
-      final markerHeading = _isNavigating ? _interpolatedHeading : _currentHeading;
+      // During nav: arrow must always point UP on screen (forward direction).
+      // flat:true rotation is relative to map-north → compensate for camera bearing.
+      // rotation = _smoothBearing makes the arrow point in driving direction on the MAP,
+      // and since camera bearing = _smoothBearing, it appears pointing UP on screen.
+      final markerHeading = _isNavigating ? _smoothBearing : _currentHeading;
+      // During nav: Waze-style arrow; outside nav: avatar icon
+      final markerIcon = _isNavigating && _navDotIcon != null
+          ? _navDotIcon!
+          : _navVehicleIcon!;
       markers.add(Marker(
         markerId: const MarkerId('my_vehicle'),
         position: markerPos,
-        icon: _navVehicleIcon!,
-        anchor: const Offset(0.5, 0.7), // Circle center (below arrow)
+        icon: markerIcon,
+        anchor: const Offset(0.5, 0.5),
         rotation: markerHeading,
         flat: true,
         zIndex: 100,
@@ -1137,10 +1361,13 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
       myLocationEnabled: false, // Replaced by my_vehicle marker
       myLocationButtonEnabled: false,
       zoomControlsEnabled: false,
-      compassEnabled: false,
+      compassEnabled: true,
       mapToolbarEnabled: false,
       mapType: MapType.normal,
-      padding: EdgeInsets.zero,
+      // During navigation: top padding pushes logical center down → rider at bottom
+      padding: _isNavigating
+          ? EdgeInsets.only(top: MediaQuery.of(context).size.height * 0.45)
+          : EdgeInsets.zero,
       style: _darkMapStyle,
       onMapCreated: (controller) {
         _mapController = controller;
@@ -1181,10 +1408,49 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
     ); // end Listener
   }
 
+  /// Fixed navigation icon overlay — stays at a fixed screen position (like Waze/Google Maps).
+  /// The map moves underneath, the icon never jitters.
+  Widget _buildFixedNavIcon() {
+    final modeColor = _routeMode == RouteMode.biker
+        ? const Color(0xFF00BCD4)
+        : _routeMode == RouteMode.pedestrian
+            ? const Color(0xFF4CAF50)
+            : const Color(0xFF2196F3);
+
+    return Positioned(
+      // Position near bottom edge to match 200m camera offset
+      bottom: MediaQuery.of(context).size.height * 0.12,
+      left: 0,
+      right: 0,
+      child: Center(
+        child: IgnorePointer(
+          child: Container(
+            width: 22,
+            height: 22,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: modeColor,
+              border: Border.all(color: Colors.white, width: 3),
+              boxShadow: [
+                BoxShadow(
+                  color: modeColor.withValues(alpha: 0.4),
+                  blurRadius: 10,
+                  spreadRadius: 4,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   /// Build polylines with caching — only rebuild when route/alternatives change.
   Set<Polyline> _buildCachedPolylines(GroupRideState rideState) {
-    // Return cache if route hasn't changed
-    if (_cachedPolylines != null &&
+    // Return cache if route hasn't changed — but NOT during navigation
+    // (polyline is trimmed dynamically as user moves along route)
+    if (!_isNavigating &&
+        _cachedPolylines != null &&
         _cachedPolylineRoute == _currentRoute &&
         _cachedPolylineAltCount == _alternativeRoutes.length) {
       return _cachedPolylines!;
@@ -1209,10 +1475,20 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
     }
 
     // Primary route (Waze-style: Cyan, dashed)
+    // During navigation: trim polyline to only show route AHEAD of icon
     if (_currentRoute != null && _currentRoute!.polylinePoints.length >= 2) {
+      List<LatLng> routePoints = _currentRoute!.polylinePoints;
+
+      // Waze-style: route disappears behind the icon
+      if (_isNavigating && _smoothCamPos != null) {
+        final segIdx = _lastSnapSegIdx.clamp(0, routePoints.length - 2);
+        // Start from current segment + snapped position
+        routePoints = [_smoothCamPos!, ...routePoints.sublist(segIdx + 1)];
+      }
+
       polylines.add(Polyline(
         polylineId: const PolylineId('route_shadow'),
-        points: _currentRoute!.polylinePoints,
+        points: routePoints,
         color: const Color(0xFF004D57),
         width: 12,
         zIndex: 2,
@@ -1220,7 +1496,7 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
       ));
       polylines.add(Polyline(
         polylineId: const PolylineId('route'),
-        points: _currentRoute!.polylinePoints,
+        points: routePoints,
         color: routeCyan,
         width: 7,
         zIndex: 3,
@@ -1679,7 +1955,11 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
     if (result.city != null && result.city!.isNotEmpty && !name.contains(result.city!)) {
       ttsParts.add(result.city!);
     }
-    if (result.country != null && result.country!.isNotEmpty) {
+    // Skip country for domestic destinations (always "Deutschland" → useless)
+    // Only add country if it's NOT Germany
+    if (result.country != null && result.country!.isNotEmpty &&
+        !result.country!.toLowerCase().contains('deutsch') &&
+        result.country!.toLowerCase() != 'germany') {
       ttsParts.add(result.country!);
     }
     final ttsText = 'Neues Ziel: ${ttsParts.join(', ')}';
@@ -1980,14 +2260,205 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
   Future<List<GeocodingResult>> _geocodeQuery(String query) async {
     Position? currentPos;
     try { currentPos = await Geolocator.getLastKnownPosition(); } catch (_) {}
+    // Prefer _currentGpsPos (always available during ride) over Geolocator
+    final nearPos = _currentGpsPos != null
+        ? LatLng(_currentGpsPos!.latitude, _currentGpsPos!.longitude)
+        : (currentPos != null ? LatLng(currentPos.latitude, currentPos.longitude) : null);
     try {
       return await GeocodingService().searchPlace(
         query, limit: 5,
-        near: currentPos != null ? LatLng(currentPos.latitude, currentPos.longitude) : null,
+        near: nearPos,
       );
     } catch (_) {
       return [];
     }
+  }
+
+  // ─────────────────────────────────────────────────
+  //  VOICE ADDRESS CLEANING (Vosk garbled speech)
+  // ─────────────────────────────────────────────────
+
+  /// German number words → digits. Vosk transcribes "1" as "eins", "2" as "zwei" etc.
+  static const _numberWords = {
+    'eins': '1', 'zwei': '2', 'drei': '3', 'vier': '4', 'fünf': '5',
+    'sechs': '6', 'sieben': '7', 'acht': '8', 'neun': '9', 'zehn': '10',
+    'elf': '11', 'zwölf': '12', 'dreizehn': '13', 'vierzehn': '14',
+    'fünfzehn': '15', 'sechzehn': '16', 'siebzehn': '17', 'achtzehn': '18',
+    'neunzehn': '19', 'zwanzig': '20',
+    // Common compounds
+    'einundzwanzig': '21', 'zweiundzwanzig': '22', 'dreißig': '30',
+    'vierzig': '40', 'fünfzig': '50', 'sechzig': '60', 'siebzig': '70',
+    'achtzig': '80', 'neunzig': '90', 'hundert': '100',
+  };
+
+  /// Clean Vosk-garbled address text for geocoding.
+  /// "a straße eins in solingen" → "astraße 1 in solingen"
+  String _cleanVoskAddress(String address) {
+    var result = address.trim();
+
+    // 1. Number words → digits
+    for (final entry in _numberWords.entries) {
+      result = result.replaceAll(RegExp('\\b${entry.key}\\b', caseSensitive: false), entry.value);
+    }
+
+    // 2. Common Vosk misheard street suffixes
+    result = result
+        .replaceAll(RegExp(r'\bstra(?:ß|ss)e\b', caseSensitive: false), 'straße')
+        .replaceAll(RegExp(r'\bstrasse\b', caseSensitive: false), 'straße')
+        .replaceAll(RegExp(r'\bstr\b', caseSensitive: false), 'straße');
+
+    // 3. Remove filler words/articles that Vosk adds (but keep "in" for city extraction)
+    result = result
+        .replaceAll(RegExp(r'\bdie\b', caseSensitive: false), '')
+        .replaceAll(RegExp(r'\bder\b', caseSensitive: false), '')
+        .replaceAll(RegExp(r'\bdas\b', caseSensitive: false), '')
+        .replaceAll(RegExp(r'\bzum\b', caseSensitive: false), '')
+        .replaceAll(RegExp(r'\bzur\b', caseSensitive: false), '')
+        .replaceAll(RegExp(r'\bnach\b', caseSensitive: false), '');
+
+    // 4. Clean up multiple spaces
+    result = result.replaceAll(RegExp(r'\s+'), ' ').trim();
+
+    return result;
+  }
+
+  /// Common Vosk single-letter misheard → actual street prefix expansions.
+  /// Vosk often hears only the first syllable or letter of a street name.
+  static const _streetPrefixExpansions = <String, List<String>>{
+    'a': ['ahr', 'alt', 'am', 'an', 'au'],
+    'b': ['berg', 'bahn', 'bach', 'bir', 'burg'],
+    'e': ['eich', 'erlen', 'essen'],
+    'ha': ['haupt', 'hagen', 'hammer'],
+    'ho': ['hoch', 'holz'],
+    'k': ['karl', 'kaiser', 'kirch', 'köln'],
+    'l': ['lang', 'linden'],
+    'm': ['markt', 'main', 'mühlen'],
+    'r': ['rhein', 'ring', 'rot'],
+    's': ['schiller', 'schul'],
+    'w': ['wald', 'wasser', 'wil'],
+  };
+
+  /// Join short word prefix to "straße" — "a straße" → "astraße", "ahr straße" → "ahrstraße"
+  String _joinStreetPrefix(String address) {
+    // Match: [short word(s)] + straße/str/strasse
+    final match = RegExp(r'^(\S{1,4})\s+(straße|strasse|str)\b(.*)$', caseSensitive: false).firstMatch(address);
+    if (match != null) {
+      return '${match.group(1)}${match.group(2)}${match.group(3)}'.trim();
+    }
+    return address;
+  }
+
+  /// Try expanding a single-letter street prefix into common German street names.
+  /// "a straße 1, solingen" → ["ahrstraße 1, solingen", "altstraße 1, solingen", ...]
+  List<String> _expandStreetPrefix(String address) {
+    final variants = <String>[];
+    final match = RegExp(r'^(\S{1,2})\s*(straße|strasse)\b(.*)$', caseSensitive: false).firstMatch(address);
+    if (match != null) {
+      final prefix = match.group(1)!.toLowerCase();
+      final suffix = match.group(2)!;
+      final rest = match.group(3)!;
+      final expansions = _streetPrefixExpansions[prefix];
+      if (expansions != null) {
+        for (final exp in expansions) {
+          variants.add('$exp$suffix$rest'.trim());
+        }
+      }
+    }
+    return variants;
+  }
+
+  /// Extract city from "in [city]" and format as "street, city" for Nominatim.
+  /// "astraße 1 in solingen" → "astraße 1, solingen"
+  String? _structureAddress(String address) {
+    final inMatch = RegExp(r'^(.+?)\s+in\s+(\S.+)$', caseSensitive: false).firstMatch(address);
+    if (inMatch != null) {
+      final street = inMatch.group(1)!.trim();
+      final city = inMatch.group(2)!.trim();
+      if (street.isNotEmpty && city.isNotEmpty) {
+        return '$street, $city';
+      }
+    }
+    return null;
+  }
+
+  /// Google Places text search fallback.
+  Future<List<GeocodingResult>> _googlePlacesSearch(String query) async {
+    try {
+      final loc = _currentGpsPos!;
+      final resp = await http.get(Uri.parse(
+        'https://maps.googleapis.com/maps/api/place/textsearch/json'
+        '?query=${Uri.encodeComponent(query)}'
+        '&location=${loc.latitude},${loc.longitude}'
+        '&radius=50000&language=de'
+        '&key=${DestinationInfoService.googleApiKey}',
+      )).timeout(const Duration(seconds: 10));
+      if (resp.statusCode == 200) {
+        final json = jsonDecode(resp.body) as Map<String, dynamic>;
+        debugPrint('[VoiceNav] Google status: ${json['status']}');
+        final gResults = json['results'] as List? ?? [];
+        if (gResults.isNotEmpty) {
+          final first = gResults[0] as Map<String, dynamic>;
+          final loc = (first['geometry'] as Map?)?['location'] as Map?;
+          if (loc != null) {
+            final gLat = (loc['lat'] as num).toDouble();
+            final gLng = (loc['lng'] as num).toDouble();
+            final gName = first['name'] as String? ?? query;
+            debugPrint('[VoiceNav] Google found: $gName ($gLat, $gLng)');
+            return [GeocodingResult(displayName: gName, location: LatLng(gLat, gLng))];
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('[VoiceNav] Google error: $e');
+    }
+    return [];
+  }
+
+  /// Extract street part and city from garbled Vosk address.
+  /// Takes the first word(s) containing "straße/str" as street, last word as city.
+  /// "a straße allen sinnen solingen" → ("a straße", "solingen")
+  /// "ahrstraße 1, solingen" → ("ahrstraße 1", "solingen")
+  (String, String)? _extractStreetAndCity(String address) {
+    final words = address.replaceAll(',', ' ').split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toList();
+    if (words.length < 2) return null;
+
+    // City = last word (Vosk almost always gets the city right)
+    final city = words.last;
+
+    // Find street part: everything up to and including "straße" + optional number
+    int streetEnd = -1;
+    for (int i = 0; i < words.length; i++) {
+      if (words[i].toLowerCase().contains('straße') || words[i].toLowerCase().contains('strasse') ||
+          words[i].toLowerCase().contains('str') || words[i].toLowerCase().contains('weg') ||
+          words[i].toLowerCase().contains('platz') || words[i].toLowerCase().contains('gasse') ||
+          words[i].toLowerCase().contains('allee') || words[i].toLowerCase().contains('ring') ||
+          words[i].toLowerCase().contains('damm')) {
+        streetEnd = i;
+        // Include number after street if it's a digit
+        if (i + 1 < words.length && RegExp(r'^\d+[a-z]?$').hasMatch(words[i + 1])) {
+          streetEnd = i + 1;
+        }
+        break;
+      }
+    }
+
+    if (streetEnd >= 0) {
+      final street = words.sublist(0, streetEnd + 1).join(' ');
+      if (street.isNotEmpty && city.isNotEmpty && street.toLowerCase() != city.toLowerCase()) {
+        return (street, city);
+      }
+    }
+
+    // Fallback: first word(s) = street, last word = city
+    if (words.length >= 3) {
+      // Take first 1-2 words as street
+      final street = words.length > 3 ? words.sublist(0, 2).join(' ') : words.first;
+      if (street.toLowerCase() != city.toLowerCase()) {
+        return (street, city);
+      }
+    }
+
+    return null;
   }
 
   /// Set destination directly from lat/lng (from history or favorites).
@@ -2011,6 +2482,186 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
     TtsAlertService.instance.speakText(ttsText);
     _lastDestinationName = name;
     _calculateRoute(LatLng(lat, lng));
+  }
+
+  /// Navigate to an address spoken by the user via voice command.
+  /// Geocodes the address, calculates route directly using OSRM, and auto-starts navigation.
+  Future<void> _navigateToAddress(String address) async {
+    try {
+      debugPrint('[VoiceNav] Starting navigation to: "$address"');
+
+      // ── Clean up Vosk-garbled speech ──
+      final cleaned = _cleanVoskAddress(address);
+      debugPrint('[VoiceNav] Cleaned address: "$cleaned"');
+
+      // 1. Geocode — try multiple strategies for voice-garbled text
+      var results = await _geocodeQuery(cleaned);
+      debugPrint('[VoiceNav] Strategy 1 (cleaned): ${results.length} results');
+
+      // Strategy 2: Join short prefix to "straße" — "a straße" → "astraße"
+      if (results.isEmpty) {
+        final joinedAddr = _joinStreetPrefix(cleaned);
+        if (joinedAddr != cleaned) {
+          debugPrint('[VoiceNav] Strategy 2 (joined): "$joinedAddr"');
+          results = await _geocodeQuery(joinedAddr);
+        }
+      }
+
+      // Strategy 3: Extract city after "in" and format as "street, city"
+      if (results.isEmpty) {
+        final structured = _structureAddress(cleaned);
+        if (structured != null && structured != cleaned) {
+          debugPrint('[VoiceNav] Strategy 3 (structured): "$structured"');
+          results = await _geocodeQuery(structured);
+        }
+      }
+
+      // Strategy 4: Join prefix + structured
+      if (results.isEmpty) {
+        final joined = _joinStreetPrefix(cleaned);
+        final structured = _structureAddress(joined);
+        if (structured != null) {
+          debugPrint('[VoiceNav] Strategy 4 (joined+structured): "$structured"');
+          results = await _geocodeQuery(structured);
+        }
+      }
+
+      // Strategy 5: Expand prefix + ONLY street + city (drop noise between)
+      // "a straße allen sinnen solingen" → try "ahrstraße, solingen" etc.
+      if (results.isEmpty) {
+        final streetCity = _extractStreetAndCity(cleaned);
+        if (streetCity != null) {
+          final (street, city) = streetCity;
+          // Try joining prefix to street first
+          final joinedStreet = _joinStreetPrefix(street);
+          // Try expansions with just street + city
+          final expansions = _expandStreetPrefix('$joinedStreet, $city');
+          for (final expanded in expansions) {
+            debugPrint('[VoiceNav] Strategy 5a (expand+city): "$expanded"');
+            results = await _geocodeQuery(expanded);
+            if (results.isNotEmpty) break;
+          }
+          // Also try joined street + city without expansion
+          if (results.isEmpty && joinedStreet != street) {
+            final simple = '$joinedStreet, $city';
+            debugPrint('[VoiceNav] Strategy 5b (joined+city): "$simple"');
+            results = await _geocodeQuery(simple);
+          }
+        }
+        // Fallback: try expansions on full cleaned text
+        if (results.isEmpty) {
+          final base = _joinStreetPrefix(cleaned);
+          final expansions = _expandStreetPrefix(base);
+          for (final expanded in expansions) {
+            debugPrint('[VoiceNav] Strategy 5c (expand full): "$expanded"');
+            results = await _geocodeQuery(expanded);
+            if (results.isNotEmpty) break;
+          }
+        }
+      }
+
+      // Strategy 6: Original unmodified input
+      if (results.isEmpty && cleaned != address) {
+        debugPrint('[VoiceNav] Strategy 6 (original): "$address"');
+        results = await _geocodeQuery(address);
+      }
+
+      // Strategy 7: Google Places text search as ultimate fallback
+      if (results.isEmpty && _currentGpsPos != null) {
+        // Try simplified street + city for better Google results
+        final streetCity = _extractStreetAndCity(cleaned);
+        final googleQuery = streetCity != null
+            ? '${_joinStreetPrefix(streetCity.$1)}, ${streetCity.$2}'
+            : (_structureAddress(cleaned) ?? cleaned);
+        debugPrint('[VoiceNav] Strategy 7 (Google Places): "$googleQuery"');
+        results = await _googlePlacesSearch(googleQuery);
+      }
+
+      if (results.isEmpty) {
+        debugPrint('[VoiceNav] All geocoding failed for: "$address" / "$cleaned"');
+        _speakWithVoskPause('Adresse $address nicht gefunden.');
+        return;
+      }
+      final best = results.first;
+      final destLat = best.location.latitude;
+      final destLng = best.location.longitude;
+      debugPrint('[VoiceNav] Geocoded to: ${best.displayName} ($destLat, $destLng)');
+      _lastDestinationName = best.displayName;
+
+      // 2. Get own GPS position as origin
+      LatLng? origin = _currentGpsPos;
+      if (origin == null) {
+        try {
+          final pos = await Geolocator.getLastKnownPosition();
+          if (pos != null) origin = LatLng(pos.latitude, pos.longitude);
+        } catch (_) {}
+      }
+      if (origin == null) {
+        debugPrint('[VoiceNav] No GPS position available');
+        _speakWithVoskPause('Kein GPS Signal.');
+        return;
+      }
+      debugPrint('[VoiceNav] Origin: ${origin.latitude}, ${origin.longitude}');
+
+      // 3. Set destination in group (background, don't wait)
+      try {
+        final repo = ref.read(groupRepositoryProvider);
+        repo.setDestination(widget.groupId, lat: destLat, lng: destLng, name: best.displayName);
+      } catch (e) {
+        debugPrint('[VoiceNav] Set destination error: $e');
+      }
+
+      // 4. Calculate route — Google Routes first, OSRM fallback
+      debugPrint('[VoiceNav] Calculating route...');
+      final destination = LatLng(destLat, destLng);
+      List<OsrmRoute> allRoutes = [];
+      if (GoogleRoutesService.isAvailable) {
+        try {
+          allRoutes = await _googleRoutes.getAllRoutes(origin, destination, mode: _routeMode);
+          debugPrint('[VoiceNav] Google Routes: ${allRoutes.length} routes');
+        } catch (e) {
+          debugPrint('[VoiceNav] Google Routes failed: $e — OSRM fallback');
+        }
+      }
+      if (allRoutes.isEmpty) {
+        allRoutes = await _osrmService.getAllRoutes(origin, destination, mode: _routeMode);
+      }
+      debugPrint('[VoiceNav] Got ${allRoutes.length} routes');
+
+      if (allRoutes.isEmpty || !mounted) {
+        _speakWithVoskPause('Konnte keine Route berechnen.');
+        return;
+      }
+
+      // Pick route (biker: longest for more Landstraße)
+      int primaryIdx = 0;
+      if (_routeMode == RouteMode.biker && allRoutes.length > 1) {
+        final sorted = List.from(allRoutes)..sort((a, b) => a.distanceKm.compareTo(b.distanceKm));
+        primaryIdx = allRoutes.indexOf(sorted.last);
+      }
+      final route = allRoutes[primaryIdx];
+      debugPrint('[VoiceNav] Route: ${route.distanceText}, ${route.durationText}');
+
+      // 5. Set route state
+      setState(() {
+        _alternativeRoutes = allRoutes;
+        _selectedRouteIndex = primaryIdx;
+        _currentRoute = route;
+        _isCalculatingRoute = false;
+        _routePanelExpanded = false;
+      });
+
+      // 6. Load enrichment (background)
+      _loadRouteEnrichment(route, destination);
+
+      // 7. Immediately start navigation — no countdown, no overview
+      debugPrint('[VoiceNav] Starting navigation NOW');
+      _startNavigation();
+
+    } catch (e) {
+      debugPrint('[VoiceNav] Error: $e');
+      _speakWithVoskPause('Fehler bei der Navigation.');
+    }
   }
 
   String? _countryCodeToName(String code) {
@@ -2216,7 +2867,15 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
                               _autoStartTimer = null;
                               setState(() => _autoStartCountdown = 0);
                             } else {
-                              _startNavigation();
+                              // Launch Mapbox navigation (smooth native tracking)
+                              final dest = _getNavDestination();
+                              if (dest != null) {
+                                context.push('/mapbox-nav', extra: {
+                                  'destLat': dest.latitude,
+                                  'destLng': dest.longitude,
+                                  'destName': _lastDestinationName ?? 'Ziel',
+                                });
+                              }
                             }
                           },
                           child: Container(
@@ -2493,11 +3152,10 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
         // If switching to/from pedestrian, recalculate route (different OSRM profile)
         final needsRecalc = mode == RouteMode.pedestrian || oldMode == RouteMode.pedestrian;
         if (needsRecalc) {
-          // Trigger full route recalculation with new profile
-          final rideState = ref.read(groupRideProvider(widget.groupId));
-          final group = rideState.group;
-          if (group?.destinationLat != null && group?.destinationLng != null) {
-            _calculateRoute(LatLng(group!.destinationLat!, group.destinationLng!));
+          // Use current destination (group destination OR last polyline point)
+          final dest = _getNavDestination();
+          if (dest != null) {
+            _calculateRoute(dest);
           }
         } else if (_alternativeRoutes.isNotEmpty) {
           // Re-select route: biker=longest, auto/pedestrian=shortest
@@ -2740,7 +3398,7 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
     double cumulativeDist = 0;
 
     for (final step in route.steps) {
-      if (step.maneuver == 'depart' || step.maneuver == 'arrive') continue;
+      if (step.maneuver.startsWith('depart') || step.maneuver == 'arrive') continue;
       final road = (step.roadName ?? '').trim();
       if (road.isEmpty) continue;
       // Skip pure-number refs like "8", "45" — not useful as road names
@@ -2777,7 +3435,7 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
       final sectionLocations = <LatLng>[];
       String? curRoad;
       for (final step in route.steps) {
-        if (step.maneuver == 'depart' || step.maneuver == 'arrive') continue;
+        if (step.maneuver.startsWith('depart') || step.maneuver == 'arrive') continue;
         final road = (step.roadName ?? '').trim();
         if (road.isEmpty) continue;
         if (road != curRoad) {
@@ -3402,9 +4060,28 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
     );
   }
 
+  /// Launch Mapbox navigation screen (smooth native tracking).
+  void _launchMapboxNav() {
+    final dest = _getNavDestination();
+    if (dest == null) return;
+    context.push('/mapbox-nav', extra: {
+      'destLat': dest.latitude,
+      'destLng': dest.longitude,
+      'destName': _lastDestinationName ?? 'Ziel',
+    });
+  }
+
   /// Start navigation — called from "LOS!" button or auto-start timer.
+  /// NOW REDIRECTS TO MAPBOX for smooth native tracking.
   void _startNavigation() {
-    if (_isNavigating) return; // already navigating
+    _launchMapboxNav();
+    return;
+    // ignore: dead_code
+    debugPrint('[Nav] _startNavigation called! _isNavigating=$_isNavigating _currentRoute=${_currentRoute != null}');
+    if (_isNavigating) {
+      debugPrint('[Nav] BLOCKED — already navigating!');
+      return;
+    }
     _autoStartTimer?.cancel();
     _autoStartTimer = null;
     _autoStartCountdown = 0;
@@ -3412,42 +4089,58 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
     _headingFollowTimer?.cancel();
     _headingFollowTimer = null;
     _isProgrammaticMove = true; // Protect from onCameraMoveStarted during setup
+    WakelockPlus.enable(); // Display bleibt an während Navigation
     setState(() {
       _routePanelExpanded = false;
       _isNavFollowing = true;
       _isNavigating = true;
       _navUiHidden = true; // Auto-hide UI during navigation
     });
+    // Start NavEngine (parallel — will take over TTS + turn tracking)
+    if (_currentRoute != null) {
+      final dest = _getNavDestination();
+      _navEngine.setRoute(_currentRoute!, destination: dest, mode: _routeMode);
+      _navEngine.onStateChangedSync = () { if (mounted) setState(() {}); };
+      _navEngine.onArrived = () => _stopNavigation(arrived: true);
+      _navEngine.start(currentPos: _currentGpsPos);
+    }
     _startNavPeriodicTimer();
     // NOTE: Extrapolation timer started AFTER initial camera positioning (see below)
-    // Start announcement
+    // Route announcement — "Navigation gestartet" FIRST, then details after delay
     final destName = _lastDestinationName ?? 'Ziel';
-    final country = _destinationInfo?.country;
+    // Use city name (e.g. "Solingen") not country ("Deutschland")
+    final cityName = _destinationInfo?.cityName;
     final route = _currentRoute;
     if (route != null) {
-      final destFull = country != null && country.isNotEmpty
-          ? '$destName, $country'
+      final destFull = cityName != null && cityName.isNotEmpty
+          ? '$destName in $cityName'
           : destName;
-      TtsAlertService.instance.speakText(
-        'Navigation gestartet. $destFull. ${route.distanceText}, ${route.durationText}. Gute Fahrt!',
+      // Sequential navigation TTS: each waits for the previous to finish
+      TtsAlertService.instance.clearQueue();
+      TtsAlertService.instance.speakQueued('Navigation gestartet.');
+      TtsAlertService.instance.speakQueued(
+        '$destFull. ${route.distanceText}, ${route.durationText}.',
       );
-      // Announce first turn after a short delay
-      Future.delayed(const Duration(seconds: 4), () {
-        if (mounted && _isNavigating && route.steps.length > 1) {
-          for (int i = 0; i < route.steps.length; i++) {
-            final s = route.steps[i];
-            if (s.maneuver == 'depart') continue;
-            final dist = _formatDistance(s.distanceMeters > 0
-                ? _distLatLng(_currentGpsPos!, s.location)
-                : route.steps[0].distanceMeters);
-            _lastEarlyAnnouncedIdx = i;
-            TtsAlertService.instance.speakText(
-              'Weiter für $dist, dann ${s.instruction}',
-            );
-            break;
-          }
+      // First turn instruction — directly in queue, no Future.delayed needed
+      if (route.steps.length > 1 && _currentGpsPos != null) {
+        for (int i = 0; i < route.steps.length; i++) {
+          final s = route.steps[i];
+          if (s.maneuver.startsWith('depart')) continue;
+          final dist = _formatDistance(s.distanceMeters > 0
+              ? _distLatLng(_currentGpsPos!, s.location)
+              : route.steps[0].distanceMeters);
+          // Don't add road name if already in instruction (avoid "auf X auf X")
+          final hasRoad = s.roadName != null && s.roadName!.isNotEmpty
+              && s.instruction.toLowerCase().contains(s.roadName!.toLowerCase());
+          final road = (s.roadName != null && s.roadName!.isNotEmpty && !hasRoad)
+              ? ' auf ${s.roadName}' : '';
+          _announcedTtsPairs.add('$i:500m'); // Mark as pre-announced
+          TtsAlertService.instance.speakQueued(
+            'Weiter für $dist, dann ${s.instruction}$road',
+          );
+          break;
         }
-      });
+      }
     }
     if (_currentGpsPos != null && _mapController != null) {
       // Use route direction for initial bearing — find a point far enough away
@@ -3468,33 +4161,29 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
         debugPrint('[Nav] Init bearing: ${initBearing.toStringAsFixed(1)}° from GPS to route point');
         _currentHeading = initBearing;
         _targetHeading = initBearing;
-        _prevHeading = initBearing;
-        _interpolatedHeading = initBearing;
-        // Set interpolation positions so timer starts at correct location
-        _interpolatedPos = _currentGpsPos;
-        _prevGpsPos = _currentGpsPos;
-        _targetGpsPos = _currentGpsPos;
-        _prevGpsTime = DateTime.now();
-        _targetGpsTime = DateTime.now();
+        _smoothBearing = initBearing;
+        _committedBearing = initBearing;
       }
-      // North-up: user at bottom center, offset in route direction
+      _smoothCamPos = null; // Reset smooth position for immediate jump
+      _lastCamTarget = null;
+      _lastCamBearing = -1;
+      // Start camera at current position, looking in travel direction
       _isProgrammaticMove = true;
       _lastProgrammaticMoveTime = DateTime.now();
-      _currentZoom = 17.0;
+      _smoothZoom = 17.0;
       _mapController!.moveCamera(
         CameraUpdate.newCameraPosition(
           gmaps.CameraPosition(
-            target: _offsetPositionAhead(_currentGpsPos!, initBearing, 210),
+            target: _currentGpsPos!,
             zoom: 17.0,
-            tilt: 0,
-            bearing: 0,
+            tilt: 45,
+            bearing: _smoothBearing,
           ),
         ),
       );
-      _startExtrapolationTimer();
+      _startNavCameraLoop();
     } else {
-      // No GPS → start interpolation immediately
-      _startExtrapolationTimer();
+      _startNavCameraLoop();
     }
   }
 
@@ -3537,19 +4226,23 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
   }
 
   /// Stop active navigation and reset all route state.
-  void _stopNavigation() {
+  void _stopNavigation({bool arrived = false}) {
+    WakelockPlus.disable(); // Display darf wieder ausgehen
     // Cancel all timers
     _autoStartTimer?.cancel();
     _autoStartTimer = null;
-    _extrapolationTimer?.cancel();
-    _extrapolationTimer = null;
+    _stopNavCameraLoop();
     _isProgrammaticMove = false; // Allow user gestures again
     // Keep HeadingSensorService + fused heading running for non-nav heading follow
     _navKalman.reset(); // Reset Kalman filter for next navigation
     _navPeriodicTimer?.cancel();
     _navPeriodicTimer = null;
-    TtsAlertService.instance.speakText('Navigation beendet.');
-    TtsAlertService.instance.stop();
+    _navEngine.stop();
+    if (!arrived) {
+      // Manual stop — announce it
+      TtsAlertService.instance.speakText('Navigation beendet.');
+    }
+    // If arrived: NavEngine already said "Du hast dein Ziel erreicht. Viel Spaß noch!"
     _navUiShowTimer?.cancel();
     setState(() {
       _isNavigating = false;
@@ -3564,19 +4257,25 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
       _destinationInfo = null;
       _routeCountrySegments = [];
       _lastAnnouncedStepIndex = -1;
-      _lastPreAnnouncedIdx = -1;
-      _lastEarlyAnnouncedIdx = -1;
+      _announcedTtsPairs.clear();
       _nextTurnStep = null;
+      _afterNextTurnStep = null;
       _nextTurnDistanceM = 0;
       _offRouteCount = 0;
       _offRouteAsked = false;
       _offRouteWarned = false;
+      _awaitingRerouteChoice = false;
       _lastOnRoutePos = _currentGpsPos;
+      _navStartPos = _currentGpsPos; // remember start for "Zurück zum Start"
       _routePanelExpanded = false;
       _isLoadingRouteInfo = false;
       _cachedRouteStepWidgets = null;
       _cachedPolylines = null;
       _lastSnapInput = null;
+      _osrmMatchedPos = null;
+      _gpsMatchBuffer.clear();
+      _gpsMatchTimestamps.clear();
+      _gpsMatchTickCounter = 0;
       _expandedCountries.clear();
     });
     // Resume non-nav heading follow timer (compass rotation)
@@ -3619,8 +4318,19 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
 
     setState(() => _isCalculatingRoute = true);
     try {
-      // Fetch ALL route alternatives
-      final allRoutes = await _osrmService.getAllRoutes(origin, destination, mode: _routeMode);
+      // Fetch ALL route alternatives — Google Routes first, OSRM fallback
+      List<OsrmRoute> allRoutes = [];
+      if (GoogleRoutesService.isAvailable) {
+        try {
+          allRoutes = await _googleRoutes.getAllRoutes(origin, destination, mode: _routeMode);
+          debugPrint('[Nav] Google Routes: ${allRoutes.length} routes');
+        } catch (e) {
+          debugPrint('[Nav] Google Routes failed: $e — OSRM fallback');
+        }
+      }
+      if (allRoutes.isEmpty) {
+        allRoutes = await _osrmService.getAllRoutes(origin, destination, mode: _routeMode);
+      }
 
       if (!mounted) return;
 
@@ -3674,48 +4384,87 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
     }
   }
 
-  /// Off-route detection — 2-stage system:
-  /// Stage 1 (3s off-route): TTS warning "Du hast die Route verlassen"
-  /// Stage 2 (8s off-route): Auto-reroute + "Route wird neu berechnet"
-  /// User can say "Zurück" to go back or "Navigation beenden" to stop.
+  /// Off-route detection — after 3s off-route:
+  /// TTS: "Hast du dich verfahren Racer? Sage Weiter zum Ziel, oder Zurück zum Start."
+  /// Auto-reroute to destination after 10s if no voice answer.
   bool _offRouteAsked = false;
-  bool _offRouteWarned = false; // stage 1 warning given
-  LatLng? _lastOnRoutePos; // last position that was on the route
+  bool _offRouteWarned = false;
+  bool _awaitingRerouteChoice = false; // waiting for voice: "weiter" or "zurück"
+  LatLng? _lastOnRoutePos;
+  LatLng? _navStartPos; // where navigation was started
 
   void _checkOffRoute(LatLng pos) {
-    if (_currentRoute == null || _isCalculatingRoute) return;
+    if (_currentRoute == null || _isCalculatingRoute) {
+      debugPrint('[Nav] Off-route SKIP: route=${_currentRoute != null}, calculating=$_isCalculatingRoute');
+      return;
+    }
     final dist = _minDistanceToRoute(pos);
-    if (dist > 40) {
+    // Mode-aware: pedestrians on narrow sidewalks, bikers need more GPS tolerance
+    final offThreshold = _routeMode == RouteMode.pedestrian ? 20.0 : 35.0;
+    debugPrint('[Nav] Off-route: dist=${dist.toStringAsFixed(1)}m (threshold=${offThreshold}m), count=$_offRouteCount, asked=$_offRouteAsked');
+    if (dist > offThreshold) {
       _offRouteCount++;
 
-      // ── Stage 1: Warning after 3 consecutive off-route fixes (~3s) ──
-      if (_offRouteCount >= 3 && !_offRouteWarned) {
-        _offRouteWarned = true;
-        debugPrint('[Nav] Off-route warning (${dist.toStringAsFixed(0)}m off)');
-        TtsAlertService.instance.speakPriority(
-          'Du hast die Route verlassen.',
-        );
-      }
-
-      // ── Stage 2: Auto-reroute after 8 consecutive fixes (~8s) ──
-      if (_offRouteCount >= 8 && !_offRouteAsked) {
+      // ── 3 consecutive off-route fixes → reroute + ask rider ──
+      // 30m threshold: GPS accuracy is 5-15m, so 10m caused constant false alarms.
+      // 3 fixes = ~3 seconds confirmation before triggering.
+      if (_offRouteCount >= 3 && !_offRouteAsked) {
         _offRouteAsked = true;
         _offRouteCount = 0;
+        debugPrint('[Nav] Off-route → auto-rerouting to destination');
+
+        // Auto-reroute without asking — like Google Maps
+        TtsAlertService.instance.clearQueue();
+        TtsAlertService.instance.speakQueued('Route wird neu berechnet.');
+
         final dest = _getNavDestination();
-        if (dest != null) {
-          debugPrint('[Nav] Auto-reroute triggered (${dist.toStringAsFixed(0)}m off for 8s)');
-          TtsAlertService.instance.speakText(
-            'Route wird neu berechnet.',
-          );
-          _rerouteFromCurrentPosition(pos, dest);
+        if (dest != null && _currentGpsPos != null) {
+          _rerouteFromCurrentPosition(_currentGpsPos!, dest);
         }
       }
-    } else {
-      // Back on route — save position and reset counters
+    } else if (dist < (offThreshold * 0.5)) {
+      // Hysteresis: only reset when clearly back on-route (half the off-threshold)
       _lastOnRoutePos = pos;
       _offRouteCount = 0;
       _offRouteWarned = false;
       _offRouteAsked = false;
+      if (_awaitingRerouteChoice) {
+        _awaitingRerouteChoice = false;
+        VoskWakeWordService.instance.directListenMode = false;
+        TtsAlertService.instance.speakText('Wieder auf der Route.');
+      }
+    }
+  }
+
+  /// Handle voice answer for off-route choice: "weiter" or "zurück"
+  void _handleRerouteChoice(String text) {
+    if (!_awaitingRerouteChoice) return;
+    final lower = text.toLowerCase().trim();
+    debugPrint('[Nav] Reroute choice voice: "$lower"');
+
+    if (lower.contains('weiter') || lower.contains('ziel') || lower.contains('eins') || lower.contains('1')) {
+      // Option 1: Reroute to destination
+      _awaitingRerouteChoice = false;
+      VoskWakeWordService.instance.directListenMode = false;
+      TtsAlertService.instance.speakText('Route zum Ziel wird neu berechnet.');
+      final dest = _getNavDestination();
+      if (dest != null && _currentGpsPos != null) {
+        _rerouteFromCurrentPosition(_currentGpsPos!, dest);
+      }
+    } else if (lower.contains('zurück') || lower.contains('start') || lower.contains('zwei') || lower.contains('2')) {
+      // Option 2: Route back to start point
+      _awaitingRerouteChoice = false;
+      VoskWakeWordService.instance.directListenMode = false;
+      if (_navStartPos != null && _currentGpsPos != null) {
+        TtsAlertService.instance.speakText('Route zurück zum Startpunkt wird berechnet.');
+        _rerouteFromCurrentPosition(_currentGpsPos!, _navStartPos!);
+      }
+    } else if (lower.contains('beenden') || lower.contains('stopp') || lower.contains('drei') || lower.contains('3') || lower.contains('nein')) {
+      // Option 3: End navigation
+      _awaitingRerouteChoice = false;
+      VoskWakeWordService.instance.directListenMode = false;
+      TtsAlertService.instance.speakText('Navigation wird beendet.');
+      _stopNavigation();
     }
   }
 
@@ -3740,20 +4489,18 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
     _offRouteDestination = destination;
     _awaitingOffRouteAnswer = true;
 
-    // Pause Vosk while TTS speaks to prevent echo
-    VoskWakeWordService.instance.setPaused(true);
+    // Vosk stays in wake-word mode — user can say "Hi Moto" to interrupt
     TtsAlertService.instance.speakPriority(
       'Du hast die Route verlassen. Sage Ja für neue Route, oder Nein zum Beibehalten.',
     );
 
-    debugPrint('[Nav] Off-route question asked, pausing Vosk during TTS');
+    debugPrint('[Nav] Off-route question asked');
 
-    // Resume Vosk + enable direct listen after TTS finishes (~5s)
+    // Enable direct listen after TTS finishes (~5s) for Ja/Nein answer
     Future.delayed(const Duration(seconds: 5), () {
       if (_awaitingOffRouteAnswer && mounted) {
-        VoskWakeWordService.instance.setPaused(false);
         VoskWakeWordService.instance.directListenMode = true;
-        debugPrint('[Nav] Vosk resumed + direct listen ON for Ja/Nein');
+        debugPrint('[Nav] Direct listen ON for Ja/Nein');
       }
     });
 
@@ -3829,10 +4576,24 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
     setState(() => _isCalculatingRoute = true);
 
     try {
-      final allRoutes = await _osrmService.getAllRoutes(from, to, mode: _routeMode);
+      // Google Routes first, OSRM fallback
+      List<OsrmRoute> allRoutes = [];
+      if (GoogleRoutesService.isAvailable) {
+        try {
+          allRoutes = await _googleRoutes.getAllRoutes(from, to, mode: _routeMode);
+        } catch (e) {
+          debugPrint('[Nav] Google reroute failed: $e — OSRM fallback');
+        }
+      }
+      if (allRoutes.isEmpty) {
+        allRoutes = await _osrmService.getAllRoutes(from, to, mode: _routeMode);
+      }
       if (!mounted || allRoutes.isEmpty) {
+        debugPrint('[Nav] Reroute FAILED: no routes returned. Will retry in 5s.');
         setState(() => _isCalculatingRoute = false);
+        // Reset so reroute can retry after next 3 off-route fixes
         _offRouteAsked = false;
+        _offRouteCount = 0;
         return;
       }
 
@@ -3852,14 +4613,51 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
         _selectedRouteIndex = primaryIdx;
         _currentRoute = route;
         _isCalculatingRoute = false;
+        // Force polyline cache rebuild so blue line updates on map
+        _cachedPolylines = null;
+        _cachedPolylineRoute = null;
+        // Reset step tracking for new route
+        _lastAnnouncedStepIndex = -1;
+        _announcedTtsPairs.clear();
+        // DON'T reset _offRouteAsked here — only reset when back on route
+        // Otherwise it immediately re-triggers off-route on the new route
+        _offRouteCount = 0;
+      });
+
+      // Update NavEngine with new route (so TTS + turn tracking works on new route)
+      _navEngine.setRoute(route, destination: to, mode: _routeMode);
+      _navEngine.start(currentPos: _currentGpsPos);
+      // Reset off-route after short delay (give GPS time to snap to new route)
+      Future.delayed(const Duration(seconds: 3), () {
+        if (mounted) {
+          _offRouteAsked = false;
+          _offRouteCount = 0;
+        }
       });
 
       // Reload enrichment for new route
       _loadRouteEnrichment(route, to);
 
-      TtsAlertService.instance.speakText(
-        'Neue Route: ${route.distanceText}, ${route.durationText}.',
+      // Reroute announcement with first turn instruction
+      TtsAlertService.instance.clearQueue();
+      TtsAlertService.instance.speakQueued(
+        'Neue Route. ${route.distanceText}, ${route.durationText}.',
       );
+      // Add first turn instruction to reroute announcement
+      if (route.steps.length > 1 && _currentGpsPos != null) {
+        for (final s in route.steps) {
+          if (s.maneuver.startsWith('depart')) continue;
+          final dist = _formatDistance(_distLatLng(_currentGpsPos!, s.location));
+          final hasRoad = s.roadName != null && s.roadName!.isNotEmpty
+              && s.instruction.toLowerCase().contains(s.roadName!.toLowerCase());
+          final road = (s.roadName != null && s.roadName!.isNotEmpty && !hasRoad)
+              ? ' auf ${s.roadName}' : '';
+          TtsAlertService.instance.speakQueued(
+            'Weiter für $dist, dann ${s.instruction}$road',
+          );
+          break;
+        }
+      }
     } catch (e) {
       debugPrint('[Nav] Reroute error: $e');
       if (mounted) setState(() => _isCalculatingRoute = false);
@@ -4265,58 +5063,92 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
               ),
             ],
           ),
-          child: Row(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
-              // Maneuver icon (large)
-              Container(
-                width: 52, height: 52,
-                decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.15),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Icon(maneuver.icon, color: Colors.white, size: 32),
-              ),
-              const SizedBox(width: 14),
-              // Distance + instruction
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    // Distance (big)
-                    Text(
-                      distText,
-                      style: GoogleFonts.inter(
-                        color: Colors.white,
-                        fontSize: 26,
-                        fontWeight: FontWeight.w900,
-                      ),
+              Row(
+                children: [
+                  // Maneuver icon (large)
+                  Container(
+                    width: 52, height: 52,
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(12),
                     ),
-                    // Instruction text
-                    Text(
-                      step.instruction,
+                    child: Icon(maneuver.icon, color: Colors.white, size: 32),
+                  ),
+                  const SizedBox(width: 14),
+                  // Distance + instruction
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          distText,
+                          style: GoogleFonts.inter(
+                            color: Colors.white,
+                            fontSize: 26,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                        Text(
+                          step.instruction,
+                          style: GoogleFonts.inter(
+                            color: Colors.white.withValues(alpha: 0.85),
+                            fontSize: 14,
+                            fontWeight: FontWeight.w500,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        if (roadName != null && roadName.isNotEmpty)
+                          Text(
+                            roadName,
+                            style: GoogleFonts.inter(
+                              color: Colors.white.withValues(alpha: 0.6),
+                              fontSize: 12,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              // ── "Danach:" next step preview ──
+              if (_afterNextTurnStep != null && _afterNextTurnStep!.maneuver != 'arrive') ...[
+                const SizedBox(height: 8),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Row(children: [
+                    Icon(
+                      _maneuverIcon(_afterNextTurnStep!.maneuver).icon,
+                      color: Colors.white.withValues(alpha: 0.7),
+                      size: 18,
+                    ),
+                    const SizedBox(width: 8),
+                    Text('Danach: ', style: GoogleFonts.inter(
+                      fontSize: 12, fontWeight: FontWeight.w600,
+                      color: Colors.white.withValues(alpha: 0.8),
+                    )),
+                    Expanded(child: Text(
+                      _afterNextTurnStep!.instruction,
                       style: GoogleFonts.inter(
-                        color: Colors.white.withValues(alpha: 0.85),
-                        fontSize: 14,
-                        fontWeight: FontWeight.w500,
+                        fontSize: 12,
+                        color: Colors.white.withValues(alpha: 0.65),
                       ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                    ),
-                    // Road name (if available)
-                    if (roadName != null && roadName.isNotEmpty)
-                      Text(
-                        roadName,
-                        style: GoogleFonts.inter(
-                          color: Colors.white.withValues(alpha: 0.6),
-                          fontSize: 12,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                  ],
+                    )),
+                  ]),
                 ),
-              ),
+              ],
             ],
           ),
         ),
@@ -4378,19 +5210,13 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 200),
-                  transitionBuilder: (child, animation) =>
-                    FadeTransition(opacity: animation, child: child),
-                  child: Text(
-                    '$speed',
-                    key: ValueKey<int>(speed),
-                    style: GoogleFonts.inter(
-                      color: isSpeeding ? const Color(0xFFFF5252) : Colors.white,
-                      fontSize: 28,
-                      fontWeight: FontWeight.w900,
-                      height: 1,
-                    ),
+                Text(
+                  '$speed',
+                  style: GoogleFonts.inter(
+                    color: isSpeeding ? const Color(0xFFFF5252) : Colors.white,
+                    fontSize: 28,
+                    fontWeight: FontWeight.w900,
+                    height: 1,
                   ),
                 ),
                 Text(
@@ -4412,14 +5238,27 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
                   // Currently in driving view → switch to route overview
                   _fitCameraToRoute(_currentRoute!); // sets _isNavFollowing = false
                 } else if (_currentRoute != null) {
-                  // Currently in route overview → switch to driving view
+                  // Currently in route overview → switch back to driving view
+                  // Same as _startNavigation: north-up, fixed offset, no tilt
+                  // Timer handles heading rotation once user starts moving
                   _isNavFollowing = true;
                   _currentZoom = 17.0;
-                  setState(() {});
-                  // Immediately move camera to current GPS position
                   if (_currentGpsPos != null && _mapController != null) {
-                    _navCameraFollow(_currentGpsPos!);
+                    // Re-center: snap to current bearing, restart camera loop
+                    _isProgrammaticMove = true;
+                    _lastProgrammaticMoveTime = DateTime.now();
+                    _smoothZoom = 17.0;
+                    _navCameraDirty = true;
+                    _mapController!.moveCamera(
+                      CameraUpdate.newCameraPosition(gmaps.CameraPosition(
+                        target: _currentGpsPos!,
+                        zoom: 17.0,
+                        bearing: _smoothBearing,
+                        tilt: 45,
+                      )),
+                    );
                   }
+                  setState(() {});
                 } else if (_currentGpsPos != null && _mapController != null) {
                   // No route → re-center with heading follow
                   setState(() => _isNavFollowing = true);
@@ -4852,12 +5691,13 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
                 children: [
                   const Icon(Icons.mic_rounded, color: Colors.greenAccent, size: 22),
                   const SizedBox(width: 10),
-                  Text('Hi Moto — Dein Biker-KI-Kumpel',
-                    style: GoogleFonts.inter(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700)),
+                  Expanded(child: Text('Hi Moto — Dein Biker-KI-Kumpel',
+                    style: GoogleFonts.inter(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700),
+                    overflow: TextOverflow.ellipsis)),
                 ],
               ),
               const SizedBox(height: 6),
-              Text('Sage "Hi Moto" und dann einen Befehl oder stell eine Frage!',
+              Text('Sage "Hi Moto" und dann einen Befehl oder stell eine Frage!\nFunktioniert auch während der Navigation per Sprache.',
                 style: GoogleFonts.inter(color: Colors.white54, fontSize: 13)),
               const SizedBox(height: 16),
 
@@ -5884,21 +6724,27 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
     });
   }
 
-  /// Speak text via TTS while pausing Vosk to prevent echo pickup.
-  /// After TTS + buffer, Vosk resumes listening for next wake word.
+  /// Speak text via TTS — Vosk keeps listening for wake word so user can
+  /// interrupt with "Hi Moto" at any time. Only command-phase gets paused
+  /// (handled in wakeWordDetected callback above).
   void _speakWithVoskPause(String text, {bool priority = false}) {
-    VoskWakeWordService.instance.setPaused(true);
-    final speak = priority
-        ? TtsAlertService.instance.speakPriority(text)
-        : TtsAlertService.instance.speakText(text);
-    speak.then((_) async {
-      await Future.delayed(const Duration(milliseconds: 1200));
-      if (mounted) VoskWakeWordService.instance.setPaused(false);
-    });
+    if (priority) {
+      TtsAlertService.instance.speakPriority(text);
+    } else {
+      TtsAlertService.instance.speakText(text);
+    }
   }
 
   Future<void> _processVoiceQuery(String text) async {
     final command = VoiceCommandService.parse(text);
+
+    // ── Global garbage filter: if Vosk produces noise, ask "Wie bitte?" ──
+    // Skip for intents that matched a clear keyword (those are already validated)
+    if (command.intent == VoiceIntent.unknown) {
+      debugPrint('[Voice] Unknown/noise: "$text" → asking back');
+      _speakWithVoskPause('Wie bitte, Racer?');
+      return;
+    }
 
     switch (command.intent) {
       case VoiceIntent.searchPoi:
@@ -5928,13 +6774,16 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
             googleType: 'supermarket',
           );
         } else if (label.toLowerCase().contains('restaurant') || query.toLowerCase().contains('restaurant') ||
-                   query.toLowerCase().contains('essen') || query.toLowerCase().contains('hunger')) {
+                   query.toLowerCase().contains('essen') || query.toLowerCase().contains('hunger') ||
+                   query.toLowerCase().contains('café') || query.toLowerCase().contains('cafe') ||
+                   query.toLowerCase().contains('kaffee')) {
           _searchNearestPoiWithVoiceChoice(
             label: 'Restaurant',
             labelPlural: 'Restaurants',
             overpassTag: '["amenity"="restaurant"]',
             overpassTag2: '["amenity"="fast_food"]',
             googleType: 'restaurant',
+            radiusMeters: 15000,
           );
         } else {
           _searchAndShowPoi(query, label);
@@ -5962,7 +6811,22 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
         break;
 
       case VoiceIntent.reportBlitzer:
-        _startBlitzerTypeSelection();
+        // Type already detected from voice command — no need to ask
+        final bType = command.blitzerType ?? 'mobile';
+        final bLabel = switch (bType) {
+          'fixed' => 'Fester Blitzer',
+          'police' => 'Polizeikontrolle',
+          'construction' => 'Baustelle / Gefahr',
+          _ => 'Mobiler Blitzer',
+        };
+        _sendBlitzerWarning(bType, bLabel);
+        final safeLabel = switch (bType) {
+          'fixed' => 'Feste Radarfalle',
+          'police' => 'Polizeikontrolle',
+          'construction' => 'Baustelle',
+          _ => 'Mobile Kontrolle',
+        };
+        _speakWithVoskPause('$safeLabel gemeldet.');
         break;
 
       case VoiceIntent.showBlitzer:
@@ -5991,9 +6855,30 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
         }
         break;
 
+      case VoiceIntent.navigateTo:
+        final destination = command.query ?? '';
+        if (destination.length >= 3) {
+          debugPrint('[Voice] Navigate to: "$destination"');
+          _speakWithVoskPause('Moment, Racer.');
+          _navigateToAddress(destination);
+        } else {
+          _speakWithVoskPause('Wohin soll ich dich navigieren, Racer?');
+        }
+        break;
+
+      case VoiceIntent.searchEvents:
+        _searchRacerEvents();
+        break;
+
       case VoiceIntent.aiQuery:
         debugPrint('[Voice] AI query: "$text"');
-        VoskWakeWordService.instance.setPaused(true);
+        final aiText = command.query ?? text;
+        // Filter out garbage/noise — too short or just filler words
+        if (aiText.trim().length < 4 || RegExp(r'^(ja|nein|ok|hm+|äh+|response|the|a|und|oder)\s*$', caseSensitive: false).hasMatch(aiText.trim())) {
+          _speakWithVoskPause('Wie bitte, Racer?');
+          break;
+        }
+        // Vosk stays active for wake word — user can say "Hi Moto" to interrupt
 
         try {
           // ── FAST PATH: Try instant answer from local database first ──
@@ -6046,16 +6931,24 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
           await TtsAlertService.instance.speakText(
             'Entschuldigung, ich konnte das nicht beantworten.',
           );
-        } finally {
-          // Wait for TTS to finish before unpausing Vosk
-          await Future.delayed(const Duration(milliseconds: 1500));
-          if (mounted) VoskWakeWordService.instance.setPaused(false);
         }
         break;
 
       case VoiceIntent.unknown:
-        // Silently ignore — too short or noise
-        debugPrint('[Voice] Unknown/ignored: "$text"');
+        // Handled by global filter above — should not reach here
+        break;
+      // New intents — not available in group ride
+      case VoiceIntent.reportPolice:
+      case VoiceIntent.reportHazard:
+      case VoiceIntent.reportTraffic:
+      case VoiceIntent.announceRoute:
+      case VoiceIntent.switchTab:
+      case VoiceIntent.thankMoto:
+      case VoiceIntent.askWeather:
+      case VoiceIntent.askSpeed:
+      case VoiceIntent.askLocation:
+      case VoiceIntent.confirmYes:
+      case VoiceIntent.confirmNo:
         break;
     }
   }
@@ -6215,22 +7108,30 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
     debugPrint('[VoicePoi] Searching nearby $label...');
     // No "Suche..." announcement — keep it silent until results are ready
 
-    Position? currentPos;
-    try {
-      currentPos = await Geolocator.getLastKnownPosition();
-      currentPos ??= await Geolocator.getCurrentPosition();
-    } catch (e) {
-      debugPrint('[VoicePoi] Position error: $e');
-      TtsAlertService.instance.speakText('Kein GPS Signal.');
-      return;
+    // Use our tracked GPS position (always available during ride)
+    // Fall back to platform position if not available
+    double lat, lon;
+    if (_currentGpsPos != null) {
+      lat = _currentGpsPos!.latitude;
+      lon = _currentGpsPos!.longitude;
+    } else {
+      Position? currentPos;
+      try {
+        currentPos = await Geolocator.getLastKnownPosition();
+        currentPos ??= await Geolocator.getCurrentPosition();
+      } catch (e) {
+        debugPrint('[VoicePoi] Position error: $e');
+        TtsAlertService.instance.speakText('Kein GPS Signal.');
+        return;
+      }
+      if (currentPos == null) {
+        TtsAlertService.instance.speakText('Kein GPS Signal.');
+        return;
+      }
+      lat = currentPos.latitude;
+      lon = currentPos.longitude;
     }
-    if (currentPos == null) {
-      TtsAlertService.instance.speakText('Kein GPS Signal.');
-      return;
-    }
-
-    final lat = currentPos.latitude;
-    final lon = currentPos.longitude;
+    debugPrint('[VoicePoi] Searching $label near $lat,$lon radius=${radiusMeters}m');
     List<({String name, double lat, double lon, double distance, double? rating, int? ratingCount})> results = [];
 
     // Run Overpass + Google Places in parallel
@@ -6341,21 +7242,35 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
       debugPrint('[VoicePoi] Top${i+1}: ${top3[i].name} ${top3[i].distance.round()}m rating=${top3[i].rating} count=${top3[i].ratingCount}');
     }
 
-    // Ultra-short TTS: "1 Name, 800 Meter, 4,5 Sterne. 2 Name, 1,2 km. Eins zwei oder drei."
+    // Natural speech: queued so each sentence waits for the previous
+    // Vosk stays in wake-word mode — user can say "Hi Moto" to interrupt
     String _distShort(double m) => m < 1000 ? '${(m / 100).round() * 100} Meter' : '${(m / 1000).toStringAsFixed(1).replaceAll('.', ',')} km';
-    final ttsItems = <String>[];
+
+    TtsAlertService.instance.clearQueue();
+
+    // "Okay, ich hab [3] [Tankstellen] gefunden!"
+    TtsAlertService.instance.speakQueued(
+      top3.length == 1 ? 'Ich hab eine $label für dich!' : 'Okay, ich hab ${top3.length} $labelPlural gefunden!',
+    );
+
+    // Each POI as separate queued TTS
     for (int i = 0; i < top3.length; i++) {
       final r = top3[i];
       final ratingStr = r.rating != null
-          ? ', ${r.rating!.toStringAsFixed(1).replaceAll('.', ',')} Sterne'
+          ? '. ${r.rating!.toStringAsFixed(1).replaceAll('.', ',')} Sterne'
           : '';
-      ttsItems.add('${i + 1}: ${r.name}, ${_distShort(r.distance)}$ratingStr');
+      final line = '${i + 1}. ${r.name}. ${_distShort(r.distance)}$ratingStr.';
+      TtsAlertService.instance.speakQueued(line);
     }
-    final tts = '${ttsItems.join('. ')}. Sage eins, zwei oder drei, sonst navigiere ich zur Eins.';
-    debugPrint('[VoicePoi] TTS: $tts');
 
-    VoskWakeWordService.instance.setPaused(true);
-    TtsAlertService.instance.speakPriority(tts);
+    // "Sage eins, zwei oder drei..."
+    TtsAlertService.instance.speakQueued(
+      top3.length > 1
+          ? 'Sage eins, zwei oder drei. Oder ich navigier dich zur Eins.'
+          : 'Sage ja, wenn du hinfahren willst.',
+    );
+
+    debugPrint('[VoicePoi] Queued TTS: ${top3.length} items');
 
     // Show bottom sheet with choices
     if (mounted) {
@@ -6426,13 +7341,14 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
     _pendingFuelChoices = top3;
     _pendingPoiLabel = label;
 
-    // Wait until TTS finishes speaking before enabling Vosk
-    // This prevents Vosk from picking up TTS echo (e.g. "drei" from "3: Total")
-    _waitForTtsThenEnableVosk();
+    // Enable Vosk after estimated TTS finishes
+    final poiTtsEstimate = 3 + top3.length * 5 + 4;
+    Future.delayed(Duration(seconds: poiTtsEstimate), () {
+      _waitForTtsThenEnableVosk();
+    });
 
-    // After 25s without voice choice: auto-navigate to #1
-    // Biker has gloves on — can't tap, so we pick the nearest one automatically
-    Future.delayed(const Duration(seconds: 25), () {
+    // Auto-navigate to #1 after estimated TTS + 15s wait
+    Future.delayed(Duration(seconds: poiTtsEstimate + 15), () {
       if (_pendingFuelChoices != null && mounted) {
         final autoChoice = _pendingFuelChoices!.first;
         _pendingFuelChoices = null;
@@ -6450,26 +7366,18 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
 
   /// Announce the 3 nearest blitzers via TTS (voice POI query).
   void _announceNearestBlitzers() {
-    // IMPORTANT: Pause Vosk FIRST to prevent TTS echo being recognized as new "Blitzer" command
-    VoskWakeWordService.instance.setPaused(true);
+    // Vosk stays in wake-word mode — user can say "Hi Moto" to interrupt
 
     if (_currentGpsPos == null) {
-      TtsAlertService.instance.speakText('Kein GPS Signal.').then((_) async {
-        await Future.delayed(const Duration(milliseconds: 1500));
-        if (mounted) VoskWakeWordService.instance.setPaused(false);
-      });
+      TtsAlertService.instance.speakText('Kein GPS Signal.');
       return;
     }
 
     if (_nearbyBlitzerReports.isEmpty) {
-      TtsAlertService.instance.speakPriority(
-        'Keine Sorge Racer, ich bin immer für dich da. '
-        'Aktuell sind keine Warnungen in der Nähe bekannt. '
-        'Ich melde dir automatisch alles auf der Strecke!',
-      ).then((_) async {
-        await Future.delayed(const Duration(milliseconds: 3000));
-        if (mounted) VoskWakeWordService.instance.setPaused(false);
-      });
+      TtsAlertService.instance.clearQueue();
+      TtsAlertService.instance.speakQueued('Keine Sorge Racer, ich bin immer für dich da.');
+      TtsAlertService.instance.speakQueued('Aktuell keine Warnungen in der Nähe.');
+      TtsAlertService.instance.speakQueued('Ich melde dir automatisch alles auf der Strecke!');
       return;
     }
 
@@ -6495,38 +7403,196 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
       _ => 'Warnung',
     };
 
-    final ttsItems = <String>[];
+    // Natural speech: queued so each sentence waits for the previous
+    TtsAlertService.instance.clearQueue();
+    TtsAlertService.instance.speakQueued('Keine Sorge Racer, ich pass auf dich auf!');
+
     for (int i = 0; i < top3.length; i++) {
       final b = top3[i];
-      ttsItems.add('${i + 1}: ${typeLabel(b.report.type)} in ${distShort(b.distance)}');
+      final line = '${typeLabel(b.report.type)} in ${distShort(b.distance)}.';
+      TtsAlertService.instance.speakQueued(line);
+    }
+    TtsAlertService.instance.speakQueued('Ich melde dir alles automatisch. Ride on!');
+    debugPrint('[VoiceBlitzer] Queued TTS: ${top3.length} warnings');
+  }
+
+  /// Search for nearby Racer Events and offer 3 via voice choice.
+  void _searchRacerEvents() {
+    // Vosk stays in wake-word mode — user can say "Hi Moto" to interrupt
+
+    if (_currentGpsPos == null) {
+      TtsAlertService.instance.speakText('Kein GPS Signal, Racer.');
+      return;
     }
 
-    final intro = 'Keine Sorge Racer, ich pass auf dich auf! '
-        'Hier die nächsten ${top3.length} Warnungen: ';
-    final outro = '. Ich melde dir alles auf der Strecke automatisch. Ride on!';
-    final tts = intro + ttsItems.join('. ') + outro;
-    debugPrint('[VoiceBlitzer] $tts');
+    final lat = _currentGpsPos!.latitude;
+    final lng = _currentGpsPos!.longitude;
 
-    // Use polling to wait until TTS is actually done speaking
-    TtsAlertService.instance.speakPriority(tts);
-    // Poll until TTS finishes (the text is long, ~8-12 seconds)
-    int polls = 0;
-    Timer.periodic(const Duration(milliseconds: 500), (timer) {
-      polls++;
-      if (!mounted || polls > 40) { // Max 20s safety
-        timer.cancel();
-        VoskWakeWordService.instance.setPaused(false);
+    // Search is instant (hardcoded spots, no network)
+    RacerEventsService.instance.searchEvents(lat: lat, lng: lng).then((events) {
+      if (!mounted) return;
+
+      if (events.isEmpty) {
+        TtsAlertService.instance.clearQueue();
+        TtsAlertService.instance.speakQueued('Hi Racer!');
+        TtsAlertService.instance.speakQueued('Leider keine Events in der Nähe.');
         return;
       }
-      if (!TtsAlertService.instance.isSpeaking) {
-        timer.cancel();
-        // Extra buffer after TTS finishes to avoid echo
-        Future.delayed(const Duration(milliseconds: 1500), () {
-          if (mounted) VoskWakeWordService.instance.setPaused(false);
-          debugPrint('[VoiceBlitzer] Vosk resumed after TTS done');
-        });
+
+      debugPrint('[RacerEvents] Found ${events.length} events');
+
+      // Convert to same format as fuel choices for voice selection reuse
+      final top3 = events.map((e) => (
+        name: e.name,
+        lat: e.lat,
+        lon: e.lng,
+        distance: e.distanceKm * 1000, // meters for display
+        rating: null as double?,
+        ratingCount: null as int?,
+      )).toList();
+
+      // Build individual TTS lines for natural speech
+      final eventLines = <String>[];
+      for (int i = 0; i < top3.length; i++) {
+        final e = events[i];
+        final distText = e.distanceKm >= 10
+            ? '${e.distanceKm.round()} Kilometer'
+            : '${e.distanceKm.toStringAsFixed(1)} Kilometer';
+        eventLines.add('${i + 1}. ${e.name}. $distText entfernt.');
       }
+
+      // Show bottom sheet with choices
+      _showEventChoiceSheet(events);
+
+      // Set pending choices for voice selection (reuses fuel choice handler)
+      _pendingFuelChoices = top3;
+      _pendingPoiLabel = 'Racer Event';
+
+      // Natural speech flow: queued so each sentence waits for the previous
+      TtsAlertService.instance.clearQueue();
+      TtsAlertService.instance.speakQueued('Hi mein Racer!');
+      TtsAlertService.instance.speakQueued(
+        top3.length == 1 ? 'Ich hab da was für dich.' : 'Ich hab ${top3.length} Events für dich.',
+      );
+      for (final line in eventLines) {
+        TtsAlertService.instance.speakQueued(line);
+      }
+      TtsAlertService.instance.speakQueued(
+        top3.length > 1
+            ? 'Sage eins, zwei oder drei. Oder ich navigier dich einfach zur Eins.'
+            : 'Sage ja, wenn du hinfahren willst.',
+      );
+
+      // Enable Vosk after a short delay (queue handles timing)
+      Future.delayed(Duration(seconds: (3 + eventLines.length * 5 + 4)), () {
+        if (mounted) _waitForTtsThenEnableVosk();
+      });
+
+      // Auto-select #1 after estimated TTS time + 15s wait
+      final estimatedTtsTime = 3 + eventLines.length * 5 + 4;
+      Future.delayed(Duration(seconds: estimatedTtsTime + 15), () {
+        if (_pendingFuelChoices != null && mounted) {
+          final autoChoice = _pendingFuelChoices!.first;
+          _pendingFuelChoices = null;
+          _pendingPoiLabel = null;
+          VoskWakeWordService.instance.directListenMode = false;
+          Navigator.of(context).popUntil((route) => route is! PopupRoute);
+          TtsAlertService.instance.speakText('${autoChoice.name}.');
+          _lastDestinationName = autoChoice.name;
+          _calculateRoute(LatLng(autoChoice.lat, autoChoice.lon));
+          debugPrint('[RacerEvents] Auto-navigate to #1: ${autoChoice.name}');
+        }
+      });
+    }).catchError((e) {
+      debugPrint('[RacerEvents] Error: $e');
+      TtsAlertService.instance.speakText('Fehler bei der Event-Suche.');
     });
+  }
+
+  /// Show bottom sheet with Racer Event choices (1/2/3).
+  void _showEventChoiceSheet(List<RacerEvent> events) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isDismissible: true,
+      builder: (ctx) => Container(
+        margin: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: const Color(0xFF1A1A2E),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: const Color(0xFF00BCD4).withValues(alpha: 0.3)),
+        ),
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('🏁 Racer Events in deiner Nähe',
+              style: GoogleFonts.inter(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 16),
+            ...events.asMap().entries.map((entry) {
+              final i = entry.key;
+              final e = entry.value;
+              final distText = e.distanceKm >= 10
+                  ? '${e.distanceKm.round()} km'
+                  : '${e.distanceKm.toStringAsFixed(1)} km';
+              return GestureDetector(
+                onTap: () {
+                  _pendingFuelChoices = null;
+                  _pendingPoiLabel = null;
+                  VoskWakeWordService.instance.directListenMode = false;
+                  Navigator.pop(ctx);
+                  TtsAlertService.instance.speakText('${e.name}.');
+                  _lastDestinationName = e.name;
+                  _calculateRoute(LatLng(e.lat, e.lng));
+                },
+                child: Container(
+                  margin: const EdgeInsets.only(bottom: 8),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF16213E),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xFF00BCD4).withValues(alpha: 0.2)),
+                  ),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 32, height: 32,
+                        decoration: const BoxDecoration(
+                          color: Color(0xFF00BCD4),
+                          shape: BoxShape.circle,
+                        ),
+                        child: Center(child: Text('${i + 1}',
+                          style: GoogleFonts.inter(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold))),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(e.name,
+                              style: GoogleFonts.inter(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w600),
+                              maxLines: 1, overflow: TextOverflow.ellipsis),
+                            if (e.description != null)
+                              Text(e.description!,
+                                style: GoogleFonts.inter(color: Colors.white60, fontSize: 12),
+                                maxLines: 1, overflow: TextOverflow.ellipsis),
+                          ],
+                        ),
+                      ),
+                      Text(distText,
+                        style: GoogleFonts.inter(color: const Color(0xFF00BCD4), fontSize: 14, fontWeight: FontWeight.w600)),
+                    ],
+                  ),
+                ),
+              );
+            }),
+            const SizedBox(height: 8),
+            Text('Sage "Eins", "Zwei" oder "Drei" — oder tippe drauf',
+              style: GoogleFonts.inter(color: Colors.white38, fontSize: 12)),
+          ],
+        ),
+      ),
+    );
   }
 
   /// Start blitzer report flow — ask user for type (mobil/fest) via voice.
@@ -6644,10 +7710,22 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
 
     final lower = text.toLowerCase().trim();
     debugPrint('[VoiceChoice] Raw text: "$text" → lower: "$lower"');
-    int? choice;
 
-    // Split into words for exact matching (avoid "eins" matching inside other words)
+    // Split into words for exact matching
     final words = lower.split(RegExp(r'\s+'));
+
+    // ── Abbrechen / Cancel ──
+    if (words.any((w) => w == 'abbrechen' || w == 'abbruch' || w == 'stopp' ||
+        w == 'stop' || w == 'nein' || w == 'nee' || w == 'cancel' ||
+        w == 'egal' || w == 'nichts' || w == 'lassen')) {
+      debugPrint('[VoiceChoice] → CANCELLED by user');
+      TtsAlertService.instance.clearQueue();
+      Navigator.of(context).popUntil((route) => route is! PopupRoute);
+      TtsAlertService.instance.speakText('Alles klar, Racer.');
+      return;
+    }
+
+    int? choice;
 
     // Check DREI first (highest number), then ZWEI, then EINS
     // This prevents "zwei" from matching "eins" if Vosk adds noise
@@ -7026,6 +8104,8 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
   }
 
   /// Snap a GPS position to the nearest point on the route polyline.
+  /// Prefers OSRM HMM map-matched position when available (much more accurate).
+  /// Falls back to local polyline projection if OSRM hasn't responded yet.
   /// Returns the original position if no route or too far (> 50m).
   /// Caches result + distance so callers on the same GPS tick don't recalculate.
   LatLng _snapToRoute(LatLng gps) {
@@ -7043,6 +8123,20 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
       return gps;
     }
 
+    // ── Prefer OSRM map-matched position (HMM, considers road topology) ──
+    if (_osrmMatchedPos != null) {
+      // Verify the OSRM result is still fresh (within ~30m of current GPS)
+      final osrmDist = _distLatLng(_osrmMatchedPos!, gps);
+      if (osrmDist < 30) {
+        _lastSnapInput = gps;
+        _lastSnapDist = osrmDist;
+        _lastSnapResult = _osrmMatchedPos;
+        return _lastSnapResult!;
+      }
+      // OSRM result too stale — fall through to local snap
+    }
+
+    // ── Fallback: local polyline projection ──
     double bestDistSq = double.infinity;
     LatLng bestPoint = gps;
     int bestIdx = 0;
@@ -7062,17 +8156,22 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
     bestDistSq = double.infinity;
     final start = (bestIdx - 15).clamp(0, pts.length - 2);
     final end = (bestIdx + 15).clamp(0, pts.length - 1);
+    int bestSegIdx = bestIdx;
     for (int i = start; i < end; i++) {
       final snapped = _projectPointOnSegment(gps, pts[i], pts[i + 1]);
       final distSq = _distLatLngSq(gps, snapped);
       if (distSq < bestDistSq) {
         bestDistSq = distSq;
         bestPoint = snapped;
+        bestSegIdx = i;
       }
     }
 
     // Convert best squared distance to meters for threshold check
     final bestDist = math.sqrt(bestDistSq);
+
+    // Save segment index for route-based heading
+    if (bestDist < 50) _lastSnapSegIdx = bestSegIdx;
 
     // Cache for this GPS tick
     _lastSnapInput = gps;
@@ -7093,6 +8192,48 @@ class _GroupRideScreenState extends ConsumerState<GroupRideScreen>
     t = t.clamp(0.0, 1.0);
 
     return LatLng(a.latitude + t * dx, a.longitude + t * dy);
+  }
+
+  // ── OSRM Map Matching ────────────────────────────────────────────────────
+
+  /// Buffer a new GPS point and periodically call OSRM /match for HMM road snap.
+  /// The matched position is stored in [_osrmMatchedPos] and used by [_snapToRoute].
+  void _feedGpsMatchBuffer(LatLng gps) {
+    // Add to ring buffer
+    _gpsMatchBuffer.add(gps);
+    _gpsMatchTimestamps.add(DateTime.now().millisecondsSinceEpoch ~/ 1000);
+    if (_gpsMatchBuffer.length > _gpsMatchBufferSize) {
+      _gpsMatchBuffer.removeAt(0);
+      _gpsMatchTimestamps.removeAt(0);
+    }
+
+    // Only call OSRM every N ticks and when buffer has enough points
+    _gpsMatchTickCounter++;
+    if (_gpsMatchTickCounter < _gpsMatchInterval) return;
+    _gpsMatchTickCounter = 0;
+
+    if (_gpsMatchBuffer.length < 3) return; // Need at least 3 points for good matching
+    if (_osrmMatchInFlight) return; // Previous request still pending
+
+    _osrmMatchInFlight = true;
+    final points = List<LatLng>.from(_gpsMatchBuffer);
+    final timestamps = List<int>.from(_gpsMatchTimestamps);
+
+    _osrmService.matchPosition(points, timestamps: timestamps).then((matched) {
+      _osrmMatchInFlight = false;
+      if (matched != null && mounted) {
+        // Verify the matched position is reasonable (within 50m of raw GPS)
+        final dist = _distLatLng(matched, _gpsMatchBuffer.last);
+        if (dist < 50) {
+          _osrmMatchedPos = matched;
+          debugPrint('[OSRM Match] ✓ snapped ${dist.toStringAsFixed(1)}m from raw GPS');
+        } else {
+          debugPrint('[OSRM Match] ✗ rejected: ${dist.toStringAsFixed(0)}m too far');
+        }
+      }
+    }).catchError((_) {
+      _osrmMatchInFlight = false;
+    });
   }
 
   /// Minimum distance in meters from a point to the route polyline.

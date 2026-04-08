@@ -337,10 +337,11 @@ class _CreatePostScreenState extends ConsumerState<CreatePostScreen> {
     final community = ref.read(communityProvider);
     final accentColor = community?.accentColor ?? AppTheme.accentDark;
 
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     return showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF222222),
+        backgroundColor: isDark ? const Color(0xFF222222) : Colors.white,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: Row(
           children: [
@@ -476,10 +477,11 @@ class _CreatePostScreenState extends ConsumerState<CreatePostScreen> {
     final community = ref.read(communityProvider);
     final accentColor = community?.accentColor ?? AppTheme.accentDark;
 
+    final isDark2 = Theme.of(context).brightness == Brightness.dark;
     return showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF222222),
+        backgroundColor: isDark2 ? const Color(0xFF222222) : Colors.white,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: Row(
           children: [
@@ -909,118 +911,123 @@ class _CreatePostScreenState extends ConsumerState<CreatePostScreen> {
           ),
         ),
 
-        const SizedBox(height: 8),
-
-        // ── Error ──
-        if (_error != null)
-          Padding(
-            padding:
-                const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
-            child: Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Colors.red.withValues(alpha: 0.1),
-                borderRadius: BorderRadius.circular(12),
-                border:
-                    Border.all(color: Colors.red.withValues(alpha: 0.3)),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.error_outline, color: Colors.red, size: 20),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(_error!,
-                        style: GoogleFonts.inter(
-                            fontSize: 13, color: Colors.red.shade200)),
+        // ── Scrollable content ──
+        Expanded(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.only(top: 8, bottom: 24),
+            child: Column(
+              children: [
+                // ── Error ──
+                if (_error != null)
+                  Padding(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+                    child: Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.red.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(12),
+                        border:
+                            Border.all(color: Colors.red.withValues(alpha: 0.3)),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.error_outline, color: Colors.red, size: 20),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(_error!,
+                                style: GoogleFonts.inter(
+                                    fontSize: 13, color: Colors.red.shade200)),
+                          ),
+                        ],
+                      ),
+                    ),
                   ),
-                ],
-              ),
-            ),
-          ),
 
-        const Spacer(),
+                const SizedBox(height: 24),
 
-        // ── Media Cards ──
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 24),
-          child: Column(
-            children: [
-              // Foto + Carousel only when NOT opened from Reels (video source)
-              if (widget.initialSource != PostMediaSource.video) ...[
-                _MediaCard(
-                  icon: Icons.photo_library_rounded,
-                  title: 'Foto',
-                  subtitle: 'Aus der Galerie w\u00e4hlen',
-                  gradient: [accentColor, accentColor.withValues(alpha: 0.6)],
-                  cardColor: cardBg,
-                  textColor: textOnBg,
-                  onTap: () => _pickImage(ImageSource.gallery),
+                // ── Media Cards ──
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 24),
+                  child: Column(
+                    children: [
+                      // Foto + Carousel only when NOT opened from Reels (video source)
+                      if (widget.initialSource != PostMediaSource.video) ...[
+                        _MediaCard(
+                          icon: Icons.photo_library_rounded,
+                          title: 'Foto',
+                          subtitle: 'Aus der Galerie w\u00e4hlen',
+                          gradient: [accentColor, accentColor.withValues(alpha: 0.6)],
+                          cardColor: cardBg,
+                          textColor: textOnBg,
+                          onTap: () => _pickImage(ImageSource.gallery),
+                        ),
+                        const SizedBox(height: 14),
+                        _MediaCard(
+                          icon: Icons.collections_rounded,
+                          title: 'Carousel',
+                          subtitle: 'Mehrere Bilder w\u00e4hlen (\u2264 10)',
+                          gradient: [
+                            const Color(0xFF42A5F5),
+                            const Color(0xFF42A5F5).withValues(alpha: 0.6),
+                          ],
+                          cardColor: cardBg,
+                          textColor: textOnBg,
+                          onTap: _pickMultipleImages,
+                        ),
+                        const SizedBox(height: 14),
+                      ],
+                      _MediaCard(
+                        icon: Icons.videocam_rounded,
+                        title: 'Video',
+                        subtitle: 'Bis zu 3 Minuten, max. 100 MB',
+                        gradient: [
+                          const Color(0xFFE040FB),
+                          const Color(0xFFE040FB).withValues(alpha: 0.6),
+                        ],
+                        cardColor: cardBg,
+                        textColor: textOnBg,
+                        onTap: _pickVideo,
+                      ),
+                      const SizedBox(height: 14),
+                      if (!kIsWeb)
+                        _MediaCard(
+                          icon: Icons.camera_alt_rounded,
+                          title: 'Kamera',
+                          subtitle: 'Jetzt ein Foto aufnehmen',
+                          gradient: [
+                            const Color(0xFF00E676),
+                            const Color(0xFF00E676).withValues(alpha: 0.6),
+                          ],
+                          cardColor: cardBg,
+                          textColor: textOnBg,
+                          onTap: () => _pickImage(ImageSource.camera),
+                        ),
+                    ],
+                  ),
                 ),
-                const SizedBox(height: 14),
-                _MediaCard(
-                  icon: Icons.collections_rounded,
-                  title: 'Carousel',
-                  subtitle: 'Mehrere Bilder w\u00e4hlen (\u2264 10)',
-                  gradient: [
-                    const Color(0xFF42A5F5),
-                    const Color(0xFF42A5F5).withValues(alpha: 0.6),
-                  ],
-                  cardColor: cardBg,
-                  textColor: textOnBg,
-                  onTap: _pickMultipleImages,
-                ),
-                const SizedBox(height: 14),
+
+                const SizedBox(height: 24),
+
+                // ── Text-only link (hide when opened from Reels) ──
+                if (widget.initialSource != PostMediaSource.video)
+                  TextButton.icon(
+                    onPressed: () => setState(() => _currentStep = 1),
+                    icon: Icon(Icons.edit_note_rounded,
+                        color: textOnBg.withValues(alpha: 0.5), size: 20),
+                    label: Text(
+                      'Nur Text posten',
+                      style: GoogleFonts.inter(
+                        fontSize: 15,
+                        color: textOnBg.withValues(alpha: 0.5),
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ),
               ],
-              _MediaCard(
-                icon: Icons.videocam_rounded,
-                title: 'Video',
-                subtitle: 'Bis zu 3 Minuten, max. 100 MB',
-                gradient: [
-                  const Color(0xFFE040FB),
-                  const Color(0xFFE040FB).withValues(alpha: 0.6),
-                ],
-                cardColor: cardBg,
-                textColor: textOnBg,
-                onTap: _pickVideo,
-              ),
-              const SizedBox(height: 14),
-              if (!kIsWeb)
-                _MediaCard(
-                  icon: Icons.camera_alt_rounded,
-                  title: 'Kamera',
-                  subtitle: 'Jetzt ein Foto aufnehmen',
-                  gradient: [
-                    const Color(0xFF00E676),
-                    const Color(0xFF00E676).withValues(alpha: 0.6),
-                  ],
-                  cardColor: cardBg,
-                  textColor: textOnBg,
-                  onTap: () => _pickImage(ImageSource.camera),
-                ),
-            ],
+            ),
           ),
         ),
-
-        const Spacer(),
-
-        // ── Text-only link (hide when opened from Reels) ──
-        if (widget.initialSource != PostMediaSource.video)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 32),
-            child: TextButton.icon(
-              onPressed: () => setState(() => _currentStep = 1),
-              icon: Icon(Icons.edit_note_rounded,
-                  color: textOnBg.withValues(alpha: 0.5), size: 20),
-              label: Text(
-                'Nur Text posten',
-                style: GoogleFonts.inter(
-                  fontSize: 15,
-                  color: textOnBg.withValues(alpha: 0.5),
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ),
-          ),
       ],
     );
   }
@@ -1255,43 +1262,42 @@ class _CreatePostScreenState extends ConsumerState<CreatePostScreen> {
       ('private', Icons.lock_rounded, 'Privat'),
     ];
 
-    return Row(
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
       children: options.map((opt) {
         final (value, icon, label) = opt;
         final isSelected = _visibility == value;
-        return Padding(
-          padding: const EdgeInsets.only(right: 8),
-          child: GestureDetector(
-            onTap: () => setState(() => _visibility = value),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              decoration: BoxDecoration(
+        return GestureDetector(
+          onTap: () => setState(() => _visibility = value),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: isSelected
+                  ? accentColor.withValues(alpha: 0.15)
+                  : Colors.transparent,
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(
                 color: isSelected
-                    ? accentColor.withValues(alpha: 0.15)
-                    : Colors.transparent,
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(
-                  color: isSelected
-                      ? accentColor
-                      : textColor.withValues(alpha: 0.15),
-                  width: 1.5,
-                ),
+                    ? accentColor
+                    : textColor.withValues(alpha: 0.15),
+                width: 1.5,
               ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(icon,
-                      size: 16,
-                      color: isSelected ? accentColor : textColor.withValues(alpha: 0.4)),
-                  const SizedBox(width: 6),
-                  Text(label,
-                      style: GoogleFonts.inter(
-                        fontSize: 13,
-                        fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
-                        color: isSelected ? accentColor : textColor.withValues(alpha: 0.5),
-                      )),
-                ],
-              ),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(icon,
+                    size: 16,
+                    color: isSelected ? accentColor : textColor.withValues(alpha: 0.4)),
+                const SizedBox(width: 6),
+                Text(label,
+                    style: GoogleFonts.inter(
+                      fontSize: 13,
+                      fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
+                      color: isSelected ? accentColor : textColor.withValues(alpha: 0.5),
+                    )),
+              ],
             ),
           ),
         );
@@ -1686,7 +1692,7 @@ class _MediaCardState extends State<_MediaCard>
           padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 22),
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(20),
-            color: widget.cardColor ?? const Color(0xFF1A1A1A),
+            color: widget.cardColor ?? (Theme.of(context).brightness == Brightness.dark ? const Color(0xFF1A1A1A) : Colors.white),
             border: Border.all(
               color: widget.gradient.first.withValues(alpha: 0.2),
               width: 1,

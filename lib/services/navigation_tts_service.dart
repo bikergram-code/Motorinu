@@ -42,8 +42,8 @@ final Map<String, TtsVoiceProfile> ttsVoiceProfiles = {
     name: 'Standard',
     icon: 'record_voice_over',
     description: 'Klare Navigationsansage',
-    pitch: 1.0,
-    rate: 0.5,
+    pitch: 1.05,
+    rate: 0.52,
     transform: (t) => t,
   ),
   'pirat': TtsVoiceProfile(
@@ -90,6 +90,15 @@ final Map<String, TtsVoiceProfile> ttsVoiceProfiles = {
     pitch: 0.6,
     rate: 0.6,
     transform: _drillTransform,
+  ),
+  'racer': TtsVoiceProfile(
+    id: 'racer',
+    name: 'Racer',
+    icon: 'sports_motorsports',
+    description: 'Tief, rau, Vollgas!',
+    pitch: 0.5,
+    rate: 0.52,
+    transform: _racerTransform,
   ),
 };
 
@@ -195,6 +204,30 @@ String _drillTransform(String text) {
       .replaceAll('Jetzt', 'JETZT!');
 }
 
+String _racerTransform(String text) {
+  return text
+      .replaceAll('links abbiegen', 'Links reinlegen, Alter')
+      .replaceAll('rechts abbiegen', 'Rechts reinlegen, los')
+      .replaceAll('leicht links abbiegen', 'Leicht links, easy')
+      .replaceAll('leicht rechts abbiegen', 'Leicht rechts, smooth')
+      .replaceAll('scharf links abbiegen', 'Harte Linke, festhalten!')
+      .replaceAll('scharf rechts abbiegen', 'Harte Rechte, festhalten!')
+      .replaceAll('wenden', 'Dreh um und gib Gummi!')
+      .replaceAll('geradeaus weiterfahren', 'Geradeaus, Vollgas')
+      .replaceAll('einfädeln', 'Einfädeln, Lücke nutzen')
+      .replaceAll('links halten', 'Links halten, Kumpel')
+      .replaceAll('rechts halten', 'Rechts halten, weiter')
+      .replaceAll('die Abfahrt links nehmen', 'Abfahrt links, raus da')
+      .replaceAll('die Abfahrt rechts nehmen', 'Abfahrt rechts, raus da')
+      .replaceAll('in den Kreisverkehr fahren', 'Kreisverkehr, rein und durch')
+      .replaceAll('Ziel erreicht. Navigation beendet.', 'Ziel erreicht, Maschine aus. Gute Fahrt, Alter!')
+      .replaceAll('Route wird neu berechnet.', 'Falscher Weg, Kumpel. Neue Strecke kommt.')
+      .replaceAll('Sie haben die Route verlassen.', 'Hey, du bist raus. Zurück auf die Piste!')
+      .replaceAll('In 500 Metern', 'In fünfhundert Metern')
+      .replaceAll('In 200 Metern', 'In zweihundert Metern')
+      .replaceAll('Jetzt', 'Jetzt!');
+}
+
 // ─── Service ─────────────────────────────────────────────────────────────────
 
 class NavigationTtsService {
@@ -204,7 +237,7 @@ class NavigationTtsService {
   final FlutterTts _tts = FlutterTts();
   bool _initialized = false;
   bool _isSpeaking = false;
-  String _currentVoice = 'standard';
+  String _currentVoice = 'racer';
 
   // ─── Deduplication ─────────────────────────────────────────────────
   // Tracks which (stepIndex, threshold) pairs have been announced.
@@ -284,16 +317,16 @@ class NavigationTtsService {
         debugPrint('[TTS]   ${v['name']} (locale: ${v['locale']})');
       }
 
-      // Prefer female voices: look for keywords like "female", "Frau", "woman"
-      // Google TTS uses names like "de-de-x-deb-local" (female), "de-de-x-deg-local" (male)
-      // Samsung uses "de-de-SMTf00" (f=female), "de-de-SMTm00" (m=male)
+      // Prefer MALE voices: deep, racer-style
+      // Google TTS: "de-de-x-deg-local" (male), "de-de-x-deb-local" (female)
+      // Samsung: "de-de-SMTm00" (m=male), "de-de-SMTf00" (f=female)
       Map<String, String>? bestVoice;
       for (final v in deVoices) {
         final name = (v['name'] ?? '').toLowerCase();
-        // Google's German female voices often contain 'deb', 'ded', 'dee'
-        // Samsung female voices contain 'f0'
-        if (name.contains('deb') || name.contains('ded') || name.contains('dee') ||
-            name.contains('female') || name.contains('f00') || name.contains('f01')) {
+        // Google's German male voices contain 'deg', 'dea', 'dec'
+        // Samsung male voices contain 'm0'
+        if (name.contains('deg') || name.contains('dea') || name.contains('dec') ||
+            name.contains('male') || name.contains('m00') || name.contains('m01')) {
           bestVoice = v;
           break;
         }
@@ -315,8 +348,8 @@ class NavigationTtsService {
       debugPrint('[TTS] Stimmenauswahl fehlgeschlagen: $e');
     }
 
-    // Apply default voice profile
-    await _applyVoiceProfile('standard');
+    // Apply default voice profile (Racer — deep, rough male voice)
+    await _applyVoiceProfile('racer');
 
     await _tts.setVolume(1.0);
 

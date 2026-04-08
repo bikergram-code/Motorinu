@@ -32,6 +32,21 @@ class Topic {
     );
   }
 
+  /// German label based on slug (fallback to English).
+  String get labelDe => switch (slug) {
+        'builds' => 'Umbauten',
+        'trackdays' => 'Rennstrecke',
+        'touring' => 'Touren',
+        'garage' => 'Garage',
+        'racing' => 'Rennsport',
+        'lifestyle' => 'Lifestyle',
+        'events' => 'Events',
+        'reviews' => 'Bewertungen',
+        'diy' => 'Selbst gemacht',
+        'offroad' => 'Offroad',
+        _ => labelEn,
+      };
+
   /// Icon for the topic based on slug.
   IconData get icon => switch (slug) {
         'builds' => Icons.build_rounded,
@@ -185,7 +200,7 @@ class TopicPicker extends ConsumerWidget {
                           ),
                           const SizedBox(width: 6),
                           Text(
-                            topic.labelEn,
+                            topic.labelDe,
                             style: GoogleFonts.inter(
                               fontSize: 13,
                               fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,

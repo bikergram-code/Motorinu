@@ -24,6 +24,12 @@ _Conversation _$ConversationFromJson(Map<String, dynamic> json) =>
       groupId: (json['groupId'] as num?)?.toInt(),
       groupName: json['groupName'] as String?,
       groupAvatarUrl: json['groupAvatarUrl'] as String?,
+      archivedAt: json['archivedAt'] == null
+          ? null
+          : DateTime.parse(json['archivedAt'] as String),
+      deletedAt: json['deletedAt'] == null
+          ? null
+          : DateTime.parse(json['deletedAt'] as String),
     );
 
 Map<String, dynamic> _$ConversationToJson(_Conversation instance) =>
@@ -40,6 +46,8 @@ Map<String, dynamic> _$ConversationToJson(_Conversation instance) =>
       'groupId': instance.groupId,
       'groupName': instance.groupName,
       'groupAvatarUrl': instance.groupAvatarUrl,
+      'archivedAt': instance.archivedAt?.toIso8601String(),
+      'deletedAt': instance.deletedAt?.toIso8601String(),
     };
 
 _DirectMessage _$DirectMessageFromJson(Map<String, dynamic> json) =>
@@ -60,6 +68,9 @@ _DirectMessage _$DirectMessageFromJson(Map<String, dynamic> json) =>
       createdAt: json['createdAt'] == null
           ? null
           : DateTime.parse(json['createdAt'] as String),
+      editedAt: json['editedAt'] == null
+          ? null
+          : DateTime.parse(json['editedAt'] as String),
       senderName: json['senderName'] as String?,
       senderAvatar: json['senderAvatar'] as String?,
     );
@@ -80,6 +91,7 @@ Map<String, dynamic> _$DirectMessageToJson(_DirectMessage instance) =>
       'messageType': instance.messageType,
       'isRead': instance.isRead,
       'createdAt': instance.createdAt?.toIso8601String(),
+      'editedAt': instance.editedAt?.toIso8601String(),
       'senderName': instance.senderName,
       'senderAvatar': instance.senderAvatar,
     };

@@ -61,6 +61,11 @@ class BlitzerSettings {
   // Live on Map (Online-Sichtbarkeit)
   final bool liveOnMap; // Auf der Karte für andere sichtbar sein
 
+  // Route options (avoid)
+  final bool avoidTolls;       // Maut meiden
+  final bool avoidFerries;     // Fähren meiden
+  final bool avoidMotorways;   // Autobahnen meiden
+
   // Filter: Which blitzer types to warn about
   final bool warnFixed;
   final bool warnMobile;
@@ -94,6 +99,9 @@ class BlitzerSettings {
     this.gpsUpdateIntervalMs = 1000,
     this.smoothingEnabled = true,
     this.liveOnMap = true,
+    this.avoidTolls = false,
+    this.avoidFerries = false,
+    this.avoidMotorways = false,
     this.warnFixed = true,
     this.warnMobile = true,
     this.warnPolice = true,
@@ -127,6 +135,9 @@ class BlitzerSettings {
     int? gpsUpdateIntervalMs,
     bool? smoothingEnabled,
     bool? liveOnMap,
+    bool? avoidTolls,
+    bool? avoidFerries,
+    bool? avoidMotorways,
     bool? warnFixed,
     bool? warnMobile,
     bool? warnPolice,
@@ -159,6 +170,9 @@ class BlitzerSettings {
       gpsUpdateIntervalMs: gpsUpdateIntervalMs ?? this.gpsUpdateIntervalMs,
       smoothingEnabled: smoothingEnabled ?? this.smoothingEnabled,
       liveOnMap: liveOnMap ?? this.liveOnMap,
+      avoidTolls: avoidTolls ?? this.avoidTolls,
+      avoidFerries: avoidFerries ?? this.avoidFerries,
+      avoidMotorways: avoidMotorways ?? this.avoidMotorways,
       warnFixed: warnFixed ?? this.warnFixed,
       warnMobile: warnMobile ?? this.warnMobile,
       warnPolice: warnPolice ?? this.warnPolice,
@@ -245,6 +259,9 @@ class BlitzerSettingsNotifier extends AsyncNotifier<BlitzerSettings> {
       batteryMode: prefs.getString('${_prefix}battery_mode') ?? 'balanced',
       smoothingEnabled: prefs.getBool('${_prefix}smoothing_enabled') ?? true,
       liveOnMap: prefs.getBool('${_prefix}live_on_map') ?? true,
+      avoidTolls: prefs.getBool('${_prefix}avoid_tolls') ?? false,
+      avoidFerries: prefs.getBool('${_prefix}avoid_ferries') ?? false,
+      avoidMotorways: prefs.getBool('${_prefix}avoid_motorways') ?? false,
       warnFixed: prefs.getBool('${_prefix}warn_fixed') ?? true,
       warnMobile: prefs.getBool('${_prefix}warn_mobile') ?? true,
       warnPolice: prefs.getBool('${_prefix}warn_police') ?? true,
@@ -288,6 +305,9 @@ class BlitzerSettingsNotifier extends AsyncNotifier<BlitzerSettings> {
       prefs.setString('${_prefix}battery_mode', s.batteryMode),
       prefs.setBool('${_prefix}smoothing_enabled', s.smoothingEnabled),
       prefs.setBool('${_prefix}live_on_map', s.liveOnMap),
+      prefs.setBool('${_prefix}avoid_tolls', s.avoidTolls),
+      prefs.setBool('${_prefix}avoid_ferries', s.avoidFerries),
+      prefs.setBool('${_prefix}avoid_motorways', s.avoidMotorways),
       prefs.setBool('${_prefix}warn_fixed', s.warnFixed),
       prefs.setBool('${_prefix}warn_mobile', s.warnMobile),
       prefs.setBool('${_prefix}warn_police', s.warnPolice),

@@ -2,8 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:media_kit/media_kit.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+
+import 'core/media_kit_init_stub.dart'
+    if (dart.library.io) 'core/media_kit_init_native.dart';
 
 import 'services/push_notification_service.dart';
 
@@ -32,7 +34,7 @@ class _MotoScrollBehavior extends ScrollBehavior {
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  MediaKit.ensureInitialized();
+  ensureMediaKitInitialized();
 
   // Set Mapbox public token (if not passed via --dart-define)
   if (ApiConfig.mapboxPublicToken.isEmpty) {
@@ -48,8 +50,14 @@ Future<void> main() async {
     installDevHttpOverrides();
   }
 
-  // Initialize Firebase
-  await Firebase.initializeApp();
+  // Initialize Firebase (native only — web needs firebase_options.dart config)
+  if (!kIsWeb) {
+    try {
+      await Firebase.initializeApp();
+    } catch (e) {
+      debugPrint('Firebase init failed: $e');
+    }
+  }
 
   // Initialize Supabase
   await Supabase.initialize(
@@ -58,9 +66,17 @@ Future<void> main() async {
     debug: kDebugMode,
   );
 
-  // Initialize Push Notifications + clear badge on app start
-  await PushNotificationService.instance.init();
-  PushNotificationService.instance.clearBadge();
+  // Initialize Push Notifications + sync badge from DB on app start (native only)
+  if (!kIsWeb) {
+    try {
+      await PushNotificationService.instance.init();
+      // updateBadge() statt clearBadge() — holt echte unread-Zahl aus DB
+      // (kein-op wenn User noch nicht eingeloggt; Auth-Listener triggert es später)
+      PushNotificationService.instance.updateBadge();
+    } catch (e) {
+      debugPrint('Push notifications init failed: $e');
+    }
+  }
 
   // ── Error handler: Log ALL Flutter errors to console ──
   FlutterError.onError = (details) {

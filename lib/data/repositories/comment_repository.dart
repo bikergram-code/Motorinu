@@ -1,4 +1,5 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../domain/xp_calculator.dart';
 
 class Comment {
   final int id;
@@ -80,6 +81,9 @@ class CommentRepository {
         .from('posts')
         .update({'comment_count': (post['comment_count'] as int) + 1})
         .eq('id', postId);
+
+    // +2 XP for commenting
+    XpCalculator.awardXp(userId, XpCalculator.xpComment, 'comment');
 
     return Comment.fromJson(data, currentUserId: _currentUserId);
   }

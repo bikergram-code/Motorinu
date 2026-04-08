@@ -1,0 +1,59 @@
+Deno.serve((_req) => {
+  const html = `<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>MOTORINU - E-Mail bestätigt</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0b0f14;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 24px;
+    }
+    .card { text-align: center; max-width: 400px; }
+    .logo { font-size: 24px; font-weight: 800; letter-spacing: -0.5px; }
+    .logo span { color: #cc0000; }
+    .check { font-size: 64px; margin: 24px 0; }
+    h1 { font-size: 22px; font-weight: 700; margin-bottom: 8px; }
+    p { font-size: 14px; color: rgba(255,255,255,0.55); line-height: 1.5; margin-bottom: 24px; }
+    .btn {
+      display: inline-block;
+      padding: 14px 40px;
+      background: #cc0000;
+      color: #fff !important;
+      text-decoration: none;
+      border-radius: 12px;
+      font-size: 16px;
+      font-weight: 600;
+    }
+    .hint { font-size: 12px; color: rgba(255,255,255,0.3); margin-top: 16px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">MOTOR<span>INU</span></div>
+    <div class="check">&#x2705;</div>
+    <h1>E-Mail erfolgreich bestätigt!</h1>
+    <p>Dein Konto ist jetzt aktiv. Tippe auf den Button um dich in der App anzumelden.</p>
+    <a class="btn" href="intent://login-callback#Intent;scheme=com.bikergram.app;package=com.bikergram.app;end">App öffnen & anmelden</a>
+    <p class="hint">Falls die App sich nicht öffnet, wechsle manuell zur Motorinu App und melde dich an.</p>
+  </div>
+  <script>
+    setTimeout(function() {
+      window.location.href = 'intent://login-callback#Intent;scheme=com.bikergram.app;package=com.bikergram.app;end';
+    }, 1200);
+  </script>
+</body>
+</html>`;
+
+  return new Response(html, {
+    headers: { "Content-Type": "text/html; charset=utf-8" },
+  });
+});

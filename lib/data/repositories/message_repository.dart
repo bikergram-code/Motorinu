@@ -19,7 +19,7 @@ class MessageRepository {
     // Get all conversation IDs for the current user, optionally filtered by community
     final participations = await _supabase
         .from('conversation_participants')
-        .select('conversation_id')
+        .select('conversation_id, archived_at, deleted_at')
         .eq('user_id', userId);
 
     if (participations.isEmpty) return [];
@@ -27,6 +27,14 @@ class MessageRepository {
     final conversationIds = participations
         .map<int>((p) => p['conversation_id'] as int)
         .toList();
+
+    // Track archived/deleted status per conversation
+    final archivedMap = <int, String?>{};
+    final deletedMap = <int, String?>{};
+    for (final p in participations) {
+      archivedMap[p['conversation_id'] as int] = p['archived_at'] as String?;
+      deletedMap[p['conversation_id'] as int] = p['deleted_at'] as String?;
+    }
 
     debugPrint('[MsgRepo] Found ${conversationIds.length} conversations total');
 
@@ -42,10 +50,10 @@ class MessageRepository {
             .eq('id', convId)
             .maybeSingle();
 
-        // Strict community filter: only show conversations matching this community
+        // Community filter: show conversations matching this community OR with no community set
         if (community != null && conv != null) {
           final convCommunity = conv['community'] as String?;
-          if (convCommunity != community) {
+          if (convCommunity != null && convCommunity != community) {
             debugPrint('[MsgRepo] Conv $convId community=$convCommunity ≠ $community → SKIP');
             continue;
           }
@@ -127,6 +135,8 @@ class MessageRepository {
           'group_id': groupId,
           'group_name': groupName,
           'group_avatar_url': groupAvatarUrl,
+          'archived_at': archivedMap[convId],
+          'deleted_at': deletedMap[convId],
         });
       } catch (e) {
         debugPrint('Error loading conversation $convId: $e');
@@ -158,6 +168,60 @@ class MessageRepository {
     final effectiveCommunity = community ?? 'bikergram';
     debugPrint('[MsgRepo] getOrCreateConversation(other=$otherUserId, community=$effectiveCommunity)');
 
+    // ── 1. Client-seitig echte 1:1-Konversation suchen ──
+    // Der Server-RPC ist buggy: er findet auch 3+-Personen-Konversationen.
+    // Deshalb suchen wir zuerst client-seitig nach einer Konversation mit
+    // GENAU 2 Teilnehmern (ich + otherUserId).
+    try {
+      // Alle Konversationen in denen ICH Teilnehmer bin
+      final myConvs = await _supabase
+          .from('conversation_participants')
+          .select('conversation_id')
+          .eq('user_id', userId);
+      // Alle Konversationen in denen OTHER Teilnehmer ist
+      final otherConvs = await _supabase
+          .from('conversation_participants')
+          .select('conversation_id')
+          .eq('user_id', otherUserId);
+
+      final myConvIds = myConvs.map<int>((r) => r['conversation_id'] as int).toSet();
+      final otherConvIds = otherConvs.map<int>((r) => r['conversation_id'] as int).toSet();
+      final sharedConvIds = myConvIds.intersection(otherConvIds);
+
+      debugPrint('[MsgRepo] Shared conversations: $sharedConvIds');
+
+      // Für jede gemeinsame Konversation: prüfe ob GENAU 2 Teilnehmer + richtige Community
+      for (final convId in sharedConvIds) {
+        // Anzahl Teilnehmer prüfen
+        final participants = await _supabase
+            .from('conversation_participants')
+            .select('user_id')
+            .eq('conversation_id', convId);
+        if (participants.length != 2) {
+          debugPrint('[MsgRepo] Conv $convId has ${participants.length} participants → SKIP');
+          continue;
+        }
+        // Community prüfen
+        final conv = await _supabase
+            .from('conversations')
+            .select('id, community, group_id')
+            .eq('id', convId)
+            .maybeSingle();
+        if (conv == null) continue;
+        if (conv['group_id'] != null) continue; // Gruppenkonversation überspringen
+        final convCommunity = conv['community'] as String?;
+        if (convCommunity != null && convCommunity != effectiveCommunity) continue;
+
+        debugPrint('[MsgRepo] ✓ Found exact 1:1 conv: $convId (community=$convCommunity)');
+        return convId;
+      }
+      debugPrint('[MsgRepo] Keine echte 1:1 Konversation gefunden → erstelle neue');
+    } catch (e) {
+      debugPrint('[MsgRepo] Client-side lookup error: $e → fallback to RPC');
+    }
+
+    // ── 2. Neue Konversation erstellen via RPC ──
+    // Nur wenn client-seitig KEINE passende 1:1 gefunden wurde.
     final params = <String, dynamic>{
       'other_user_id': otherUserId,
       'p_community': effectiveCommunity,
@@ -168,11 +232,36 @@ class MessageRepository {
       params: params,
     );
 
-    debugPrint('[MsgRepo] getOrCreateConversation → result=$result');
+    debugPrint('[MsgRepo] getOrCreateConversation RPC → result=$result');
 
-    // RPC returns the conversation ID directly (bigint → int)
-    if (result is int) return result;
-    return int.parse(result.toString());
+    // Prüfe ob die RPC-Konversation wirklich nur 2 Teilnehmer hat
+    final rpcConvId = result is int ? result : int.parse(result.toString());
+    try {
+      final participants = await _supabase
+          .from('conversation_participants')
+          .select('user_id')
+          .eq('conversation_id', rpcConvId);
+      if (participants.length > 2) {
+        debugPrint('[MsgRepo] ⚠️ RPC conv $rpcConvId has ${participants.length} participants! Erstelle neue...');
+        // Neue Konversation manuell erstellen
+        final newConv = await _supabase
+            .from('conversations')
+            .insert({'community': effectiveCommunity})
+            .select('id')
+            .single();
+        final newConvId = newConv['id'] as int;
+        await _supabase.from('conversation_participants').insert([
+          {'conversation_id': newConvId, 'user_id': userId},
+          {'conversation_id': newConvId, 'user_id': otherUserId},
+        ]);
+        debugPrint('[MsgRepo] ✓ Created new 1:1 conv: $newConvId');
+        return newConvId;
+      }
+    } catch (e) {
+      debugPrint('[MsgRepo] Participant check error: $e');
+    }
+
+    return rpcConvId;
   }
 
   /// Load messages for a conversation, ordered oldest first.
@@ -298,10 +387,35 @@ class MessageRepository {
         .eq('is_read', false);
   }
 
-  /// Subscribe to new messages in a conversation (realtime).
+  /// Mark all messages in a conversation as unread (set the latest message from other user as unread).
+  Future<void> markAsUnread(int conversationId) async {
+    final userId = _currentUserId;
+    if (userId == null) return;
+
+    // Get the latest message from the other user
+    final latest = await _supabase
+        .from('messages')
+        .select('id')
+        .eq('conversation_id', conversationId)
+        .neq('user_id', userId)
+        .order('created_at', ascending: false)
+        .limit(1)
+        .maybeSingle();
+
+    if (latest != null) {
+      await _supabase
+          .from('messages')
+          .update({'is_read': false})
+          .eq('id', latest['id']);
+    }
+  }
+
+  /// Subscribe to new, updated, and deleted messages in a conversation (realtime).
   RealtimeChannel subscribeToMessages(
     int conversationId,
-    void Function(Map<String, dynamic> message) onMessage,
+    void Function(Map<String, dynamic> message) onInsert,
+    {void Function(Map<String, dynamic> message)? onUpdate,
+     void Function(Map<String, dynamic> oldRecord)? onDelete}
   ) {
     return _supabase
         .channel('messages:$conversationId')
@@ -315,7 +429,33 @@ class MessageRepository {
             value: conversationId,
           ),
           callback: (payload) {
-            onMessage(payload.newRecord);
+            onInsert(payload.newRecord);
+          },
+        )
+        .onPostgresChanges(
+          event: PostgresChangeEvent.update,
+          schema: 'public',
+          table: 'messages',
+          filter: PostgresChangeFilter(
+            type: PostgresChangeFilterType.eq,
+            column: 'conversation_id',
+            value: conversationId,
+          ),
+          callback: (payload) {
+            onUpdate?.call(payload.newRecord);
+          },
+        )
+        .onPostgresChanges(
+          event: PostgresChangeEvent.delete,
+          schema: 'public',
+          table: 'messages',
+          filter: PostgresChangeFilter(
+            type: PostgresChangeFilterType.eq,
+            column: 'conversation_id',
+            value: conversationId,
+          ),
+          callback: (payload) {
+            onDelete?.call(payload.oldRecord);
           },
         )
         .subscribe();
@@ -415,5 +555,40 @@ class MessageRepository {
         .maybeSingle();
 
     return profile;
+  }
+
+  /// Archive a conversation for the current user (via RPC to bypass RLS).
+  Future<void> archiveConversation(int conversationId) async {
+    debugPrint('[MsgRepo] archiveConversation($conversationId)');
+    await _supabase.rpc('archive_conversation', params: {'conv_id': conversationId});
+    debugPrint('[MsgRepo] archiveConversation($conversationId) done');
+  }
+
+  /// Unarchive a conversation for the current user (via RPC to bypass RLS).
+  Future<void> unarchiveConversation(int conversationId) async {
+    debugPrint('[MsgRepo] unarchiveConversation($conversationId)');
+    await _supabase.rpc('unarchive_conversation', params: {'conv_id': conversationId});
+    debugPrint('[MsgRepo] unarchiveConversation($conversationId) done');
+  }
+
+  /// Soft-delete a conversation (move to trash / Papierkorb).
+  Future<void> deleteConversation(int conversationId) async {
+    debugPrint('[MsgRepo] trashConversation($conversationId)');
+    await _supabase.rpc('trash_conversation', params: {'conv_id': conversationId});
+    debugPrint('[MsgRepo] trashConversation($conversationId) done');
+  }
+
+  /// Restore a conversation from trash.
+  Future<void> restoreConversation(int conversationId) async {
+    debugPrint('[MsgRepo] restoreConversation($conversationId)');
+    await _supabase.rpc('restore_conversation', params: {'conv_id': conversationId});
+    debugPrint('[MsgRepo] restoreConversation($conversationId) done');
+  }
+
+  /// Permanently delete a conversation (hard delete from trash).
+  Future<void> permanentlyDeleteConversation(int conversationId) async {
+    debugPrint('[MsgRepo] permanentlyDeleteConversation($conversationId)');
+    await _supabase.rpc('leave_conversation', params: {'conv_id': conversationId});
+    debugPrint('[MsgRepo] permanentlyDeleteConversation($conversationId) done');
   }
 }

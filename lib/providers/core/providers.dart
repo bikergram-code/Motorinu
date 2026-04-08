@@ -17,6 +17,7 @@ import '../../data/repositories/story_repository.dart';
 import '../../data/repositories/live_repository.dart';
 import '../../data/repositories/events_repository.dart';
 import '../../data/repositories/group_repository.dart';
+import '../../data/repositories/dating_repository.dart';
 import '../../data/repositories/moderation_repository.dart';
 
 // ---------------------------------------------------------------------------
@@ -156,4 +157,8 @@ final eventsRepositoryProvider = Provider<EventsRepository>((ref) {
 
 final groupRepositoryProvider = Provider<GroupRepository>((ref) {
   return GroupRepository();
+});
+
+final datingRepositoryProvider = Provider<DatingRepository>((ref) {
+  return DatingRepository();
 });

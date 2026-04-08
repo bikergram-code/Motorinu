@@ -10,6 +10,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/community.dart';
+import '../widgets/immersive_scroll_wrapper.dart';
 import '../../core/ticket_url_generator.dart';
 import '../../domain/models/event.dart';
 import '../../providers/auth/auth_notifier.dart';
@@ -17,6 +18,10 @@ import '../../providers/auth/auth_state.dart';
 import '../../providers/core/providers.dart';
 import '../../providers/core/speed_dial_provider.dart';
 import '../../providers/events/events_notifier.dart';
+import '../../providers/meetups/meetups_notifier.dart';
+import '../../providers/map/live_location_provider.dart';
+import '../../domain/models/meetup.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart' show LatLng;
 import '../../theme/app_theme.dart';
 
 /// Events screen with "Heute" section, category filters, and event cards.
@@ -28,12 +33,15 @@ class EventsScreen extends ConsumerStatefulWidget {
 }
 
 class _EventsScreenState extends ConsumerState<EventsScreen> {
+  int _selectedTab = 1; // Default: Treffen zuerst (0 = Events, 1 = Treffen)
+
   @override
   void initState() {
     super.initState();
     Future.microtask(() {
       if (!mounted) return;
       ref.read(eventsNotifierProvider.notifier).loadEvents();
+      ref.read(meetupsNotifierProvider.notifier).loadMeetups();
     });
   }
 
@@ -75,11 +83,16 @@ class _EventsScreenState extends ConsumerState<EventsScreen> {
       });
     }
 
+    final meetupsState = ref.watch(meetupsNotifierProvider);
+
     return Scaffold(
       backgroundColor: scaffoldBg,
-      body: RefreshIndicator(
+      body: ImmersiveScrollWrapper(child: RefreshIndicator(
         color: accentColor,
-        onRefresh: () => ref.read(eventsNotifierProvider.notifier).refresh(),
+        onRefresh: () async {
+          await ref.read(eventsNotifierProvider.notifier).refresh();
+          await ref.read(meetupsNotifierProvider.notifier).refresh();
+        },
         child: CustomScrollView(
           slivers: [
             // Spacer for global top bar
@@ -87,6 +100,60 @@ class _EventsScreenState extends ConsumerState<EventsScreen> {
               child:
                   SizedBox(height: MediaQuery.of(context).padding.top + 52),
             ),
+
+            // ── Tab Switcher: Events / Treffen ──
+            SliverToBoxAdapter(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                child: Row(children: [
+                  _tabChip('Events', 0, accentColor, textColor, cardColor, count: eventsState.events.length),
+                  const SizedBox(width: 8),
+                  _tabChip('Treffen', 1, accentColor, textColor, cardColor, count: meetupsState.meetups.length),
+                ]),
+              ),
+            ),
+
+            // ═══ TREFFEN TAB ═══
+            if (_selectedTab == 1) ...[
+              if (meetupsState.isLoading && meetupsState.meetups.isEmpty)
+                const SliverFillRemaining(
+                  child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+                )
+              else if (meetupsState.meetups.isEmpty)
+                SliverFillRemaining(
+                  child: Center(
+                    child: Column(mainAxisSize: MainAxisSize.min, children: [
+                      Icon(Icons.groups_rounded, size: 64, color: mutedColor),
+                      const SizedBox(height: 16),
+                      Text('Noch keine Treffen', style: GoogleFonts.inter(
+                        fontSize: 18, fontWeight: FontWeight.w600, color: textColor)),
+                      const SizedBox(height: 8),
+                      Text('Neue Treffen werden bald hinzugefügt!', style: GoogleFonts.inter(
+                        fontSize: 14, color: mutedColor)),
+                    ]),
+                  ),
+                )
+              else
+                SliverList(
+                  delegate: SliverChildBuilderDelegate(
+                    (context, index) {
+                      final meetup = meetupsState.meetups[index];
+                      return _MeetupCard(
+                        meetup: meetup,
+                        accentColor: accentColor,
+                        textColor: textColor,
+                        mutedColor: mutedColor,
+                        cardColor: cardColor,
+                        isDark: isDark,
+                      );
+                    },
+                    childCount: meetupsState.meetups.length,
+                  ),
+                ),
+            ],
+
+            // ═══ EVENTS TAB ═══
+            if (_selectedTab == 0) ...[
 
             // ── Loading ──
             if (eventsState.isLoading &&
@@ -276,8 +343,83 @@ class _EventsScreenState extends ConsumerState<EventsScreen> {
               // Bottom padding
               const SliverToBoxAdapter(child: SizedBox(height: 80)),
             ],
+            ], // end if (_selectedTab == 0)
           ],
         ),
+      )),
+    );
+  }
+
+  Widget _tabChip(String label, int index, Color accent, Color textColor, Color cardColor, {int count = 0}) {
+    final isActive = _selectedTab == index;
+    return GestureDetector(
+      onTap: () => setState(() => _selectedTab = index),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        decoration: BoxDecoration(
+          color: isActive ? accent : cardColor,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: isActive ? accent : Colors.transparent),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Text(label, style: GoogleFonts.inter(
+            fontSize: 14,
+            fontWeight: FontWeight.w600,
+            color: isActive ? Colors.white : textColor.withValues(alpha: 0.6),
+          )),
+          if (count > 0) ...[
+            const SizedBox(width: 6),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+              decoration: BoxDecoration(
+                color: isActive ? Colors.white.withValues(alpha: 0.25) : accent.withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Text('$count', style: GoogleFonts.inter(
+                fontSize: 11, fontWeight: FontWeight.w700,
+                color: isActive ? Colors.white : accent,
+              )),
+            ),
+          ],
+        ]),
+      ),
+    );
+  }
+
+  // ── Treffen source filter ──
+  String? _selectedSource; // null = Alle
+
+  List<String> _getAvailableSources(List<Meetup> meetups) {
+    final sources = meetups
+        .where((m) => m.sourceName != null && m.sourceName!.isNotEmpty)
+        .map((m) => m.sourceName!)
+        .toSet()
+        .toList()
+      ..sort();
+    return sources;
+  }
+
+  List<Meetup> _filteredMeetups(List<Meetup> meetups) {
+    if (_selectedSource == null) return meetups;
+    return meetups.where((m) => m.sourceName == _selectedSource).toList();
+  }
+
+  Widget _sourceChip(String label, String? source, Color accent, Color textColor, Color cardColor) {
+    final isActive = _selectedSource == source;
+    return GestureDetector(
+      onTap: () => setState(() => _selectedSource = source),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+          color: isActive ? accent : cardColor,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: isActive ? accent : Colors.transparent),
+        ),
+        child: Text(label, style: GoogleFonts.inter(
+          fontSize: 12, fontWeight: FontWeight.w600,
+          color: isActive ? Colors.white : textColor.withValues(alpha: 0.6),
+        )),
       ),
     );
   }
@@ -1730,5 +1872,157 @@ IconData _categoryIcon(String category) {
       return Icons.emoji_events_rounded;
     default:
       return Icons.event_rounded;
+  }
+}
+
+// ═══════════════════════════════════════════════════
+//  MEETUP CARD (for Treffen tab)
+// ═══════════════════════════════════════════════════
+
+class _MeetupCard extends ConsumerWidget {
+  const _MeetupCard({
+    required this.meetup,
+    required this.accentColor,
+    required this.textColor,
+    required this.mutedColor,
+    required this.cardColor,
+    required this.isDark,
+  });
+
+  final Meetup meetup;
+  final Color accentColor;
+  final Color textColor;
+  final Color mutedColor;
+  final Color cardColor;
+  final bool isDark;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final date = meetup.startsAt.toLocal();
+    final months = ['Jan', 'Feb', 'Mär', 'Apr', 'Mai', 'Jun', 'Jul', 'Aug', 'Sep', 'Okt', 'Nov', 'Dez'];
+    final weekdays = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
+    final dayName = weekdays[date.weekday - 1];
+    final monthName = months[date.month - 1];
+    final timeStr = '${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}';
+
+    return GestureDetector(
+      onTap: () => _openDetail(context),
+      child: Container(
+        margin: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: cardColor,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: isDark ? Colors.white.withValues(alpha: 0.06) : Colors.black.withValues(alpha: 0.06)),
+        ),
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          // Date badge
+          Container(
+            width: 56, height: 64,
+            decoration: BoxDecoration(
+              color: accentColor.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+              Text('${date.day}', style: GoogleFonts.inter(
+                fontSize: 22, fontWeight: FontWeight.w800, color: accentColor, height: 1)),
+              Text(monthName, style: GoogleFonts.inter(
+                fontSize: 11, fontWeight: FontWeight.w600, color: accentColor)),
+              Text('$dayName $timeStr', style: GoogleFonts.inter(
+                fontSize: 9, color: accentColor.withValues(alpha: 0.7))),
+            ]),
+          ),
+          const SizedBox(width: 12),
+          // Content
+          Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(meetup.title, style: GoogleFonts.inter(
+              fontSize: 15, fontWeight: FontWeight.w700, color: textColor),
+              maxLines: 2, overflow: TextOverflow.ellipsis),
+            if (meetup.locationText != null) ...[
+              const SizedBox(height: 4),
+              Row(children: [
+                Icon(Icons.location_on_rounded, size: 14, color: mutedColor),
+                const SizedBox(width: 4),
+                Expanded(child: Text(meetup.locationText!, style: GoogleFonts.inter(
+                  fontSize: 12, color: mutedColor),
+                  maxLines: 1, overflow: TextOverflow.ellipsis)),
+                // Navi-Icon → eigene Navigation oder Google Maps Suche
+                GestureDetector(
+                  onTap: () {
+                    if (meetup.latitude != null && meetup.longitude != null) {
+                      ref.read(focusMapTargetProvider.notifier).focusOn(
+                        FocusMapTarget(
+                          position: LatLng(meetup.latitude!, meetup.longitude!),
+                          displayName: meetup.locationText ?? meetup.title,
+                          navigateTo: true,
+                        ),
+                      );
+                      context.go('/map');
+                    } else {
+                      final query = Uri.encodeComponent(meetup.locationText!);
+                      launchUrl(Uri.parse('https://www.google.com/maps/search/?api=1&query=$query'),
+                        mode: LaunchMode.externalApplication);
+                    }
+                  },
+                  child: Container(
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(
+                      color: accentColor.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Icon(Icons.navigation_rounded, size: 18, color: accentColor),
+                  ),
+                ),
+              ]),
+            ],
+            if (meetup.description != null) ...[
+              const SizedBox(height: 4),
+              Text(meetup.description!, style: GoogleFonts.inter(
+                fontSize: 12, color: textColor.withValues(alpha: 0.6)),
+                maxLines: 2, overflow: TextOverflow.ellipsis),
+            ],
+            if (meetup.sourceName != null || meetup.sourceUrl != null) ...[
+              const SizedBox(height: 6),
+              GestureDetector(
+                onTap: () {
+                  if (meetup.sourceUrl != null) {
+                    launchUrl(Uri.parse(meetup.sourceUrl!), mode: LaunchMode.externalApplication);
+                  }
+                },
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: accentColor.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(Icons.open_in_new, size: 12, color: accentColor),
+                    const SizedBox(width: 4),
+                    Flexible(child: Text(meetup.sourceName ?? 'Quelle', style: GoogleFonts.inter(
+                      fontSize: 11, fontWeight: FontWeight.w600, color: accentColor),
+                      overflow: TextOverflow.ellipsis, maxLines: 1)),
+                  ]),
+                ),
+              ),
+            ],
+            if (meetup.isVerified) ...[
+              const SizedBox(height: 4),
+              Row(children: [
+                Icon(Icons.verified_rounded, size: 14, color: Colors.green.shade400),
+                const SizedBox(width: 4),
+                Text('Verifiziert', style: GoogleFonts.inter(
+                  fontSize: 11, color: Colors.green.shade400, fontWeight: FontWeight.w500)),
+              ]),
+            ],
+          ])),
+        ]),
+      ),
+    );
+  }
+
+  void _openDetail(BuildContext context) {
+    if (meetup.sourceUrl != null) {
+      launchUrl(Uri.parse(meetup.sourceUrl!), mode: LaunchMode.externalApplication);
+    }
   }
 }

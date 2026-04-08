@@ -2,6 +2,16 @@ allprojects {
     repositories {
         google()
         mavenCentral()
+        maven {
+            url 'https://api.mapbox.com/downloads/v2/releases/maven'
+            authentication {
+                basic(BasicAuthentication)
+            }
+            credentials {
+                username = "mapbox"
+                password = project.properties['MAPBOX_DOWNLOADS_TOKEN'] ?: ""
+            }
+        }
     }
 }
 
@@ -11,6 +21,19 @@ subprojects {
 }
 subprojects {
     project.evaluationDependsOn(':app')
+}
+subprojects { sub ->
+    sub.pluginManager.withPlugin('com.android.library') {
+        if (sub.android.namespace == null) {
+            def manifest = file("${sub.projectDir}/src/main/AndroidManifest.xml")
+            if (manifest.exists()) {
+                def pkg = new XmlParser().parse(manifest).attribute('package')
+                if (pkg) {
+                    sub.android.namespace = pkg
+                }
+            }
+        }
+    }
 }
 
 tasks.register("clean", Delete) {

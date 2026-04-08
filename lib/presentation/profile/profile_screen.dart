@@ -1,3 +1,4 @@
+import 'package:confetti/confetti.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -11,17 +12,31 @@ import '../../providers/auth/auth_notifier.dart';
 import '../../providers/auth/auth_state.dart';
 import '../../providers/core/providers.dart';
 import '../../providers/feed/feed_notifier.dart';
+import '../../data/repositories/feed_repository.dart';
 import '../../data/repositories/marketplace_repository.dart';
+import '../../data/repositories/message_repository.dart';
+import '../../domain/models/post.dart';
+import '../../providers/dating/dating_notifier.dart';
+import '../../providers/marketplace/marketplace_notifier.dart';
+import '../../providers/messages/messages_notifier.dart';
+import '../feed/widgets/comments_sheet.dart';
+import '../feed/widgets/post_card.dart';
 import '../../data/repositories/ride_repository.dart';
+import '../../data/repositories/vehicle_repository.dart';
+import '../dating/widgets/swipe_card.dart';
 import '../../theme/app_theme.dart';
+import '../widgets/immersive_scroll_wrapper.dart';
 import 'widgets/edit_profile_sheet.dart';
 
 class ProfileScreen extends ConsumerStatefulWidget {
-  const ProfileScreen({super.key, this.userId});
+  const ProfileScreen({super.key, this.userId, this.showDatingCard = false});
 
   /// If null, shows the current user's own profile.
   /// If set, shows another user's profile.
   final String? userId;
+
+  /// If true, automatically opens the dating card preview after loading.
+  final bool showDatingCard;
 
   @override
   ConsumerState<ProfileScreen> createState() => _ProfileScreenState();
@@ -48,6 +63,14 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
   int _totalLikes = 0;
   double _totalKm = 0;
   int _soldCount = 0;
+
+  // Dating stats
+  int _matchCount = 0;
+  int _likeReceivedCount = 0;
+  bool _datingActive = false;
+  bool _hasAlreadySwiped = false;
+  List<String> _datingPhotos = [];
+  List<Map<String, dynamic>> _datingVehicles = [];
 
   bool get _isOwnProfile {
     if (widget.userId == null) return true;
@@ -76,27 +99,181 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
       _loadStats(),
       _loadGarageSummary(),
       _loadAchievementStats(),
+      _loadDatingStats(),
       if (!_isOwnProfile) _loadOtherProfile(),
       if (!_isOwnProfile) _checkFollowing(),
     ]);
+
+    // Auto-open dating card preview if requested (from notification deep link)
+    if (widget.showDatingCard && _datingActive && mounted) {
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        if (!mounted) return;
+        final community = ref.read(communityProvider);
+        final brightness = Theme.of(context).brightness;
+        final authState = ref.read(authNotifierProvider);
+        String username = 'User';
+        String? displayName, avatarUrl, bio;
+        int? birthYear;
+        int xp = 0;
+
+        if (_isOwnProfile && authState is Authenticated) {
+          final user = authState.user;
+          username = user.username;
+          displayName = user.displayName;
+          avatarUrl = user.avatarUrl;
+          bio = user.bio;
+          birthYear = user.birthYear;
+          xp = user.xpTotal ?? 0;
+        } else {
+          username = _otherProfile?['username'] ?? 'User';
+          displayName = _otherProfile?['display_name'];
+          avatarUrl = _otherProfile?['avatar_url'];
+          bio = _otherProfile?['bio'];
+          birthYear = _otherProfile?['birth_year'] as int?;
+          xp = _otherProfile?['xp_total'] ?? 0;
+        }
+
+        // Check for recent match — show heart rain if match within last 10 minutes
+        try {
+          final sb = Supabase.instance.client;
+          final myId = sb.auth.currentUser?.id;
+          final targetId = _targetUserId;
+          if (myId != null && targetId.isNotEmpty) {
+            final match = await sb.from('matches').select('id, conversation_id, created_at')
+                .or('and(user1_id.eq.$myId,user2_id.eq.$targetId),and(user1_id.eq.$targetId,user2_id.eq.$myId)')
+                .order('created_at', ascending: false)
+                .limit(1)
+                .maybeSingle();
+            if (match != null && mounted) {
+              final createdAt = DateTime.tryParse(match['created_at'] as String? ?? '');
+              if (createdAt != null && DateTime.now().toUtc().difference(createdAt).inMinutes <= 10) {
+                _showMatchCelebration({'matched_avatar_url': avatarUrl, 'conversation_id': match['conversation_id'], 'matched_user_id': targetId});
+                return; // Don't also show the card preview
+              }
+            }
+          }
+        } catch (e) {
+          debugPrint('[Dating] Match check error: $e');
+        }
+
+        if (!mounted) return;
+        _showDatingCardPreview(
+          community: community,
+          username: username,
+          displayName: displayName,
+          avatarUrl: avatarUrl,
+          bio: bio,
+          birthYear: birthYear,
+          xp: xp,
+        );
+      });
+    }
   }
 
   Future<void> _loadAchievementStats() async {
     final userId = _targetUserId;
     if (userId.isEmpty) return;
+    final profileRepo = ref.read(profileRepositoryProvider);
+
     try {
-      final profileRepo = ref.read(profileRepositoryProvider);
-      final results = await Future.wait([
-        profileRepo.getTotalLikes(userId),
-        RideRepository().getRideStats(),
-        MarketplaceRepository().getSoldCount(userId),
-      ]);
+      final likes = await profileRepo.getTotalLikes(userId);
+      if (mounted) setState(() => _totalLikes = likes);
+    } catch (_) {}
+
+    try {
+      final rideStats = await RideRepository().getRideStats();
+      debugPrint('[Stats] rideStats for $userId = $rideStats');
+      if (mounted) setState(() => _totalKm = (rideStats['totalKm'] as num?)?.toDouble() ?? 0);
+    } catch (e) {
+      debugPrint('[Stats] getRideStats ERROR: $e');
+    }
+
+    try {
+      final sold = await MarketplaceRepository().getSoldCount(userId);
+      debugPrint('[Stats] soldCount for $userId = $sold');
+      if (mounted) setState(() => _soldCount = sold);
+    } catch (e) {
+      debugPrint('[Stats] getSoldCount ERROR: $e');
+    }
+  }
+
+  Future<void> _loadDatingStats() async {
+    final userId = _targetUserId;
+    debugPrint('[Dating] _loadDatingStats called for userId=$userId');
+    if (userId.isEmpty) return;
+    final sb = Supabase.instance.client;
+
+    // Load dating photos from profile (independent of matches/swipes)
+    try {
+      final profile = await sb.from('profiles').select('dating_photos,dating_tos_accepted_at').eq('id', userId).maybeSingle();
+      if (!mounted) return;
+      final photos = profile?['dating_photos'];
+      setState(() {
+        _datingActive = profile?['dating_tos_accepted_at'] != null;
+        if (photos is List && photos.isNotEmpty) {
+          _datingPhotos = List<String>.from(photos);
+        }
+      });
+      debugPrint('[Dating] photos loaded, datingActive=$_datingActive');
+    } catch (e) {
+      debugPrint('[Dating] Photos error: $e');
+    }
+
+    // Load match/like counts
+    try {
+      final matches = await sb.from('matches').select('id').or('user1_id.eq.$userId,user2_id.eq.$userId');
+      debugPrint('[Dating] matches query OK: ${(matches as List).length}');
+      final communityName = ref.read(communityProvider)?.name ?? 'bikergram';
+      final likes = await sb.from('profile_swipes').select('id').eq('swiped_id', userId).eq('is_like', true);
+      debugPrint('[Dating] likes query OK: ${(likes as List).length}');
+      if (!mounted) return;
+      // Likes received = direct likes + matches (match implies partner liked you, swipe may be consumed by RPC)
+      final totalLikesReceived = (likes as List).length + matches.length;
+      setState(() {
+        _matchCount = matches.length;
+        _likeReceivedCount = totalLikesReceived;
+      });
+      debugPrint('[Dating] SET matchCount=$_matchCount likeReceivedCount=$_likeReceivedCount');
+
+      // Check if current user already swiped on this profile
+      if (!_isOwnProfile) {
+        final myId = sb.auth.currentUser?.id;
+        if (myId != null) {
+          final existingSwipe = await sb.from('profile_swipes')
+              .select('id')
+              .eq('swiper_id', myId)
+              .eq('swiped_id', userId)
+              .eq('community', communityName)
+              .maybeSingle();
+          if (mounted) {
+            setState(() => _hasAlreadySwiped = existingSwipe != null);
+          }
+          debugPrint('[Dating] hasAlreadySwiped=$_hasAlreadySwiped');
+        }
+      }
+    } catch (e) {
+      debugPrint('[Dating] Stats error: $e');
+    }
+  }
+
+  Future<void> _loadDatingVehicles() async {
+    final userId = _targetUserId;
+    if (userId.isEmpty) return;
+    try {
+      final sb = Supabase.instance.client;
+      final profile = await sb.from('profiles').select('dating_vehicle_ids').eq('id', userId).maybeSingle();
+      final rawIds = profile?['dating_vehicle_ids'] as List?;
+      if (rawIds == null || rawIds.isEmpty) return;
+      final ids = rawIds.map((e) => e as int).toSet();
+      final vehicles = await VehicleRepository().getMyVehicles(userId: userId);
       if (!mounted) return;
       setState(() {
-        _totalLikes = results[0] as int;
-        final rideStats = results[1] as Map<String, dynamic>;
-        _totalKm = (rideStats['totalKm'] as num?)?.toDouble() ?? 0;
-        _soldCount = results[2] as int;
+        _datingVehicles = vehicles.where((v) => ids.contains(v.id)).map((v) => <String, dynamic>{
+          'brand': v.brand,
+          'model': v.model,
+          'horsepower': v.horsepower,
+          'community': v.community,
+        }).toList();
       });
     } catch (_) {}
   }
@@ -324,7 +501,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                         return GestureDetector(
                           onTap: () {
                             Navigator.pop(ctx);
-                            // Navigate to post detail if we have a route
+                            context.push('/post/${post['id']}');
                           },
                           child: imageUrl != null && imageUrl.isNotEmpty
                               ? Image.network(
@@ -468,6 +645,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     String? postalCode;
     int xp = 0;
     int level = 1;
+    int? birthYear;
     List<BadgeInfo> badges = [];
 
     if (_isOwnProfile) {
@@ -484,6 +662,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
       postalCode = user?.postalCode;
       xp = user?.xpTotal ?? 0;
       level = user?.level ?? 1;
+      birthYear = user?.birthYear;
       if (user != null) {
         badges = BadgeCalculator.getAllBadges(
           birthYear: user.birthYear,
@@ -504,6 +683,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
       }
       bio = _otherProfile?['bio'];
       postalCode = _otherProfile?['postal_code'] as String?;
+      birthYear = _otherProfile?['birth_year'] as int?;
       xp = _otherProfile?['xp_total'] ?? 0;
       level = _otherProfile?['level'] ?? 1;
       badges = BadgeCalculator.getAllBadges(
@@ -521,7 +701,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
       backgroundColor: community?.scaffoldFor(brightness) ?? (brightness == Brightness.dark ? Colors.black : const Color(0xFFF5F5F5)),
       body: _isLoadingProfile
           ? const Center(child: CircularProgressIndicator(strokeWidth: 2))
-          : CustomScrollView(
+          : ImmersiveScrollWrapper(child: CustomScrollView(
               slivers: [
                 // Own profile: no AppBar needed (Global Top Bar in MainShell handles title + settings)
                 // Other user: show AppBar with back button and username
@@ -683,7 +863,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                                     runSpacing: 4,
                                     children: [
                                       GestureDetector(
-                                        onTap: () => _showXpInfoSheet(context, xp, level, accentColor),
+                                        onTap: () => _showXpInfoSheet(context, xp, level, accentColor, badges),
                                         child: _miniChip('$xp XP', accentColor, brightness),
                                       ),
                                       GestureDetector(
@@ -725,6 +905,22 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                           ],
                         ),
 
+                        // ── LOVO/DATE Section (18+ only) ──
+                        if (birthYear != null && (DateTime.now().year - birthYear) >= 18) ...[
+                          const SizedBox(height: 12),
+                          _buildDatingSection(
+                            accentColor: accentColor,
+                            brightness: brightness,
+                            community: community,
+                            username: username,
+                            displayName: displayName,
+                            avatarUrl: avatarUrl,
+                            bio: bio,
+                            birthYear: birthYear,
+                            xp: xp,
+                          ),
+                        ],
+
                         const SizedBox(height: 16),
 
                         // ── Own Profile ──
@@ -764,18 +960,16 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                           _MenuItem(icon: Icons.emoji_events_rounded, label: 'Erfolge', color: accentColor,
                             cardColor: community?.cardFor(brightness) ?? (brightness == Brightness.dark ? const Color(0xFF1A1A1A) : Colors.white),
                             onTap: () => _openAchievementsScreen(accentColor, brightness, community, xp, level)),
-                          _MenuItem(icon: Icons.favorite_rounded, label: 'Mein Date', color: Colors.pinkAccent,
+                          if (birthYear != null && (DateTime.now().year - birthYear) >= 18)
+                            _MenuItem(icon: Icons.favorite_rounded, label: 'Mein Date', color: Colors.pinkAccent,
+                              cardColor: community?.cardFor(brightness) ?? (brightness == Brightness.dark ? const Color(0xFF1A1A1A) : Colors.white),
+                              onTap: () => _openMySwipes(context, ref, accentColor, brightness, community)),
+                          _MenuItem(icon: Icons.archive_rounded, label: 'Mein Archiv', color: Colors.orange,
                             cardColor: community?.cardFor(brightness) ?? (brightness == Brightness.dark ? const Color(0xFF1A1A1A) : Colors.white),
-                            onTap: () => _openMySwipes(context, ref, accentColor, brightness, community)),
-                          _MenuItem(icon: Icons.bookmark_rounded, label: 'Gespeicherte Beiträge', color: accentColor,
-                            cardColor: community?.cardFor(brightness) ?? (brightness == Brightness.dark ? const Color(0xFF1A1A1A) : Colors.white),
-                            onTap: () => context.push('/saved-posts')),
-                          _MenuItem(icon: Icons.archive_rounded, label: 'Archivierte Nachrichten', color: Colors.orange,
-                            cardColor: community?.cardFor(brightness) ?? (brightness == Brightness.dark ? const Color(0xFF1A1A1A) : Colors.white),
-                            onTap: () => context.push('/messages')),
+                            onTap: () => _openArchiveScreen(accentColor, brightness, community)),
                           _MenuItem(icon: Icons.workspace_premium_rounded, label: 'Premium', color: Colors.amber,
                             cardColor: community?.cardFor(brightness) ?? (brightness == Brightness.dark ? const Color(0xFF1A1A1A) : Colors.white),
-                            onTap: () {},
+                            onTap: () => _showPremiumSheet(accentColor, brightness),
                             trailing: Container(
                               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                               decoration: BoxDecoration(color: Colors.amber.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(6)),
@@ -848,6 +1042,9 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                           _MenuItem(icon: Icons.storefront_rounded, label: 'Marktplatz', color: accentColor,
                             cardColor: community?.cardFor(brightness) ?? (brightness == Brightness.dark ? const Color(0xFF1A1A1A) : Colors.white),
                             onTap: () => context.push('/market/${_targetUserId}')),
+                          _MenuItem(icon: Icons.emoji_events_rounded, label: 'Erfolge', color: accentColor,
+                            cardColor: community?.cardFor(brightness) ?? (brightness == Brightness.dark ? const Color(0xFF1A1A1A) : Colors.white),
+                            onTap: () => _openAchievementsScreen(accentColor, brightness, community, xp, level)),
                         ],
 
                         const SizedBox(height: 32),
@@ -856,14 +1053,704 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                   ),
                 ),
               ],
-            ),
+            )),
     );
   }
 
-  void _showXpInfoSheet(BuildContext context, int xp, int level, Color accentColor) {
+  Widget _buildDatingSection({
+    required Color accentColor,
+    required Brightness brightness,
+    required Community? community,
+    required String username,
+    required String? displayName,
+    required String? avatarUrl,
+    required String? bio,
+    required int? birthYear,
+    required int xp,
+  }) {
+    final isDark = brightness == Brightness.dark;
+    final cardColor = community?.cardFor(brightness) ?? (isDark ? const Color(0xFF1A1A1A) : Colors.white);
+    final textColor = isDark ? Colors.white : const Color(0xFF1A1A1A);
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: cardColor,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: Colors.pinkAccent.withValues(alpha: 0.2),
+          width: 1,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Header — tap to go to Dating platform
+          GestureDetector(
+            onTap: () {
+              // Navigate to Feed Dating tab (tab index 4)
+              context.go('/feed');
+              // Use a small delay so the feed loads, then switch to dating tab
+              Future.delayed(const Duration(milliseconds: 200), () {
+                // The FeedScreen listens for this — we'll pass via extra or just navigate
+              });
+            },
+            child: Row(
+              children: [
+                const Icon(Icons.favorite_rounded, size: 18, color: Colors.pinkAccent),
+                const SizedBox(width: 6),
+                Text(
+                  'LOVO',
+                  style: GoogleFonts.inter(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w800,
+                    color: Colors.pinkAccent,
+                  ),
+                ),
+                const SizedBox(width: 4),
+                Icon(Icons.open_in_new_rounded, size: 12, color: Colors.pinkAccent.withValues(alpha: 0.5)),
+                const Spacer(),
+                Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: Colors.green.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      'Aktiv',
+                      style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w600, color: Colors.green),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 8),
+          // Stats chips — tappable to open Mein Date
+          Wrap(
+            spacing: 8,
+            runSpacing: 6,
+            children: [
+              GestureDetector(
+                onTap: () => _openMatchesList(accentColor, brightness, community),
+                child: _datingChip('$_matchCount', 'Matches', Icons.people_rounded, Colors.pinkAccent),
+              ),
+              GestureDetector(
+                onTap: () => _openReceivedLikes(accentColor, brightness, community),
+                child: _datingChip('$_likeReceivedCount', 'Likes', Icons.favorite_border_rounded, Colors.redAccent),
+              ),
+            ],
+          ),
+          // Card preview button
+          ...[
+            const SizedBox(height: 10),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: () => _showDatingCardPreview(
+                  community: community,
+                  username: username,
+                  displayName: displayName,
+                  avatarUrl: avatarUrl,
+                  bio: bio,
+                  birthYear: birthYear,
+                  xp: xp,
+                ),
+                icon: const Icon(Icons.visibility_rounded, size: 16),
+                label: Text(_isOwnProfile ? 'Vorschau deiner Karte' : 'Dating-Karte ansehen', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600)),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Colors.pinkAccent,
+                  side: BorderSide(color: Colors.pinkAccent.withValues(alpha: 0.3)),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  minimumSize: const Size(0, 36),
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _datingChip(String value, String label, IconData icon, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 14, color: color),
+          const SizedBox(width: 4),
+          Text(
+            '$value $label',
+            style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600, color: color),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showDatingCardPreview({
+    required Community? community,
+    required String username,
+    required String? displayName,
+    required String? avatarUrl,
+    required String? bio,
+    required int? birthYear,
+    required int xp,
+  }) async {
+    // Load vehicles if not yet loaded
+    if (_datingVehicles.isEmpty) {
+      await _loadDatingVehicles();
+    }
+
+    final authState = ref.read(authNotifierProvider);
+    final user = authState is Authenticated ? authState.user : null;
+
+    final previewCandidate = <String, dynamic>{
+      'display_name': displayName ?? username,
+      'bio': bio,
+      'birth_year': birthYear,
+      'dating_photos': _datingPhotos,
+      'avatar_url': avatarUrl,
+      'xp_total': xp,
+      'is_premium': user?.isPremium ?? false,
+      'dating_vehicles': _datingVehicles,
+      'total_feed_likes': _totalLikes,
+    };
+
+    if (!mounted) return;
+    final isOwn = _isOwnProfile;
+    final targetId = _targetUserId;
+    showDialog(
+      context: context,
+      builder: (dCtx) {
+        final screenH = MediaQuery.of(dCtx).size.height;
+        final maxCardH = screenH - 200; // Leave room for buttons + padding
+        return Dialog(
+        backgroundColor: Colors.transparent,
+        insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+        child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (!isOwn && !_hasAlreadySwiped)
+              Dismissible(
+                key: const ValueKey('dating_preview_swipe'),
+                direction: DismissDirection.horizontal,
+                dismissThresholds: const {DismissDirection.startToEnd: 0.3, DismissDirection.endToStart: 0.3},
+                background: Container(
+                  alignment: Alignment.centerLeft,
+                  padding: const EdgeInsets.only(left: 32),
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    const Icon(Icons.favorite_rounded, color: Colors.pinkAccent, size: 48),
+                    Text('LIKE', style: GoogleFonts.inter(fontSize: 16, fontWeight: FontWeight.w900, color: Colors.pinkAccent)),
+                  ]),
+                ),
+                secondaryBackground: Container(
+                  alignment: Alignment.centerRight,
+                  padding: const EdgeInsets.only(right: 32),
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    const Icon(Icons.close_rounded, color: Colors.red, size: 48),
+                    Text('NOPE', style: GoogleFonts.inter(fontSize: 16, fontWeight: FontWeight.w900, color: Colors.red)),
+                  ]),
+                ),
+                confirmDismiss: (direction) async {
+                  final isLike = direction == DismissDirection.startToEnd;
+                  try {
+                    final notifier = ref.read(datingNotifierProvider.notifier);
+                    await notifier.swipe(
+                      swipedId: targetId,
+                      isLike: isLike,
+                      community: community?.name ?? 'bikergram',
+                      matchedAvatarUrl: isLike ? avatarUrl : null,
+                    );
+                    if (isLike) {
+                      final dState = ref.read(datingNotifierProvider);
+                      if (dState.lastMatch != null && mounted) {
+                        final matchData = dState.lastMatch!;
+                        ref.read(datingNotifierProvider.notifier).clearMatch();
+                        Navigator.pop(dCtx);
+                        _showMatchCelebration(matchData);
+                        _loadDatingStats();
+                        return false;
+                      }
+                    }
+                    _loadDatingStats();
+                  } catch (_) {}
+                  return true; // dismiss the card
+                },
+                onDismissed: (direction) {
+                  Navigator.pop(dCtx);
+                  final isLike = direction == DismissDirection.startToEnd;
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                      content: Text(isLike ? '❤️ Like gesendet!' : '✕ Nope'),
+                      backgroundColor: isLike ? Colors.pinkAccent : Colors.grey.shade700,
+                      behavior: SnackBarBehavior.floating,
+                      duration: const Duration(seconds: 1),
+                    ));
+                  }
+                },
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(maxHeight: maxCardH),
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(20),
+                    child: AspectRatio(
+                      aspectRatio: 0.65,
+                      child: SwipeCard(
+                        candidate: previewCandidate,
+                        community: community ?? Community.bikergram,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            if (isOwn || _hasAlreadySwiped)
+              ConstrainedBox(
+                constraints: BoxConstraints(maxHeight: maxCardH),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(20),
+                  child: AspectRatio(
+                    aspectRatio: 0.65,
+                    child: SwipeCard(
+                      candidate: previewCandidate,
+                      community: community ?? Community.bikergram,
+                    ),
+                  ),
+                ),
+              ),
+            if (_hasAlreadySwiped && !isOwn) ...[
+              const SizedBox(height: 12),
+              Text('✓ Bereits bewertet', style: GoogleFonts.inter(fontSize: 14, color: Colors.white54)),
+            ],
+            // Like/Nope buttons (only for other users who haven't been swiped yet)
+            if (!isOwn && !_hasAlreadySwiped) ...[
+              const SizedBox(height: 16),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  // Nope
+                  GestureDetector(
+                    onTap: () async {
+                      Navigator.pop(dCtx);
+                      try {
+                        final notifier = ref.read(datingNotifierProvider.notifier);
+                        await notifier.swipe(
+                          swipedId: targetId,
+                          isLike: false,
+                          community: community?.name ?? 'bikergram',
+                        );
+                        if (mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                            content: const Text('✕ Nope'),
+                            backgroundColor: Colors.grey.shade700,
+                            behavior: SnackBarBehavior.floating,
+                            duration: const Duration(seconds: 1),
+                          ));
+                        }
+                      } catch (_) {}
+                    },
+                    child: Container(
+                      width: 64, height: 64,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Colors.white,
+                        boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 8, offset: const Offset(0, 2))],
+                      ),
+                      child: const Icon(Icons.close_rounded, color: Colors.red, size: 36),
+                    ),
+                  ),
+                  const SizedBox(width: 32),
+                  // Like
+                  GestureDetector(
+                    onTap: () async {
+                      Navigator.pop(dCtx);
+                      try {
+                        final notifier = ref.read(datingNotifierProvider.notifier);
+                        await notifier.swipe(
+                          swipedId: targetId,
+                          isLike: true,
+                          community: community?.name ?? 'bikergram',
+                          matchedAvatarUrl: avatarUrl,
+                        );
+                        // Check if match happened via state
+                        final dState = ref.read(datingNotifierProvider);
+                        if (dState.lastMatch != null && mounted) {
+                          final matchData = dState.lastMatch!;
+                          ref.read(datingNotifierProvider.notifier).clearMatch();
+                          _showMatchCelebration(matchData);
+                        } else if (mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                            content: const Text('❤️ Like gesendet!'),
+                            backgroundColor: Colors.pinkAccent,
+                            behavior: SnackBarBehavior.floating,
+                            duration: const Duration(seconds: 1),
+                          ));
+                        }
+                        // Reload dating stats to update counts
+                        _loadDatingStats();
+                      } catch (_) {}
+                    },
+                    child: Container(
+                      width: 64, height: 64,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Colors.white,
+                        boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 8, offset: const Offset(0, 2))],
+                      ),
+                      child: const Icon(Icons.favorite_rounded, color: Colors.pinkAccent, size: 36),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ],
+        ),
+      ),
+      );
+      },
+    );
+  }
+
+  /// Heart-shaped particle path
+  Path _heartPath(Size size) {
+    final w = size.width;
+    final h = size.height;
+    final path = Path();
+    path.moveTo(w / 2, h * 0.35);
+    path.cubicTo(w * 0.15, 0, 0, h * 0.4, w / 2, h);
+    path.moveTo(w / 2, h * 0.35);
+    path.cubicTo(w * 0.85, 0, w, h * 0.4, w / 2, h);
+    path.close();
+    return path;
+  }
+
+  static const _heartColors = [
+    Color(0xFFE91E63), Color(0xFFF44336), Color(0xFFFF4081),
+    Color(0xFFFF1744), Color(0xFFE040FB), Color(0xFFFF6090),
+    Color(0xFFD50000), Color(0xFFFF80AB),
+  ];
+
+  void _showMatchCelebration(Map<String, dynamic> matchResult) {
+    final confettiCtrl = ConfettiController(duration: const Duration(seconds: 12));
+    confettiCtrl.play();
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final xpForNext = (level) * 100;
-    final progress = xpForNext > 0 ? (xp / xpForNext) : 0.0;
+    final convId = matchResult['conversation_id'];
+    // Use matched_user_id from result, fallback to _targetUserId (when on other's profile)
+    final matchedUserId = (matchResult['matched_user_id'] as String?) ?? _targetUserId;
+    debugPrint('[Match] celebration: convId=$convId matchedUserId=$matchedUserId targetUserId=$_targetUserId');
+    final community = ref.read(communityProvider);
+    final msgCtrl = TextEditingController();
+
+    // Resolve conversation ID — IMMER client-seitig holen, Server-ID ist unzuverlässig!
+    int? _resolvedChatId;
+    Future<int?> _getChatId() async {
+      if (_resolvedChatId != null) return _resolvedChatId!;
+
+      debugPrint('[Match] _getChatId: convId=$convId matchedUserId=$matchedUserId');
+
+      // ⚠️ Server-convId NICHT vertrauen — kann falsche Teilnehmer haben!
+      // Stattdessen IMMER client-seitig die korrekte Konversation holen:
+      if (matchedUserId.isNotEmpty) {
+        try {
+          _resolvedChatId = await MessageRepository()
+              .getOrCreateConversation(matchedUserId, community: community?.name);
+          debugPrint('[Match] ✓ Client convId: $_resolvedChatId (matchedUserId=$matchedUserId)');
+          return _resolvedChatId!;
+        } catch (e) {
+          debugPrint('[Match] ✗ getOrCreateConversation failed: $e');
+        }
+      }
+
+      // Fallback: convId aus matchResult wenn vorhanden (nur als letzter Ausweg)
+      if (convId != null) {
+        final parsed = convId is int ? convId : int.tryParse(convId.toString());
+        if (parsed != null && parsed > 0) {
+          _resolvedChatId = parsed;
+          debugPrint('[Match] ⚠️ Fallback auf Server-convId: $_resolvedChatId');
+          return _resolvedChatId!;
+        }
+      }
+
+      debugPrint('[Match] ✗ KEIN conversation_id gefunden!');
+      return null;
+    }
+
+    // Quick-send emoji/text to the match chat → then navigate to chat
+    Future<void> sendQuickMsg(String text, BuildContext ctx) async {
+      try {
+        final chatId = await _getChatId();
+        if (chatId == null) {
+          debugPrint('[Match] ✗ Kein Chat-ID — Nachricht NICHT gesendet');
+          if (ctx.mounted) {
+            ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(
+              content: Text('⚠️ Chat konnte nicht gefunden werden. Versuche es über die Nachrichtenliste.'),
+              backgroundColor: Colors.orange,
+            ));
+          }
+          return;
+        }
+        // Send the message
+        await MessageRepository().sendMessage(chatId, text);
+        debugPrint('[Match] ✓ Sent "$text" to chatId=$chatId (matchedUserId=$matchedUserId)');
+        // Close dialog + navigate to chat
+        try { confettiCtrl.dispose(); } catch (_) {}
+        if (ctx.mounted) Navigator.pop(ctx);
+        await Future.delayed(const Duration(milliseconds: 150));
+        if (mounted) context.push('/messages/$chatId');
+      } catch (e) {
+        debugPrint('[Match] ✗ Send error: $e');
+      }
+    }
+
+    showDialog(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) => Stack(
+        children: [
+          AlertDialog(
+            backgroundColor: isDark ? const Color(0xFF1A1A1A) : Colors.white,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+            titlePadding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
+            contentPadding: const EdgeInsets.fromLTRB(20, 8, 20, 0),
+            actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+            title: Text('💕 Es ist ein Match!',
+              textAlign: TextAlign.center,
+              style: GoogleFonts.inter(fontSize: 22, fontWeight: FontWeight.w900, color: Colors.pinkAccent)),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text('🥰', style: TextStyle(fontSize: 48)),
+                  const SizedBox(height: 8),
+                  Text('Ihr mögt euch beide!',
+                    textAlign: TextAlign.center,
+                    style: GoogleFonts.inter(fontSize: 16, fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 4),
+                  Text('Sende eine Nachricht oder ein Herz 💌',
+                    textAlign: TextAlign.center,
+                    style: GoogleFonts.inter(fontSize: 13, color: isDark ? Colors.white54 : Colors.black54)),
+                  const SizedBox(height: 14),
+                  // Quick emoji buttons
+                  Text('Schnell-Herzen', style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w600, color: isDark ? Colors.white38 : Colors.black38)),
+                  const SizedBox(height: 6),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    alignment: WrapAlignment.center,
+                    children: [
+                      for (final emoji in ['🌹', '💕', '💐', '😘', '🥰', '❤️‍🔥', '💋', '🌸', '💖', '😍', '🫶', '🌷'])
+                        GestureDetector(
+                          onTap: () {
+                            final text = msgCtrl.text;
+                            final sel = msgCtrl.selection;
+                            final pos = sel.isValid ? sel.baseOffset : text.length;
+                            msgCtrl.text = text.substring(0, pos) + emoji + text.substring(pos);
+                            msgCtrl.selection = TextSelection.collapsed(offset: pos + emoji.length);
+                          },
+                          child: Container(
+                            padding: const EdgeInsets.all(10),
+                            decoration: BoxDecoration(
+                              color: Colors.pinkAccent.withValues(alpha: 0.08),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Text(emoji, style: const TextStyle(fontSize: 24)),
+                          ),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  // Text input for custom message
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: msgCtrl,
+                          style: GoogleFonts.inter(fontSize: 14, color: isDark ? Colors.white : Colors.black),
+                          decoration: InputDecoration(
+                            hintText: 'Hey, schön dich zu sehen! 💕',
+                            hintStyle: GoogleFonts.inter(fontSize: 13, color: isDark ? Colors.white30 : Colors.black26),
+                            filled: true,
+                            fillColor: isDark ? const Color(0xFF2A2A2A) : const Color(0xFFF5F5F5),
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12),
+                              borderSide: BorderSide.none,
+                            ),
+                            contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                          ),
+                          textInputAction: TextInputAction.send,
+                          onSubmitted: (text) {
+                            if (text.trim().isNotEmpty) sendQuickMsg(text.trim(), ctx);
+                          },
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      GestureDetector(
+                        onTap: () {
+                          final text = msgCtrl.text.trim();
+                          if (text.isNotEmpty) sendQuickMsg(text, ctx);
+                        },
+                        child: Container(
+                          width: 44, height: 44,
+                          decoration: BoxDecoration(
+                            color: Colors.pinkAccent,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: const Icon(Icons.send_rounded, color: Colors.white, size: 20),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  // Chat öffnen Button direkt im Content (kein Overlap mit Send)
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: () async {
+                        try {
+                          final chatId = await _getChatId();
+                          if (ctx.mounted) Navigator.pop(ctx);
+                          try { confettiCtrl.dispose(); } catch (_) {}
+                          if (chatId != null && mounted) {
+                            context.push('/messages/$chatId');
+                          } else if (mounted) {
+                            debugPrint('[Match] ✗ Kein Chat-ID — öffne Nachrichtenliste');
+                            context.push('/messages');
+                          }
+                        } catch (e) {
+                          debugPrint('[Match] Chat open error: $e');
+                        }
+                      },
+                      icon: const Icon(Icons.chat_bubble_rounded, size: 18),
+                      label: Text('Chat öffnen', style: GoogleFonts.inter(fontSize: 14, fontWeight: FontWeight.w700)),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.pinkAccent,
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Center(
+                    child: TextButton(
+                      onPressed: () { Navigator.pop(ctx); try { confettiCtrl.dispose(); } catch (_) {} },
+                      child: Text('Später', style: GoogleFonts.inter(fontSize: 14, color: isDark ? Colors.white38 : Colors.black38)),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            actions: const [],
+          ),
+          // Heart confetti — 3 sources
+          Align(
+            alignment: Alignment.topCenter,
+            child: ConfettiWidget(
+              confettiController: confettiCtrl,
+              blastDirectionality: BlastDirectionality.explosive,
+              shouldLoop: true,
+              numberOfParticles: 50,
+              maxBlastForce: 15,
+              minBlastForce: 5,
+              emissionFrequency: 0.06,
+              gravity: 0.15,
+              createParticlePath: _heartPath,
+              colors: _heartColors,
+            ),
+          ),
+          Align(
+            alignment: Alignment.topLeft,
+            child: ConfettiWidget(
+              confettiController: confettiCtrl,
+              blastDirection: -1.0,
+              shouldLoop: true,
+              numberOfParticles: 25,
+              maxBlastForce: 12,
+              minBlastForce: 4,
+              emissionFrequency: 0.05,
+              gravity: 0.12,
+              createParticlePath: _heartPath,
+              colors: _heartColors,
+            ),
+          ),
+          Align(
+            alignment: Alignment.topRight,
+            child: ConfettiWidget(
+              confettiController: confettiCtrl,
+              blastDirection: -2.1,
+              shouldLoop: true,
+              numberOfParticles: 25,
+              maxBlastForce: 12,
+              minBlastForce: 4,
+              emissionFrequency: 0.05,
+              gravity: 0.12,
+              createParticlePath: _heartPath,
+              colors: _heartColors,
+            ),
+          ),
+        ],
+      ),
+    ).then((_) { try { confettiCtrl.dispose(); } catch (_) {} });
+  }
+
+  void _openArchiveScreen(Color accentColor, Brightness brightness, Community? community) {
+    final isDark = brightness == Brightness.dark;
+    final textCol = isDark ? Colors.white : const Color(0xFF1A1A1A);
+    final subCol = isDark ? Colors.white54 : Colors.black54;
+    final cardCol = community?.cardFor(brightness) ?? (isDark ? const Color(0xFF1A1A1A) : Colors.white);
+    final scaffoldBg = community?.scaffoldFor(brightness) ?? (isDark ? Colors.black : const Color(0xFFF5F5F5));
+
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => DefaultTabController(
+        length: 3,
+        child: Scaffold(
+          backgroundColor: scaffoldBg,
+          appBar: AppBar(
+            backgroundColor: scaffoldBg,
+            surfaceTintColor: Colors.transparent,
+            leading: IconButton(
+              onPressed: () => Navigator.pop(context),
+              icon: Icon(Icons.arrow_back_rounded, color: textCol),
+            ),
+            title: Text('Mein Archiv', style: GoogleFonts.inter(fontSize: 20, fontWeight: FontWeight.w700, color: textCol)),
+            bottom: TabBar(
+              labelColor: accentColor,
+              unselectedLabelColor: subCol,
+              indicatorColor: accentColor,
+              labelStyle: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600),
+              unselectedLabelStyle: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w500),
+              tabs: const [
+                Tab(icon: Icon(Icons.bookmark_rounded, size: 20), text: 'Beiträge'),
+                Tab(icon: Icon(Icons.chat_bubble_rounded, size: 20), text: 'Nachrichten'),
+                Tab(icon: Icon(Icons.storefront_rounded, size: 20), text: 'Artikel'),
+              ],
+            ),
+          ),
+          body: TabBarView(
+            children: [
+              // ── Tab 1: Gespeicherte Beiträge ──
+              _ArchiveSavedPostsTab(accentColor: accentColor, community: community),
+              // ── Tab 2: Archivierte Nachrichten ──
+              _ArchiveMessagesTab(accentColor: accentColor, textCol: textCol, subCol: subCol, scaffoldBg: scaffoldBg),
+              // ── Tab 3: Archivierte Artikel ──
+              _ArchiveListingsTab(accentColor: accentColor, textCol: textCol, subCol: subCol, cardCol: cardCol, isDark: isDark),
+            ],
+          ),
+        ),
+      ),
+    ));
+  }
+
+  void _showArchivedListings(Color accentColor, Brightness brightness, Community? community) {
+    final isDark = brightness == Brightness.dark;
+    final textCol = isDark ? Colors.white : const Color(0xFF1A1A1A);
+    final subCol = isDark ? Colors.white54 : Colors.black54;
+    final cardCol = community?.cardFor(brightness) ?? (isDark ? const Color(0xFF1A1A1A) : Colors.white);
 
     showModalBottomSheet(
       context: context,
@@ -871,139 +1758,227 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
       backgroundColor: isDark ? const Color(0xFF1A1A2E) : Colors.white,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
       builder: (_) => DraggableScrollableSheet(
-        initialChildSize: 0.7,
-        minChildSize: 0.4,
+        initialChildSize: 0.65,
+        minChildSize: 0.3,
         maxChildSize: 0.9,
         expand: false,
-        builder: (ctx, scrollCtrl) {
-          final textCol = isDark ? Colors.white : Colors.black87;
-          final subCol = isDark ? Colors.white54 : Colors.black54;
-          final cardBg = isDark ? Colors.white.withValues(alpha: 0.05) : Colors.black.withValues(alpha: 0.03);
-
-          return SingleChildScrollView(
-            controller: scrollCtrl,
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              children: [
+        builder: (ctx, scrollCtrl) => Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(24, 16, 24, 8),
+              child: Column(children: [
                 Container(width: 40, height: 4, decoration: BoxDecoration(color: isDark ? Colors.white12 : Colors.black12, borderRadius: BorderRadius.circular(2))),
-                const SizedBox(height: 24),
-
-                // Big XP display
-                Container(
-                  padding: const EdgeInsets.all(20),
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      colors: [accentColor.withValues(alpha: 0.2), accentColor.withValues(alpha: 0.05)],
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                    ),
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(color: accentColor.withValues(alpha: 0.3)),
-                  ),
-                  child: Column(
-                    children: [
-                      Text('⚡', style: const TextStyle(fontSize: 48)),
-                      const SizedBox(height: 8),
-                      Text('$xp', style: GoogleFonts.inter(fontSize: 42, fontWeight: FontWeight.w900, color: accentColor)),
-                      Text('Erfahrungspunkte', style: GoogleFonts.inter(fontSize: 14, fontWeight: FontWeight.w500, color: subCol)),
-                      const SizedBox(height: 16),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text('Level $level', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700, color: textCol)),
-                          Text('Level ${level + 1}', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600, color: subCol)),
-                        ],
-                      ),
-                      const SizedBox(height: 6),
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(6),
-                        child: LinearProgressIndicator(
-                          value: progress.clamp(0.0, 1.0),
-                          minHeight: 10,
-                          backgroundColor: isDark ? Colors.white10 : Colors.black12,
-                          valueColor: AlwaysStoppedAnimation(accentColor),
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      Text('Noch ${(xpForNext - xp).clamp(0, xpForNext)} XP bis ${_levelName(level + 1)}',
-                        style: GoogleFonts.inter(fontSize: 11, color: subCol)),
-                    ],
-                  ),
-                ),
-
-                const SizedBox(height: 28),
-
-                // XP-Abstufung title
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text('XP-Abstufung', style: GoogleFonts.inter(fontSize: 17, fontWeight: FontWeight.w800, color: textCol)),
-                ),
-                const SizedBox(height: 4),
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text('Je 100 XP steigst du ein Level auf', style: GoogleFonts.inter(fontSize: 12, color: subCol)),
-                ),
                 const SizedBox(height: 16),
-
-                // Tier overview cards
-                ...[
-                  ('🌱', 'Rookie', 1, 4, '0 – 399 XP', 'Dein Start in die Community'),
-                  ('🏍', 'Rider', 5, 9, '400 – 899 XP', 'Du bist aktiv unterwegs!'),
-                  ('🔥', 'Pro', 10, 14, '900 – 1.399 XP', 'Respektiertes Community-Mitglied'),
-                  ('⭐', 'Veteran', 15, 19, '1.400 – 1.899 XP', 'Erfahrener Fahrer & Kenner'),
-                  ('👑', 'Legend', 20, 20, '1.900+ XP', 'Die Legende der Community'),
-                ].map((tier) {
-                  final isCurrentTier = level >= tier.$3 && level <= tier.$4;
-                  return Container(
-                    margin: const EdgeInsets.only(bottom: 10),
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: isCurrentTier ? accentColor.withValues(alpha: 0.12) : cardBg,
-                      borderRadius: BorderRadius.circular(16),
-                      border: isCurrentTier ? Border.all(color: accentColor.withValues(alpha: 0.5), width: 1.5) : null,
-                    ),
-                    child: Row(
-                      children: [
-                        Text(tier.$1, style: const TextStyle(fontSize: 32)),
-                        const SizedBox(width: 14),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                children: [
-                                  Text(tier.$2, style: GoogleFonts.inter(fontSize: 16, fontWeight: FontWeight.w800,
-                                    color: isCurrentTier ? accentColor : textCol)),
-                                  const SizedBox(width: 8),
-                                  Text('Lv. ${tier.$3}–${tier.$4}', style: GoogleFonts.inter(fontSize: 12, color: subCol)),
-                                ],
-                              ),
-                              const SizedBox(height: 2),
-                              Text(tier.$5, style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600,
-                                color: isCurrentTier ? accentColor : subCol)),
-                              Text(tier.$6, style: GoogleFonts.inter(fontSize: 11, color: subCol)),
-                            ],
-                          ),
-                        ),
-                        if (isCurrentTier)
-                          Icon(Icons.arrow_right_alt_rounded, color: accentColor, size: 24)
-                        else if (level > tier.$4)
-                          Icon(Icons.check_circle_rounded, color: accentColor.withValues(alpha: 0.5), size: 20),
-                      ],
-                    ),
-                  );
-                }),
-
-                const SizedBox(height: 30),
-              ],
+                Row(children: [
+                  Icon(Icons.inventory_2_rounded, color: Colors.orange.shade700, size: 24),
+                  const SizedBox(width: 10),
+                  Text('Archivierte Artikel', style: GoogleFonts.inter(fontSize: 20, fontWeight: FontWeight.w800, color: textCol)),
+                ]),
+              ]),
             ),
-          );
-        },
+            Expanded(
+              child: FutureBuilder<List<MarketplaceListing>>(
+                future: MarketplaceRepository().getArchivedListings(),
+                builder: (ctx, snap) {
+                  if (snap.connectionState == ConnectionState.waiting) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+                  final items = snap.data ?? [];
+                  if (items.isEmpty) {
+                    return Center(child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.inventory_2_outlined, size: 48, color: subCol),
+                        const SizedBox(height: 12),
+                        Text('Keine archivierten Artikel', style: GoogleFonts.inter(fontSize: 15, color: subCol)),
+                        const SizedBox(height: 4),
+                        Text('Wische im Marktplatz nach rechts zum Archivieren', style: GoogleFonts.inter(fontSize: 12, color: subCol), textAlign: TextAlign.center),
+                      ],
+                    ));
+                  }
+                  return ListView.builder(
+                    controller: scrollCtrl,
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+                    itemCount: items.length,
+                    itemBuilder: (ctx, i) {
+                      final listing = items[i];
+                      return Container(
+                        margin: const EdgeInsets.only(bottom: 10),
+                        padding: const EdgeInsets.all(14),
+                        decoration: BoxDecoration(
+                          color: cardCol,
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(color: isDark ? Colors.white.withValues(alpha: 0.06) : Colors.black.withValues(alpha: 0.08)),
+                        ),
+                        child: Row(
+                          children: [
+                            // Thumbnail
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(10),
+                              child: SizedBox(
+                                width: 60, height: 60,
+                                child: listing.images.isNotEmpty
+                                    ? Image.network(listing.images.first, fit: BoxFit.cover,
+                                        errorBuilder: (_, __, ___) => Container(color: Colors.white.withValues(alpha: 0.05), child: Icon(Icons.image_outlined, size: 24, color: subCol)))
+                                    : Container(color: Colors.white.withValues(alpha: 0.05), child: Icon(Icons.image_outlined, size: 24, color: subCol)),
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            // Info
+                            Expanded(child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(listing.title, style: GoogleFonts.inter(fontSize: 14, fontWeight: FontWeight.w600, color: textCol), maxLines: 1, overflow: TextOverflow.ellipsis),
+                                if (listing.price != null)
+                                  Text('${listing.price!.toStringAsFixed(2)} ${listing.currency}', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700, color: accentColor)),
+                                if (listing.createdAt != null)
+                                  Text('${listing.createdAt!.day.toString().padLeft(2, '0')}.${listing.createdAt!.month.toString().padLeft(2, '0')}.${listing.createdAt!.year}',
+                                    style: GoogleFonts.inter(fontSize: 11, color: subCol)),
+                              ],
+                            )),
+                            // Reactivate button
+                            IconButton(
+                              icon: Icon(Icons.unarchive_rounded, color: accentColor, size: 22),
+                              tooltip: 'Wiederherstellen',
+                              onPressed: () async {
+                                try {
+                                  await MarketplaceRepository().reactivateListing(listing.id);
+                                  if (ctx.mounted) {
+                                    Navigator.pop(ctx);
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(content: Text('„${listing.title}" wiederhergestellt'), duration: const Duration(seconds: 2)),
+                                    );
+                                    // Reload marketplace
+                                    ref.read(marketplaceNotifierProvider.notifier).loadListings();
+                                  }
+                                } catch (e) {
+                                  if (ctx.mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(content: Text('Fehler: $e'), backgroundColor: Colors.red),
+                                    );
+                                  }
+                                }
+                              },
+                            ),
+                            // Delete button
+                            IconButton(
+                              icon: Icon(Icons.delete_outline_rounded, color: Colors.red.shade400, size: 22),
+                              tooltip: 'Endgültig löschen',
+                              onPressed: () async {
+                                final confirm = await showDialog<bool>(
+                                  context: context,
+                                  builder: (dCtx) => AlertDialog(
+                                    backgroundColor: cardCol,
+                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                                    title: Text('Endgültig löschen?', style: GoogleFonts.inter(fontWeight: FontWeight.w700, color: textCol)),
+                                    content: Text('„${listing.title}" wird unwiderruflich gelöscht.', style: GoogleFonts.inter(color: subCol)),
+                                    actions: [
+                                      TextButton(onPressed: () => Navigator.pop(dCtx, false), child: Text('Abbrechen', style: TextStyle(color: subCol))),
+                                      TextButton(onPressed: () => Navigator.pop(dCtx, true), child: Text('Löschen', style: GoogleFonts.inter(color: Colors.red, fontWeight: FontWeight.w600))),
+                                    ],
+                                  ),
+                                );
+                                if (confirm == true) {
+                                  try {
+                                    await MarketplaceRepository().deleteListing(listing.id);
+                                    if (ctx.mounted) {
+                                      Navigator.pop(ctx);
+                                      ScaffoldMessenger.of(context).showSnackBar(
+                                        SnackBar(content: Text('„${listing.title}" gelöscht'), duration: const Duration(seconds: 2)),
+                                      );
+                                    }
+                                  } catch (e) {
+                                    if (ctx.mounted) {
+                                      ScaffoldMessenger.of(context).showSnackBar(
+                                        SnackBar(content: Text('Fehler: $e'), backgroundColor: Colors.red),
+                                      );
+                                    }
+                                  }
+                                }
+                              },
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
 
+  void _showPremiumSheet(Color accentColor, Brightness brightness) {
+    final isDark = brightness == Brightness.dark;
+    final textColor = isDark ? Colors.white : const Color(0xFF1A1A1A);
+    final mutedColor = isDark ? Colors.white.withValues(alpha: 0.6) : const Color(0xFF6C757D);
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: isDark ? const Color(0xFF1A1A1A) : Colors.white,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (_) => SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.grey.withValues(alpha: 0.3), borderRadius: BorderRadius.circular(2))),
+            const SizedBox(height: 20),
+            const Icon(Icons.workspace_premium_rounded, size: 48, color: Colors.amber),
+            const SizedBox(height: 12),
+            Text('Premium kommt bald!', style: GoogleFonts.inter(fontSize: 20, fontWeight: FontWeight.w800, color: textColor)),
+            const SizedBox(height: 8),
+            Text('Wir arbeiten an exklusiven Features für Premium-Mitglieder:', style: GoogleFonts.inter(fontSize: 13, color: mutedColor), textAlign: TextAlign.center),
+            const SizedBox(height: 16),
+            _premiumFeature(Icons.verified_rounded, 'Verifiziertes Profil', 'Blauer Haken für dein Profil', textColor, mutedColor),
+            _premiumFeature(Icons.trending_up_rounded, 'Profil-Boost', 'Mehr Sichtbarkeit im Feed & Dating', textColor, mutedColor),
+            _premiumFeature(Icons.navigation_rounded, 'Pro Navigation', 'Erweiterte Routenplanung & Offroad-Karten', textColor, mutedColor),
+            _premiumFeature(Icons.place_rounded, 'Exklusive POIs', 'Geheime Biker-Spots, Scenic Routes & Treffpunkte', textColor, mutedColor),
+            _premiumFeature(Icons.block_rounded, 'Keine Werbung', 'Werbefreie Nutzung der App', textColor, mutedColor),
+            _premiumFeature(Icons.palette_rounded, 'Exklusive Themes', 'Besondere Farbdesigns für dein Profil', textColor, mutedColor),
+            _premiumFeature(Icons.analytics_rounded, 'Detaillierte Statistiken', 'Erweiterte Einblicke in dein Profil', textColor, mutedColor),
+            const SizedBox(height: 16),
+            Text('Benachrichtigung folgt, sobald Premium verfügbar ist.', style: GoogleFonts.inter(fontSize: 12, color: mutedColor), textAlign: TextAlign.center),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _premiumFeature(IconData icon, String title, String subtitle, Color textColor, Color mutedColor) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        children: [
+          Icon(icon, size: 20, color: Colors.amber),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600, color: textColor)),
+                Text(subtitle, style: GoogleFonts.inter(fontSize: 11, color: mutedColor)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showXpInfoSheet(BuildContext context, int xp, int level, Color accentColor, [List<BadgeInfo> badges = const []]) {
+    _showUnifiedXpSheet(context, xp, level, badges, accentColor);
+  }
+
   void _showLevelAndBadgesSheet(BuildContext context, int level, int xp, List<BadgeInfo> badges, Color accentColor) {
+    _showUnifiedXpSheet(context, xp, level, badges, accentColor);
+  }
+
+  void _showUnifiedXpSheet(BuildContext context, int xp, int level, List<BadgeInfo> badges, Color accentColor) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final xpForNext = level * 100;
     final progress = xp / xpForNext;
@@ -1062,6 +2037,122 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                       style: GoogleFonts.inter(fontSize: 11, color: subCol)),
                   ],
                 ),
+
+                const SizedBox(height: 28),
+
+                // So verdienst du XP
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text('So verdienst du XP', style: GoogleFonts.inter(fontSize: 17, fontWeight: FontWeight.w800, color: textCol)),
+                ),
+                const SizedBox(height: 4),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text('Bleib aktiv und steige schneller auf!', style: GoogleFonts.inter(fontSize: 12, color: subCol)),
+                ),
+                const SizedBox(height: 12),
+
+                ...[
+                  ('🏍', 'Fahren', '+1 XP/km', 'Jeder gefahrene Kilometer zählt'),
+                  ('🎯', 'Distanz-Bonus', '+100 XP/1000 km', 'Bonus für Vielfahrer'),
+                  ('📸', 'Beitrag posten', '+5 XP', 'Zeig dein Bike & deine Touren'),
+                  ('❤️', 'Like geben', '+1 XP', 'Unterstütze andere Biker'),
+                  ('💖', 'Like erhalten', '+2 XP', 'Teile tolle Inhalte'),
+                  ('💬', 'Kommentar', '+2 XP', 'Beteilige dich an Diskussionen'),
+                  ('📖', 'Story liken', '+1 XP', 'Reagiere auf Stories'),
+                  ('📖', 'Story kommentieren', '+2 XP', 'Schreib was zur Story'),
+                  ('👥', 'Neuer Follower', '+2 XP', 'Werde bekannter in der Community'),
+                  ('💰', 'Artikel verkaufen', '+10 XP', 'Handel auf dem Marktplatz'),
+                  ('📅', 'Täglicher Login', '+3 XP', 'Komm jeden Tag vorbei'),
+                  ('🔥', '7-Tage-Streak', '+50 XP', '7 Tage am Stück eingeloggt'),
+                  ('🔥', '30-Tage-Streak', '+200 XP', '30 Tage am Stück — Respekt!'),
+                ].map((item) => Container(
+                  margin: const EdgeInsets.only(bottom: 8),
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: isDark ? Colors.white.withValues(alpha: 0.05) : Colors.black.withValues(alpha: 0.03),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Row(
+                    children: [
+                      Text(item.$1, style: const TextStyle(fontSize: 24)),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(item.$2, style: GoogleFonts.inter(fontSize: 14, fontWeight: FontWeight.w700, color: textCol)),
+                            Text(item.$4, style: GoogleFonts.inter(fontSize: 11, color: subCol)),
+                          ],
+                        ),
+                      ),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: accentColor.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(item.$3, style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w700, color: accentColor)),
+                      ),
+                    ],
+                  ),
+                )),
+
+                const SizedBox(height: 28),
+
+                // XP-Abstufung
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text('XP-Abstufung', style: GoogleFonts.inter(fontSize: 17, fontWeight: FontWeight.w800, color: textCol)),
+                ),
+                const SizedBox(height: 4),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text('Je 100 XP steigst du ein Level auf', style: GoogleFonts.inter(fontSize: 12, color: subCol)),
+                ),
+                const SizedBox(height: 16),
+
+                ...[
+                  ('🌱', 'Rookie', 1, 4, '0 – 399 XP', 'Dein Start in die Community'),
+                  ('🏍', 'Rider', 5, 9, '400 – 899 XP', 'Du bist aktiv unterwegs!'),
+                  ('🔥', 'Pro', 10, 14, '900 – 1.399 XP', 'Respektiertes Community-Mitglied'),
+                  ('⭐', 'Veteran', 15, 19, '1.400 – 1.899 XP', 'Erfahrener Fahrer & Kenner'),
+                  ('👑', 'Legend', 20, 20, '1.900+ XP', 'Die Legende der Community'),
+                ].map((tier) {
+                  final isCurrentTier = level >= tier.$3 && level <= tier.$4;
+                  return Container(
+                    margin: const EdgeInsets.only(bottom: 10),
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: isCurrentTier ? accentColor.withValues(alpha: 0.12) : (isDark ? Colors.white.withValues(alpha: 0.05) : Colors.black.withValues(alpha: 0.03)),
+                      borderRadius: BorderRadius.circular(16),
+                      border: isCurrentTier ? Border.all(color: accentColor.withValues(alpha: 0.5), width: 1.5) : null,
+                    ),
+                    child: Row(
+                      children: [
+                        Text(tier.$1, style: const TextStyle(fontSize: 32)),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(children: [
+                                Text(tier.$2, style: GoogleFonts.inter(fontSize: 16, fontWeight: FontWeight.w800, color: isCurrentTier ? accentColor : textCol)),
+                                const SizedBox(width: 8),
+                                Text('Lv. ${tier.$3}–${tier.$4}', style: GoogleFonts.inter(fontSize: 12, color: subCol)),
+                              ]),
+                              const SizedBox(height: 2),
+                              Text(tier.$5, style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600, color: isCurrentTier ? accentColor : subCol)),
+                              Text(tier.$6, style: GoogleFonts.inter(fontSize: 11, color: subCol)),
+                            ],
+                          ),
+                        ),
+                        if (isCurrentTier) Icon(Icons.arrow_right_alt_rounded, color: accentColor, size: 24)
+                        else if (level > tier.$4) Icon(Icons.check_circle_rounded, color: accentColor.withValues(alpha: 0.5), size: 20),
+                      ],
+                    ),
+                  );
+                }),
 
                 const SizedBox(height: 28),
 
@@ -1345,18 +2436,17 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
       _AchievementTile(icon: Icons.speed_rounded, color: Colors.orange, value: '$_totalPs PS', label: 'PS gesamt', numericValue: _totalPs.toDouble(), maxValue: (_totalPs > 0 ? _totalPs * 1.5 : 500).toDouble()),
       _AchievementTile(icon: Icons.settings_rounded, color: Colors.blueGrey, value: '$_totalCcm ccm', label: 'CCM gesamt', numericValue: _totalCcm.toDouble(), maxValue: (_totalCcm > 0 ? _totalCcm * 1.5 : 2000).toDouble()),
       _AchievementTile(icon: Icons.route_rounded, color: Colors.green, value: '${_totalKm.toStringAsFixed(1)} km', label: 'Gefahrene km', numericValue: _totalKm, maxValue: _totalKm > 0 ? _totalKm * 1.5 : 1000),
-      _AchievementTile(icon: Icons.sell_rounded, color: Colors.teal, value: '$_soldCount', label: 'Verkaufte Artikel', numericValue: _soldCount.toDouble(), maxValue: (_soldCount > 0 ? _soldCount * 2 : 10).toDouble()),
     ];
 
     Navigator.of(context, rootNavigator: true).push(MaterialPageRoute(
-      builder: (_) => Scaffold(
+      builder: (routeContext) => Scaffold(
         backgroundColor: scaffoldBg,
         appBar: AppBar(
           backgroundColor: cardBg,
           title: Text('Statistiken', style: GoogleFonts.inter(fontWeight: FontWeight.w700, color: textColor)),
           leading: IconButton(
             icon: Icon(Icons.arrow_back_rounded, color: textColor),
-            onPressed: () => Navigator.of(context).pop(),
+            onPressed: () => Navigator.of(routeContext).pop(),
           ),
           elevation: 0,
         ),
@@ -1427,7 +2517,6 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
       _AchievementTile(icon: Icons.speed_rounded, color: Colors.orange, value: '$_totalPs', label: 'PS gesamt'),
       _AchievementTile(icon: Icons.settings_rounded, color: Colors.blueGrey, value: '$_totalCcm', label: 'CCM gesamt'),
       _AchievementTile(icon: Icons.route_rounded, color: Colors.green, value: '${_totalKm.toStringAsFixed(1)} km', label: 'Gefahrene km'),
-      _AchievementTile(icon: Icons.sell_rounded, color: Colors.teal, value: '$_soldCount', label: 'Verkauft'),
     ];
 
     return GridView.count(
@@ -1469,8 +2558,56 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     );
   }
 
+  void _openMeinDate(Color accentColor, Brightness brightness, Community? community, {int initialTab = 0}) {
+    _openMySwipes(context, ref, accentColor, brightness, community, initialTab: initialTab);
+  }
+
+  void _openMatchesList(Color accentColor, Brightness brightness, Community? community) {
+    final isDark = brightness == Brightness.dark;
+    final cardBg = community?.cardFor(brightness) ?? (isDark ? const Color(0xFF1A1A1A) : Colors.white);
+    final scaffoldBg = community?.scaffoldFor(brightness) ?? (isDark ? Colors.black : const Color(0xFFF5F5F5));
+    final textColor = isDark ? Colors.white : const Color(0xFF1A1A1A);
+    final mutedColor = isDark ? Colors.white.withValues(alpha: 0.5) : const Color(0xFF6C757D);
+    final uid = Supabase.instance.client.auth.currentUser?.id;
+    if (uid == null) return;
+
+    Navigator.of(context, rootNavigator: true).push(MaterialPageRoute(
+      builder: (_) => _MatchesListScreen(
+        userId: uid,
+        accentColor: accentColor,
+        cardBg: cardBg,
+        scaffoldBg: scaffoldBg,
+        textColor: textColor,
+        mutedColor: mutedColor,
+        community: community,
+      ),
+    ));
+  }
+
+  void _openReceivedLikes(Color accentColor, Brightness brightness, Community? community) {
+    final isDark = brightness == Brightness.dark;
+    final cardBg = community?.cardFor(brightness) ?? (isDark ? const Color(0xFF1A1A1A) : Colors.white);
+    final scaffoldBg = community?.scaffoldFor(brightness) ?? (isDark ? Colors.black : const Color(0xFFF5F5F5));
+    final textColor = isDark ? Colors.white : const Color(0xFF1A1A1A);
+    final mutedColor = isDark ? Colors.white.withValues(alpha: 0.5) : const Color(0xFF6C757D);
+    final uid = Supabase.instance.client.auth.currentUser?.id;
+    if (uid == null) return;
+
+    Navigator.of(context, rootNavigator: true).push(MaterialPageRoute(
+      builder: (_) => _ReceivedLikesScreen(
+        userId: uid,
+        accentColor: accentColor,
+        cardBg: cardBg,
+        scaffoldBg: scaffoldBg,
+        textColor: textColor,
+        mutedColor: mutedColor,
+        community: community,
+      ),
+    ));
+  }
+
   // ── "Mein Date" — Swipe-Historie Overlay ──
-  void _openMySwipes(BuildContext context, WidgetRef ref, Color accentColor, Brightness brightness, Community? community) {
+  void _openMySwipes(BuildContext context, WidgetRef ref, Color accentColor, Brightness brightness, Community? community, {int initialTab = 0}) {
     final isDark = brightness == Brightness.dark;
     final cardBg = community?.cardFor(brightness) ?? (isDark ? const Color(0xFF1A1A1A) : Colors.white);
     final scaffoldBg = community?.scaffoldFor(brightness) ?? (isDark ? Colors.black : const Color(0xFFF5F5F5));
@@ -1488,6 +2625,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
         textColor: textColor,
         mutedColor: mutedColor,
         community: community,
+        initialTab: initialTab,
       ),
     ));
   }
@@ -1784,6 +2922,7 @@ class _MySwipesScreen extends StatefulWidget {
     required this.textColor,
     required this.mutedColor,
     this.community,
+    this.initialTab = 0,
   });
 
   final String userId;
@@ -1793,6 +2932,7 @@ class _MySwipesScreen extends StatefulWidget {
   final Color textColor;
   final Color mutedColor;
   final Community? community;
+  final int initialTab;
 
   @override
   State<_MySwipesScreen> createState() => _MySwipesScreenState();
@@ -1808,7 +2948,7 @@ class _MySwipesScreenState extends State<_MySwipesScreen> with SingleTickerProvi
   @override
   void initState() {
     super.initState();
-    _tabCtrl = TabController(length: 3, vsync: this);
+    _tabCtrl = TabController(length: 3, vsync: this, initialIndex: widget.initialTab.clamp(0, 2));
     _loadData();
   }
 
@@ -1874,16 +3014,24 @@ class _MySwipesScreenState extends State<_MySwipesScreen> with SingleTickerProvi
       }
 
       if (!mounted) return;
+
+      // Filter: Minderjährige komplett ausschließen
+      bool _isAdult(Map<String, dynamic> entry) {
+        final by = entry['birth_year'] as int?;
+        if (by == null) return true; // kein Geburtsjahr = anzeigen
+        return (DateTime.now().year - by) >= 18;
+      }
+
       setState(() {
         _likes = likesRes.map((r) {
           final p = profileMap[r['swiped_id']] ?? {};
           return {...p, 'swipe_date': r['created_at']};
-        }).toList();
+        }).where(_isAdult).toList();
 
         _nopes = nopesRes.map((r) {
           final p = profileMap[r['swiped_id']] ?? {};
           return {...p, 'swipe_date': r['created_at']};
-        }).toList();
+        }).where(_isAdult).toList();
 
         _matches = matchesRes.map((r) {
           final otherId = r['user1_id'] == widget.userId
@@ -1891,7 +3039,7 @@ class _MySwipesScreenState extends State<_MySwipesScreen> with SingleTickerProvi
               : r['user1_id'] as String;
           final p = profileMap[otherId] ?? {};
           return {...p, 'conversation_id': r['conversation_id'], 'match_date': r['created_at']};
-        }).toList();
+        }).where(_isAdult).toList();
 
         _loading = false;
       });
@@ -2097,6 +3245,70 @@ class _MySwipesScreenState extends State<_MySwipesScreen> with SingleTickerProvi
     }
   }
 
+  Future<void> _handleUnmatch(Map<String, dynamic> item, int index) async {
+    final targetId = item['id'] as String?;
+    if (targetId == null) return;
+    final name = item['display_name'] ?? item['bikername'] ?? item['username'] ?? '?';
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text('Entmatchen', style: GoogleFonts.inter(fontWeight: FontWeight.w700)),
+        content: Text('Möchtest du $name wirklich entmatchen? Das Match und die Konversation werden gelöscht.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text('Abbrechen', style: GoogleFonts.inter(fontWeight: FontWeight.w600)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text('Entmatchen', style: GoogleFonts.inter(fontWeight: FontWeight.w700, color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    final sb = Supabase.instance.client;
+    final communityName = widget.community?.name ?? 'bikergram';
+
+    try {
+      // Delete match row (both directions)
+      await sb.from('matches').delete().or(
+        'and(user1_id.eq.${widget.userId},user2_id.eq.$targetId),'
+        'and(user1_id.eq.$targetId,user2_id.eq.${widget.userId})',
+      );
+
+      // Delete swipe records (both directions)
+      await sb.from('profile_swipes').delete()
+          .eq('swiper_id', widget.userId)
+          .eq('swiped_id', targetId)
+          .eq('community', communityName);
+      await sb.from('profile_swipes').delete()
+          .eq('swiper_id', targetId)
+          .eq('swiped_id', widget.userId)
+          .eq('community', communityName);
+
+      setState(() => _matches.removeAt(index));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('$name wurde entmatcht'),
+            backgroundColor: Colors.orange.withValues(alpha: 0.9),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Fehler: $e')),
+        );
+      }
+    }
+  }
+
   Widget _buildList(List<Map<String, dynamic>> items, {bool isLikes = false, bool isMatches = false, bool isNopes = false}) {
     if (items.isEmpty) {
       return Center(
@@ -2239,7 +3451,7 @@ class _MySwipesScreenState extends State<_MySwipesScreen> with SingleTickerProvi
                               ],
                             ),
                             Text(
-                              isMatches ? '💬 Nachricht schreiben'
+                              isMatches ? '💬 Tippen → Chat · Wischen → Löschen'
                                   : isLikes ? '← Wischen zum Löschen'
                                   : '← Wischen zum Löschen',
                               style: GoogleFonts.inter(
@@ -2251,7 +3463,7 @@ class _MySwipesScreenState extends State<_MySwipesScreen> with SingleTickerProvi
                           ],
                         ),
                       ),
-                      // Action button: Dislike / Entnope / Match icon
+                      // Action button: Dislike / Entnope / Entmatchen
                       if (isLikes || isNopes)
                         GestureDetector(
                           onTap: () => _handleSwipeAction(item, isLikes: isLikes, index: i),
@@ -2289,9 +3501,35 @@ class _MySwipesScreenState extends State<_MySwipesScreen> with SingleTickerProvi
                             ),
                           ),
                         )
-                      else
-                        Icon(Icons.local_fire_department_rounded,
-                            color: Colors.orange, size: 22),
+                      else if (isMatches)
+                        GestureDetector(
+                          onTap: () => _handleUnmatch(item, i),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: Colors.orange.withValues(alpha: 0.1),
+                              borderRadius: BorderRadius.circular(10),
+                              border: Border.all(
+                                color: Colors.orange.withValues(alpha: 0.3),
+                              ),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.link_off_rounded, size: 16, color: Colors.orange),
+                                const SizedBox(width: 4),
+                                Text(
+                                  'Entmatchen',
+                                  style: GoogleFonts.inter(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w700,
+                                    color: Colors.orange,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
                     ],
                   ),
                 ),
@@ -2300,6 +3538,720 @@ class _MySwipesScreenState extends State<_MySwipesScreen> with SingleTickerProvi
           ),
         );
       },
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────
+// Archive Tab Widgets
+// ─────────────────────────────────────────────────────
+
+/// Tab 1: Gespeicherte Beiträge (reuses saved-posts logic)
+class _ArchiveSavedPostsTab extends ConsumerStatefulWidget {
+  final Color accentColor;
+  final Community? community;
+  const _ArchiveSavedPostsTab({required this.accentColor, this.community});
+
+  @override
+  ConsumerState<_ArchiveSavedPostsTab> createState() => _ArchiveSavedPostsTabState();
+}
+
+class _ArchiveSavedPostsTabState extends ConsumerState<_ArchiveSavedPostsTab>
+    with AutomaticKeepAliveClientMixin {
+  final _scrollController = ScrollController();
+  List<Post> _posts = [];
+  bool _isLoading = true;
+  bool _isLoadingMore = false;
+  bool _hasMore = true;
+  int _page = 1;
+
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+    _scrollController.addListener(() {
+      if (_scrollController.position.pixels >= _scrollController.position.maxScrollExtent - 200) {
+        _loadMore();
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    setState(() { _isLoading = true; _page = 1; });
+    try {
+      final repo = ref.read(feedRepositoryProvider);
+      final result = await repo.getSavedPosts(page: 1);
+      if (!mounted) return;
+      setState(() { _posts = result.posts; _hasMore = result.hasMore; _isLoading = false; });
+    } catch (e) {
+      debugPrint('[ArchivePosts] $e');
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _loadMore() async {
+    if (_isLoadingMore || !_hasMore) return;
+    setState(() => _isLoadingMore = true);
+    try {
+      final repo = ref.read(feedRepositoryProvider);
+      final next = _page + 1;
+      final result = await repo.getSavedPosts(page: next);
+      if (!mounted) return;
+      setState(() { _posts = [..._posts, ...result.posts]; _hasMore = result.hasMore; _page = next; _isLoadingMore = false; });
+    } catch (_) {
+      if (mounted) setState(() => _isLoadingMore = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    if (_isLoading) return const Center(child: CircularProgressIndicator(strokeWidth: 2));
+    if (_posts.isEmpty) {
+      return Center(child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.bookmark_border_rounded, size: 48, color: Colors.grey.withValues(alpha: 0.3)),
+          const SizedBox(height: 12),
+          Text('Keine gespeicherten Beiträge', style: GoogleFonts.inter(fontSize: 15, color: Colors.grey)),
+        ],
+      ));
+    }
+    return RefreshIndicator(
+      color: widget.accentColor,
+      onRefresh: _load,
+      child: ListView.builder(
+        controller: _scrollController,
+        padding: EdgeInsets.zero,
+        itemCount: _posts.length + (_isLoadingMore ? 1 : 0),
+        itemBuilder: (context, i) {
+          if (i == _posts.length) {
+            return const Padding(padding: EdgeInsets.all(24), child: Center(child: SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2.5))));
+          }
+          final post = _posts[i];
+          return PostCard(
+            key: ValueKey(post.id),
+            post: post,
+            accentColor: widget.accentColor,
+            communityName: widget.community?.name,
+            onLike: () async {
+              final lockSecs = await ref.read(feedNotifierProvider.notifier).toggleLike(post.id);
+              if (lockSecs != null && mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Bitte warte $lockSecs Sekunden'), backgroundColor: Colors.orange.shade700, behavior: SnackBarBehavior.floating, duration: const Duration(seconds: 3)));
+                return;
+              }
+              final idx = _posts.indexWhere((p) => p.id == post.id);
+              if (idx != -1) setState(() { _posts[idx] = _posts[idx].copyWith(likedByMe: !_posts[idx].likedByMe, likeCount: _posts[idx].likeCount + (_posts[idx].likedByMe ? -1 : 1)); });
+            },
+            onSave: () async {
+              try {
+                await ref.read(feedRepositoryProvider).toggleSave(post.id);
+                if (!mounted) return;
+                setState(() => _posts = _posts.where((p) => p.id != post.id).toList());
+                ref.read(feedNotifierProvider.notifier).toggleSave(post.id);
+              } catch (_) {}
+            },
+            onComment: () => CommentsSheet.show(context, post.id, postUserId: post.userId),
+            onEdit: () {},
+            onDelete: () {},
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// Tab 2: Archivierte Nachrichten
+class _ArchiveMessagesTab extends ConsumerStatefulWidget {
+  final Color accentColor;
+  final Color textCol;
+  final Color subCol;
+  final Color scaffoldBg;
+  const _ArchiveMessagesTab({required this.accentColor, required this.textCol, required this.subCol, required this.scaffoldBg});
+
+  @override
+  ConsumerState<_ArchiveMessagesTab> createState() => _ArchiveMessagesTabState();
+}
+
+class _ArchiveMessagesTabState extends ConsumerState<_ArchiveMessagesTab>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    final state = ref.watch(messagesNotifierProvider);
+
+    if (state.isLoading) return const Center(child: CircularProgressIndicator(strokeWidth: 2));
+
+    final archived = state.conversations.where((c) => c.archivedAt != null && c.deletedAt == null).toList();
+
+    if (archived.isEmpty) {
+      return Center(child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.archive_outlined, size: 48, color: Colors.grey.withValues(alpha: 0.3)),
+          const SizedBox(height: 12),
+          Text('Keine archivierten Nachrichten', style: GoogleFonts.inter(fontSize: 15, color: Colors.grey)),
+        ],
+      ));
+    }
+
+    return RefreshIndicator(
+      color: widget.accentColor,
+      onRefresh: () => ref.read(messagesNotifierProvider.notifier).refresh(),
+      child: ListView.builder(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        itemCount: archived.length,
+        itemBuilder: (ctx, i) {
+          final conv = archived[i];
+          final isDark = Theme.of(context).brightness == Brightness.dark;
+          return Dismissible(
+            key: ValueKey('arch_msg_${conv.id}'),
+            direction: DismissDirection.endToStart,
+            background: Container(
+              alignment: Alignment.centerRight,
+              padding: const EdgeInsets.only(right: 20),
+              color: Colors.green.withValues(alpha: 0.15),
+              child: const Icon(Icons.unarchive_rounded, color: Colors.green),
+            ),
+            onDismissed: (_) => ref.read(messagesNotifierProvider.notifier).unarchiveConversation(conv.id),
+            child: ListTile(
+              contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+              leading: CircleAvatar(
+                radius: 24,
+                backgroundImage: conv.otherAvatarUrl != null ? NetworkImage(conv.otherAvatarUrl!) : null,
+                backgroundColor: isDark ? Colors.white12 : Colors.black12,
+                child: conv.otherAvatarUrl == null ? Icon(Icons.person, color: isDark ? Colors.white54 : Colors.black38, size: 22) : null,
+              ),
+              title: Text(conv.otherUsername ?? 'Unbekannt', style: GoogleFonts.inter(fontSize: 14, fontWeight: FontWeight.w600, color: widget.textCol)),
+              subtitle: conv.lastMessageBody != null
+                  ? Text(conv.lastMessageBody!, style: GoogleFonts.inter(fontSize: 12, color: widget.subCol), maxLines: 1, overflow: TextOverflow.ellipsis)
+                  : null,
+              trailing: Icon(Icons.chevron_right_rounded, color: widget.subCol, size: 20),
+              onTap: () => context.push('/messages/${conv.id}'),
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// Tab 3: Archivierte Marketplace-Artikel
+class _ArchiveListingsTab extends ConsumerStatefulWidget {
+  final Color accentColor;
+  final Color textCol;
+  final Color subCol;
+  final Color cardCol;
+  final bool isDark;
+  const _ArchiveListingsTab({required this.accentColor, required this.textCol, required this.subCol, required this.cardCol, required this.isDark});
+
+  @override
+  ConsumerState<_ArchiveListingsTab> createState() => _ArchiveListingsTabState();
+}
+
+class _ArchiveListingsTabState extends ConsumerState<_ArchiveListingsTab>
+    with AutomaticKeepAliveClientMixin {
+  late Future<List<MarketplaceListing>> _future;
+
+  @override
+  bool get wantKeepAlive => true;
+
+  @override
+  void initState() {
+    super.initState();
+    _future = MarketplaceRepository().getArchivedListings();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+    return FutureBuilder<List<MarketplaceListing>>(
+      future: _future,
+      builder: (ctx, snap) {
+        if (snap.connectionState == ConnectionState.waiting) return const Center(child: CircularProgressIndicator(strokeWidth: 2));
+        final items = snap.data ?? [];
+        if (items.isEmpty) {
+          return Center(child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.inventory_2_outlined, size: 48, color: Colors.grey.withValues(alpha: 0.3)),
+              const SizedBox(height: 12),
+              Text('Keine archivierten Artikel', style: GoogleFonts.inter(fontSize: 15, color: Colors.grey)),
+            ],
+          ));
+        }
+        return ListView.builder(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+          itemCount: items.length,
+          itemBuilder: (ctx, i) {
+            final listing = items[i];
+            return Container(
+              margin: const EdgeInsets.only(bottom: 10),
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: widget.cardCol,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: widget.isDark ? Colors.white.withValues(alpha: 0.06) : Colors.black.withValues(alpha: 0.08)),
+              ),
+              child: Row(children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(10),
+                  child: SizedBox(
+                    width: 60, height: 60,
+                    child: listing.images.isNotEmpty
+                        ? Image.network(listing.images.first, fit: BoxFit.cover,
+                            errorBuilder: (_, __, ___) => Container(color: Colors.white.withValues(alpha: 0.05), child: Icon(Icons.image_outlined, size: 24, color: widget.subCol)))
+                        : Container(color: Colors.white.withValues(alpha: 0.05), child: Icon(Icons.image_outlined, size: 24, color: widget.subCol)),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(listing.title, style: GoogleFonts.inter(fontSize: 14, fontWeight: FontWeight.w600, color: widget.textCol), maxLines: 1, overflow: TextOverflow.ellipsis),
+                    if (listing.price != null)
+                      Text('${listing.price!.toStringAsFixed(2)} ${listing.currency}', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700, color: widget.accentColor)),
+                    if (listing.createdAt != null)
+                      Text('${listing.createdAt!.day.toString().padLeft(2, '0')}.${listing.createdAt!.month.toString().padLeft(2, '0')}.${listing.createdAt!.year}',
+                        style: GoogleFonts.inter(fontSize: 11, color: widget.subCol)),
+                  ],
+                )),
+                IconButton(
+                  icon: Icon(Icons.unarchive_rounded, color: widget.accentColor, size: 22),
+                  tooltip: 'Wiederherstellen',
+                  onPressed: () async {
+                    try {
+                      await MarketplaceRepository().reactivateListing(listing.id);
+                      if (ctx.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('„${listing.title}" wiederhergestellt'), duration: const Duration(seconds: 2)));
+                        ref.read(marketplaceNotifierProvider.notifier).loadListings();
+                        setState(() { _future = MarketplaceRepository().getArchivedListings(); });
+                      }
+                    } catch (e) {
+                      if (ctx.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Fehler: $e'), backgroundColor: Colors.red));
+                    }
+                  },
+                ),
+                IconButton(
+                  icon: Icon(Icons.delete_outline_rounded, color: Colors.red.shade400, size: 22),
+                  tooltip: 'Endgültig löschen',
+                  onPressed: () async {
+                    final confirm = await showDialog<bool>(
+                      context: context,
+                      builder: (dCtx) => AlertDialog(
+                        backgroundColor: widget.cardCol,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                        title: Text('Endgültig löschen?', style: GoogleFonts.inter(fontWeight: FontWeight.w700, color: widget.textCol)),
+                        content: Text('„${listing.title}" wird unwiderruflich gelöscht.', style: GoogleFonts.inter(color: widget.subCol)),
+                        actions: [
+                          TextButton(onPressed: () => Navigator.pop(dCtx, false), child: Text('Abbrechen', style: TextStyle(color: widget.subCol))),
+                          TextButton(onPressed: () => Navigator.pop(dCtx, true), child: Text('Löschen', style: GoogleFonts.inter(color: Colors.red, fontWeight: FontWeight.w600))),
+                        ],
+                      ),
+                    );
+                    if (confirm == true) {
+                      try {
+                        await MarketplaceRepository().deleteListing(listing.id);
+                        if (ctx.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('„${listing.title}" gelöscht'), duration: const Duration(seconds: 2)));
+                          setState(() { _future = MarketplaceRepository().getArchivedListings(); });
+                        }
+                      } catch (e) {
+                        if (ctx.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Fehler: $e'), backgroundColor: Colors.red));
+                      }
+                    }
+                  },
+                ),
+              ]),
+            );
+          },
+        );
+      },
+    );
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 💕 Received Likes — Wer hat mich geliked?
+// ══════════════════════════════════════════════════════════════════════════════
+
+class _ReceivedLikesScreen extends StatefulWidget {
+  const _ReceivedLikesScreen({
+    required this.userId,
+    required this.accentColor,
+    required this.cardBg,
+    required this.scaffoldBg,
+    required this.textColor,
+    required this.mutedColor,
+    this.community,
+  });
+
+  final String userId;
+  final Color accentColor;
+  final Color cardBg;
+  final Color scaffoldBg;
+  final Color textColor;
+  final Color mutedColor;
+  final Community? community;
+
+  @override
+  State<_ReceivedLikesScreen> createState() => _ReceivedLikesScreenState();
+}
+
+class _ReceivedLikesScreenState extends State<_ReceivedLikesScreen> {
+  List<Map<String, dynamic>> _likers = [];
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final sb = Supabase.instance.client;
+    try {
+      // Get users who liked me (from profile_swipes)
+      final swipes = await sb
+          .from('profile_swipes')
+          .select('swiper_id, created_at')
+          .eq('swiped_id', widget.userId)
+          .eq('is_like', true)
+          .order('created_at', ascending: false)
+          .limit(100);
+
+      // Also get matches (partner liked me too)
+      final matches = await sb
+          .from('matches')
+          .select('user1_id, user2_id, created_at')
+          .or('user1_id.eq.${widget.userId},user2_id.eq.${widget.userId}')
+          .order('created_at', ascending: false)
+          .limit(100);
+
+      final allIds = <String>{};
+      for (final s in swipes) allIds.add(s['swiper_id'] as String);
+      for (final m in matches) {
+        final u1 = m['user1_id'] as String;
+        final u2 = m['user2_id'] as String;
+        allIds.add(u1 == widget.userId ? u2 : u1);
+      }
+
+      if (allIds.isEmpty) {
+        if (mounted) setState(() { _likers = []; _loading = false; });
+        return;
+      }
+
+      final profiles = await sb
+          .from('profiles')
+          .select('id, username, display_name, avatar_url, birth_year')
+          .inFilter('id', allIds.toList());
+
+      final profileMap = <String, Map<String, dynamic>>{};
+      for (final p in profiles) profileMap[p['id'] as String] = Map<String, dynamic>.from(p);
+
+      final result = <Map<String, dynamic>>[];
+      final seen = <String>{};
+
+      // Add match partners first (they liked me + we matched)
+      for (final m in matches) {
+        final u1 = m['user1_id'] as String;
+        final u2 = m['user2_id'] as String;
+        final partnerId = u1 == widget.userId ? u2 : u1;
+        if (seen.contains(partnerId)) continue;
+        seen.add(partnerId);
+        final profile = profileMap[partnerId];
+        if (profile != null) {
+          result.add({...profile, 'is_match': true, 'liked_at': m['created_at']});
+        }
+      }
+
+      // Add likers who are not matches
+      for (final s in swipes) {
+        final swiperId = s['swiper_id'] as String;
+        if (seen.contains(swiperId)) continue;
+        seen.add(swiperId);
+        final profile = profileMap[swiperId];
+        if (profile != null) {
+          result.add({...profile, 'is_match': false, 'liked_at': s['created_at']});
+        }
+      }
+
+      if (mounted) setState(() { _likers = result; _loading = false; });
+    } catch (e) {
+      debugPrint('[Dating] ReceivedLikes error: $e');
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: widget.scaffoldBg,
+      appBar: AppBar(
+        backgroundColor: widget.scaffoldBg,
+        surfaceTintColor: Colors.transparent,
+        leading: IconButton(
+          onPressed: () => Navigator.pop(context),
+          icon: Icon(Icons.arrow_back_rounded, color: widget.textColor),
+        ),
+        title: Text(
+          '❤️ Likes erhalten',
+          style: GoogleFonts.inter(fontSize: 20, fontWeight: FontWeight.w700, color: widget.textColor),
+        ),
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator(strokeWidth: 2))
+          : _likers.isEmpty
+              ? Center(child: Text('Noch keine Likes erhalten', style: GoogleFonts.inter(color: widget.mutedColor)))
+              : ListView.separated(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  itemCount: _likers.length,
+                  separatorBuilder: (_, __) => const SizedBox(height: 8),
+                  itemBuilder: (context, i) {
+                    final liker = _likers[i];
+                    final username = liker['username'] as String? ?? 'User';
+                    final displayName = liker['display_name'] as String?;
+                    final avatarUrl = liker['avatar_url'] as String?;
+                    final isMatch = liker['is_match'] as bool? ?? false;
+                    final uid = liker['id'] as String;
+
+                    return GestureDetector(
+                      onTap: () => GoRouter.of(context).push('/profile/$uid?showDating=true'),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                        decoration: BoxDecoration(
+                          color: widget.cardBg,
+                          borderRadius: BorderRadius.circular(14),
+                          border: isMatch ? Border.all(color: Colors.pinkAccent.withValues(alpha: 0.3)) : null,
+                        ),
+                        child: Row(
+                          children: [
+                            CircleAvatar(
+                              radius: 24,
+                              backgroundImage: avatarUrl != null ? NetworkImage(avatarUrl) : null,
+                              backgroundColor: widget.accentColor.withValues(alpha: 0.1),
+                              child: avatarUrl == null ? Icon(Icons.person_rounded, color: widget.mutedColor) : null,
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    displayName ?? username,
+                                    style: GoogleFonts.inter(fontSize: 15, fontWeight: FontWeight.w600, color: widget.textColor),
+                                  ),
+                                  Text(
+                                    '@$username',
+                                    style: GoogleFonts.inter(fontSize: 12, color: widget.mutedColor),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            if (isMatch)
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                decoration: BoxDecoration(
+                                  color: Colors.pinkAccent.withValues(alpha: 0.1),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: Text('Match 🔥', style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w600, color: Colors.pinkAccent)),
+                              )
+                            else
+                              Icon(Icons.favorite_rounded, color: Colors.redAccent.withValues(alpha: 0.5), size: 20),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
+    );
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🔥 Matches Liste
+// ══════════════════════════════════════════════════════════════════════════════
+
+class _MatchesListScreen extends StatefulWidget {
+  const _MatchesListScreen({
+    required this.userId,
+    required this.accentColor,
+    required this.cardBg,
+    required this.scaffoldBg,
+    required this.textColor,
+    required this.mutedColor,
+    this.community,
+  });
+
+  final String userId;
+  final Color accentColor;
+  final Color cardBg;
+  final Color scaffoldBg;
+  final Color textColor;
+  final Color mutedColor;
+  final Community? community;
+
+  @override
+  State<_MatchesListScreen> createState() => _MatchesListScreenState();
+}
+
+class _MatchesListScreenState extends State<_MatchesListScreen> {
+  List<Map<String, dynamic>> _matches = [];
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final sb = Supabase.instance.client;
+    try {
+      final matches = await sb
+          .from('matches')
+          .select('user1_id, user2_id, conversation_id, created_at')
+          .or('user1_id.eq.${widget.userId},user2_id.eq.${widget.userId}')
+          .order('created_at', ascending: false)
+          .limit(100);
+
+      final partnerIds = <String>[];
+      final matchData = <String, Map<String, dynamic>>{};
+      for (final m in matches) {
+        final u1 = m['user1_id'] as String;
+        final u2 = m['user2_id'] as String;
+        final partnerId = u1 == widget.userId ? u2 : u1;
+        partnerIds.add(partnerId);
+        matchData[partnerId] = Map<String, dynamic>.from(m);
+      }
+
+      if (partnerIds.isEmpty) {
+        if (mounted) setState(() { _matches = []; _loading = false; });
+        return;
+      }
+
+      final profiles = await sb
+          .from('profiles')
+          .select('id, username, display_name, avatar_url')
+          .inFilter('id', partnerIds);
+
+      final profileMap = <String, Map<String, dynamic>>{};
+      for (final p in profiles) profileMap[p['id'] as String] = Map<String, dynamic>.from(p);
+
+      final result = <Map<String, dynamic>>[];
+      for (final pid in partnerIds) {
+        final profile = profileMap[pid];
+        if (profile != null) {
+          result.add({
+            ...profile,
+            'conversation_id': matchData[pid]?['conversation_id'],
+            'matched_at': matchData[pid]?['created_at'],
+          });
+        }
+      }
+
+      if (mounted) setState(() { _matches = result; _loading = false; });
+    } catch (e) {
+      debugPrint('[Dating] MatchesList error: $e');
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: widget.scaffoldBg,
+      appBar: AppBar(
+        backgroundColor: widget.scaffoldBg,
+        surfaceTintColor: Colors.transparent,
+        leading: IconButton(
+          onPressed: () => Navigator.pop(context),
+          icon: Icon(Icons.arrow_back_rounded, color: widget.textColor),
+        ),
+        title: Text(
+          '🔥 Meine Matches',
+          style: GoogleFonts.inter(fontSize: 20, fontWeight: FontWeight.w700, color: widget.textColor),
+        ),
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator(strokeWidth: 2))
+          : _matches.isEmpty
+              ? Center(child: Text('Noch keine Matches', style: GoogleFonts.inter(color: widget.mutedColor)))
+              : ListView.separated(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  itemCount: _matches.length,
+                  separatorBuilder: (_, __) => const SizedBox(height: 8),
+                  itemBuilder: (context, i) {
+                    final match = _matches[i];
+                    final username = match['username'] as String? ?? 'User';
+                    final displayName = match['display_name'] as String?;
+                    final avatarUrl = match['avatar_url'] as String?;
+                    final uid = match['id'] as String;
+                    final convId = match['conversation_id'];
+
+                    return GestureDetector(
+                      onTap: () {
+                        if (convId != null) {
+                          GoRouter.of(context).push('/messages/$convId');
+                        } else {
+                          GoRouter.of(context).push('/profile/$uid');
+                        }
+                      },
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                        decoration: BoxDecoration(
+                          color: widget.cardBg,
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(color: Colors.pinkAccent.withValues(alpha: 0.2)),
+                        ),
+                        child: Row(
+                          children: [
+                            CircleAvatar(
+                              radius: 24,
+                              backgroundImage: avatarUrl != null ? NetworkImage(avatarUrl) : null,
+                              backgroundColor: Colors.pinkAccent.withValues(alpha: 0.1),
+                              child: avatarUrl == null ? Icon(Icons.person_rounded, color: widget.mutedColor) : null,
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    displayName ?? username,
+                                    style: GoogleFonts.inter(fontSize: 15, fontWeight: FontWeight.w600, color: widget.textColor),
+                                  ),
+                                  Text(
+                                    '@$username',
+                                    style: GoogleFonts.inter(fontSize: 12, color: widget.mutedColor),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            Icon(
+                              convId != null ? Icons.chat_bubble_rounded : Icons.person_rounded,
+                              color: Colors.pinkAccent.withValues(alpha: 0.5),
+                              size: 20,
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  },
+                ),
     );
   }
 }

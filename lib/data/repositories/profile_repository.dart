@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../domain/xp_calculator.dart';
 
 class ProfileRepository {
   SupabaseClient get _supabase => Supabase.instance.client;
@@ -65,6 +66,8 @@ class ProfileRepository {
     int? motoStartAge,
     int? carStartAge,
     bool? hasTrackExperience,
+    String? gender,
+    String? showGender,
     double? homeLat,
     double? homeLng,
   }) async {
@@ -89,6 +92,8 @@ class ProfileRepository {
     if (hasTrackExperience != null) {
       updates['has_track_experience'] = hasTrackExperience;
     }
+    if (gender != null) updates['gender'] = gender;
+    if (showGender != null) updates['show_gender'] = showGender;
 
     await _supabase.from('profiles').update(updates).eq('id', userId);
 
@@ -236,6 +241,8 @@ class ProfileRepository {
         'follower_id': userId,
         'following_id': targetUserId,
       });
+      // +2 XP for the person being followed (gaining a follower)
+      XpCalculator.awardXp(targetUserId, XpCalculator.xpNewFollower, 'new_follower');
       return true;
     }
   }

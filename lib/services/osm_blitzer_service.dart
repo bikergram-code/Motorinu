@@ -18,7 +18,7 @@ class OsmBlitzerService {
   OsmBlitzerService._();
   static final instance = OsmBlitzerService._();
 
-  static const _cacheKey = 'osm_blitzer_cache_v3'; // v3: all of Germany
+  static const _cacheKey = 'osm_blitzer_cache_v4'; // v4: extended tags (traffic_signals, surveillance)
   static const _cacheTimestampKey = 'osm_blitzer_cache_ts_v3';
   static const _cacheDuration = Duration(days: 7); // Refresh weekly
 
@@ -134,6 +134,10 @@ class OsmBlitzerService {
   way["highway"="speed_camera"]($_deSouth,$_deWest,$_deNorth,$_deEast);
   node["enforcement"="maxspeed"]($_deSouth,$_deWest,$_deNorth,$_deEast);
   way["enforcement"="maxspeed"]($_deSouth,$_deWest,$_deNorth,$_deEast);
+  node["enforcement"="traffic_signals"]($_deSouth,$_deWest,$_deNorth,$_deEast);
+  node["enforcement"="check"]($_deSouth,$_deWest,$_deNorth,$_deEast);
+  node["enforcement"="average_speed"]($_deSouth,$_deWest,$_deNorth,$_deEast);
+  node["man_made"="surveillance"]["surveillance:type"="camera"]["surveillance:zone"="traffic"]($_deSouth,$_deWest,$_deNorth,$_deEast);
 );
 out center body;
 ''';

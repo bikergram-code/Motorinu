@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../domain/models/post.dart';
+import '../../domain/xp_calculator.dart';
 
 class FeedRepository {
   FeedRepository();
@@ -464,6 +465,9 @@ class FeedRepository {
 
     final post = Post.fromSupabase(data, currentUserId: _currentUserId);
 
+    // Award +5 XP for posting (via central method)
+    XpCalculator.awardXp(userId, XpCalculator.xpPostCreated, 'post_created');
+
     // Insert topic tags (≤3)
     if (topicIds != null && topicIds.isNotEmpty) {
       final topicRows = topicIds.take(3).map((tid) => {
@@ -506,12 +510,33 @@ class FeedRepository {
   // ═══════════════════════════════════════════════════
 
   /// Toggle like on a post using the RPC function.
+  /// Awards XP: +1 to liker, +2 to post owner (on like only, not unlike).
   Future<bool> toggleLike(int postId) async {
     final result = await _supabase.rpc('toggle_like', params: {
       'p_post_id': postId,
     });
 
-    return result['liked'] == true;
+    final liked = result['liked'] == true;
+    if (liked) {
+      final myId = _currentUserId;
+      if (myId != null) {
+        // +1 XP for giving a like
+        XpCalculator.awardXp(myId, XpCalculator.xpLikeGiven, 'like_given');
+        // +2 XP for the post owner (receiving a like)
+        try {
+          final post = await _supabase
+              .from('posts')
+              .select('user_id')
+              .eq('id', postId)
+              .single();
+          final ownerId = post['user_id'] as String?;
+          if (ownerId != null && ownerId != myId) {
+            XpCalculator.awardXp(ownerId, XpCalculator.xpLikeReceived, 'like_received');
+          }
+        } catch (_) {}
+      }
+    }
+    return liked;
   }
 
   /// Toggle a reaction on a post. Returns {liked: bool, reaction: String?}.

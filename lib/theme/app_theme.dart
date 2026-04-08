@@ -9,7 +9,7 @@ class AppTheme {
   // Midnight Chrome Color Palette
   static const Color primaryLight = Color(0xFF1A1A1A); // Deep charcoal
   static const Color secondaryLight = Color(0xFF4A4A4A); // Medium gray
-  static const Color accentLight = Color(0xFFFF6B35); // Vibrant orange
+  static const Color accentLight = Color(0xFFCC0000); // Ducati red
   static const Color surfaceLight = Color(0xFFFFFFFF); // Pure white
   static const Color backgroundLight = Color(0xFFF8F9FA); // Subtle off-white
   static const Color successLight = Color(0xFF28A745); // Standard green
@@ -28,7 +28,7 @@ class AppTheme {
   // Dark theme colors (optimized for OLED displays)
   static const Color primaryDark = Color(0xFFFFFFFF);
   static const Color secondaryDark = Color(0xFFB0B0B0);
-  static const Color accentDark = Color(0xFFFF6B35);
+  static const Color accentDark = Color(0xFFCC0000); // Ducati red
   static const Color surfaceDark = Color(0xFF1A1A1A);
   static const Color backgroundDark = Color(0xFF000000);
   static const Color successDark = Color(0xFF28A745);

@@ -24,7 +24,7 @@ class StoryBarData {
 }
 
 /// Provider that fetches active stories from the stories table.
-final storyUsersProvider = FutureProvider<StoryBarData>((ref) async {
+final storyUsersProvider = FutureProvider.autoDispose<StoryBarData>((ref) async {
   final supabase = Supabase.instance.client;
   final userId = supabase.auth.currentUser?.id;
   if (userId == null) return const StoryBarData();
@@ -336,15 +336,16 @@ class StoryBar extends ConsumerWidget {
   }
 
   Future<void> _createStory(BuildContext context, WidgetRef ref, Color accentColor) async {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     // Show media type picker: Foto, Video, Kamera
     final mediaChoice = await showModalBottomSheet<String>(
       context: context,
       backgroundColor: Colors.transparent,
       builder: (ctx) => SafeArea(
         child: Container(
-          decoration: const BoxDecoration(
-            color: Color(0xFF1A1A1A),
-            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+          decoration: BoxDecoration(
+            color: isDark ? const Color(0xFF1A1A1A) : Colors.white,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -353,7 +354,7 @@ class StoryBar extends ConsumerWidget {
                 margin: const EdgeInsets.only(top: 12),
                 width: 36, height: 4,
                 decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.15),
+                  color: isDark ? Colors.white.withValues(alpha: 0.15) : Colors.black.withValues(alpha: 0.1),
                   borderRadius: BorderRadius.circular(2),
                 ),
               ),
@@ -363,7 +364,7 @@ class StoryBar extends ConsumerWidget {
                 style: GoogleFonts.inter(
                   fontSize: 18,
                   fontWeight: FontWeight.w700,
-                  color: Colors.white,
+                  color: isDark ? Colors.white : const Color(0xFF202124),
                 ),
               ),
               const SizedBox(height: 16),
@@ -371,18 +372,21 @@ class StoryBar extends ConsumerWidget {
                 icon: Icons.photo_library_rounded,
                 label: 'Foto aus Galerie',
                 color: accentColor,
+                isDark: isDark,
                 onTap: () => Navigator.pop(ctx, 'photo'),
               ),
               _StoryMediaOption(
                 icon: Icons.videocam_rounded,
                 label: 'Video aus Galerie',
                 color: const Color(0xFFE040FB),
+                isDark: isDark,
                 onTap: () => Navigator.pop(ctx, 'video'),
               ),
               _StoryMediaOption(
                 icon: Icons.camera_alt_rounded,
                 label: 'Kamera',
                 color: const Color(0xFF00E676),
+                isDark: isDark,
                 onTap: () => Navigator.pop(ctx, 'camera'),
               ),
               const SizedBox(height: 16),
@@ -420,24 +424,25 @@ class StoryBar extends ConsumerWidget {
     // Ask for optional caption
     String? caption;
     final captionController = TextEditingController();
+    final brightness = Theme.of(context).brightness;
     caption = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF222222),
+        backgroundColor: brightness == Brightness.dark ? const Color(0xFF222222) : Colors.white,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: Text('Story-Text',
             style: GoogleFonts.inter(
-                fontSize: 17, fontWeight: FontWeight.w700, color: Colors.white)),
+                fontSize: 17, fontWeight: FontWeight.w700, color: brightness == Brightness.dark ? Colors.white : const Color(0xFF1A1A1A))),
         content: TextField(
           controller: captionController,
           autofocus: true,
           maxLength: 200,
           maxLines: 3,
-          style: GoogleFonts.inter(fontSize: 15, color: Colors.white),
+          style: GoogleFonts.inter(fontSize: 15, color: brightness == Brightness.dark ? Colors.white : const Color(0xFF1A1A1A)),
           decoration: InputDecoration(
             hintText: 'Text hinzuf\u00fcgen (optional)',
             hintStyle: GoogleFonts.inter(
-                fontSize: 15, color: Colors.white.withValues(alpha: 0.3)),
+                fontSize: 15, color: brightness == Brightness.dark ? Colors.white.withValues(alpha: 0.3) : const Color(0xFF9E9E9E)),
             border: InputBorder.none,
           ),
         ),
@@ -445,7 +450,7 @@ class StoryBar extends ConsumerWidget {
           TextButton(
             onPressed: () => Navigator.pop(ctx, ''),
             child: Text('\u00dcberspringen',
-                style: GoogleFonts.inter(color: Colors.white.withValues(alpha: 0.5))),
+                style: GoogleFonts.inter(color: brightness == Brightness.dark ? Colors.white.withValues(alpha: 0.5) : const Color(0xFF9E9E9E))),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(ctx, captionController.text.trim()),
@@ -456,7 +461,10 @@ class StoryBar extends ConsumerWidget {
         ],
       ),
     );
-    captionController.dispose();
+    // Don't dispose captionController here — Flutter still rebuilds the
+    // Overlay/Dialog tree after Navigator.pop(). Disposing now causes
+    // "TextEditingController used after being disposed" red screen.
+    // The controller is GC'd automatically when the dialog is gone.
 
     if (!context.mounted) return;
     // null = dialog dismissed entirely
@@ -515,9 +523,9 @@ class StoryBar extends ConsumerWidget {
         uploaded++;
       }
 
+      if (!context.mounted) return;
       ref.invalidate(storyUsersProvider);
 
-      if (!context.mounted) return;
       ScaffoldMessenger.of(context).hideCurrentSnackBar();
       final successMsg = uploaded == 1
           ? 'Story ver\u00f6ffentlicht! \u2705'
@@ -619,29 +627,36 @@ class _StoryItem extends StatelessWidget {
                             ],
                           ),
               ),
-              child: Container(
+              child: Builder(builder: (ctx) {
+                final isDk = Theme.of(ctx).brightness == Brightness.dark;
+                return Container(
                 padding: const EdgeInsets.all(2),
-                decoration: const BoxDecoration(
+                decoration: BoxDecoration(
                   shape: BoxShape.circle,
-                  color: Colors.black,
+                  color: isDk ? Colors.black : Colors.white,
                 ),
                 child: data.isOwn ? _buildOwnAvatar() : _buildUserAvatar(),
-              ),
+              );
+              }),
             ),
             const SizedBox(height: 6),
-            Text(
-              data.username,
-              style: GoogleFonts.inter(
-                fontSize: 11,
-                fontWeight:
-                    data.hasUnread ? FontWeight.w600 : FontWeight.w400,
-                color: Colors.white
-                    .withValues(alpha: data.hasUnread ? 0.9 : 0.5),
-              ),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              textAlign: TextAlign.center,
-            ),
+            Builder(builder: (ctx) {
+              final isDark = Theme.of(ctx).brightness == Brightness.dark;
+              return Text(
+                data.username,
+                style: GoogleFonts.inter(
+                  fontSize: 11,
+                  fontWeight:
+                      data.hasUnread ? FontWeight.w600 : FontWeight.w400,
+                  color: isDark
+                      ? Colors.white.withValues(alpha: data.hasUnread ? 0.9 : 0.5)
+                      : (data.hasUnread ? const Color(0xFF202124) : const Color(0xFF5F6368)),
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.center,
+              );
+            }),
           ],
         ),
       ),
@@ -747,12 +762,14 @@ class _StoryMediaOption extends StatelessWidget {
     required this.label,
     required this.color,
     required this.onTap,
+    this.isDark = true,
   });
 
   final IconData icon;
   final String label;
   final Color color;
   final VoidCallback onTap;
+  final bool isDark;
 
   @override
   Widget build(BuildContext context) {
@@ -769,7 +786,7 @@ class _StoryMediaOption extends StatelessWidget {
                 height: 44,
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(12),
-                  color: color.withValues(alpha: 0.15),
+                  color: color.withValues(alpha: isDark ? 0.15 : 0.08),
                 ),
                 child: Icon(icon, color: color, size: 22),
               ),
@@ -779,13 +796,13 @@ class _StoryMediaOption extends StatelessWidget {
                 style: GoogleFonts.inter(
                   fontSize: 16,
                   fontWeight: FontWeight.w500,
-                  color: Colors.white,
+                  color: isDark ? Colors.white : const Color(0xFF202124),
                 ),
               ),
               const Spacer(),
               Icon(
                 Icons.chevron_right_rounded,
-                color: Colors.white.withValues(alpha: 0.2),
+                color: isDark ? Colors.white.withValues(alpha: 0.2) : const Color(0xFFBDC1C6),
                 size: 22,
               ),
             ],

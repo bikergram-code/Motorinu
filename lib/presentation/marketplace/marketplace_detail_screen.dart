@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:confetti/confetti.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -409,6 +410,8 @@ class _MarketplaceDetailScreenState extends ConsumerState<MarketplaceDetailScree
                             if (v) {
                               // Record transaction for bookkeeping
                               _recordTransaction(listing.id, listing.price, listing.userId);
+                              // 🎉 Konfetti für den Verkäufer!
+                              _showSoldConfetti(listing.title, listing.price ?? 0);
                             }
                             setState(() => _listing = updated);
                           },
@@ -751,10 +754,15 @@ class _MarketplaceDetailScreenState extends ConsumerState<MarketplaceDetailScree
 
     if (confirmed == true && mounted) {
       try {
-        // 1. Mark as sold
-        final repo = MarketplaceRepository();
-        final updated = await repo.markAsSold(listing.id);
-        setState(() => _listing = updated);
+        // 1. Mark as sold via RPC (handles RLS, XP for buyer+seller)
+        final sb = Supabase.instance.client;
+        final result = await sb.rpc('marketplace_buy', params: {'p_listing_id': listing.id});
+        if (result != null) {
+          final json = result is String ? jsonDecode(result) as Map<String, dynamic> : result as Map<String, dynamic>;
+          // Reconstruct profiles sub-object for fromJson
+          json['profiles'] = {'username': json.remove('username'), 'avatar_url': json.remove('avatar_url')};
+          setState(() => _listing = MarketplaceListing.fromJson(json));
+        }
 
         // 1b. Record transaction for bookkeeping
         _recordTransaction(listing.id, listing.price, listing.userId);
@@ -773,15 +781,9 @@ class _MarketplaceDetailScreenState extends ConsumerState<MarketplaceDetailScree
         });
         await msgRepo.sendMessage(convId, buyJson, messageType: 'vehicle_offer');
 
-        // 4. Navigate to chat
+        // 4. Show confetti celebration + address dialog, then navigate to chat
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              backgroundColor: Colors.green.shade600,
-              content: Text('🛒 Kauf bestätigt! Kläre die Abwicklung im Chat.'),
-            ),
-          );
-          context.push('/messages/$convId');
+          await _showBuyConfetti(listing.title, listing.price ?? 0, convId);
         }
       } catch (e) {
         if (mounted) {
@@ -789,6 +791,301 @@ class _MarketplaceDetailScreenState extends ConsumerState<MarketplaceDetailScree
         }
       }
     }
+  }
+
+  Future<void> _showBuyConfetti(String vehicleName, double price, int convId) async {
+    final confettiCtrl = ConfettiController(duration: const Duration(seconds: 8));
+    confettiCtrl.play();
+    final priceStr = price.toStringAsFixed(0);
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    await showDialog(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) => Stack(
+        children: [
+          AlertDialog(
+            backgroundColor: isDark ? Colors.grey.shade900 : Colors.white,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+            title: Text('🎉 Kauf abgeschlossen!',
+              textAlign: TextAlign.center,
+              style: GoogleFonts.inter(fontSize: 20, fontWeight: FontWeight.w800)),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('$vehicleName für $priceStr €',
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.inter(fontSize: 16, fontWeight: FontWeight.w600)),
+                const SizedBox(height: 8),
+                Text('Kläre die Abwicklung jetzt im Chat mit dem Verkäufer.',
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.inter(fontSize: 13, color: Colors.grey)),
+                const SizedBox(height: 16),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      confettiCtrl.dispose();
+                      _showSendAddressSheet(convId);
+                    },
+                    icon: const Icon(Icons.location_on_rounded, size: 18),
+                    label: Text('Adresse senden', style: GoogleFonts.inter(fontSize: 14, fontWeight: FontWeight.w600)),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.green.shade600,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                TextButton(
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    confettiCtrl.dispose();
+                    context.push('/messages/$convId');
+                  },
+                  child: Text('Direkt zum Chat →', style: GoogleFonts.inter(fontSize: 15, fontWeight: FontWeight.w700)),
+                ),
+              ],
+            ),
+          ),
+          // Top confetti rain
+          Align(
+            alignment: Alignment.topCenter,
+            child: ConfettiWidget(
+              confettiController: confettiCtrl,
+              blastDirectionality: BlastDirectionality.explosive,
+              shouldLoop: true,
+              numberOfParticles: 50,
+              maxBlastForce: 30,
+              minBlastForce: 8,
+              emissionFrequency: 0.08,
+              gravity: 0.15,
+              colors: const [Colors.green, Colors.orange, Colors.red, Colors.blue, Colors.yellow, Colors.purple, Colors.pink, Colors.teal],
+            ),
+          ),
+          // Left side rain
+          Align(
+            alignment: Alignment.topLeft,
+            child: ConfettiWidget(
+              confettiController: confettiCtrl,
+              blastDirection: -1.0,
+              shouldLoop: true,
+              numberOfParticles: 20,
+              maxBlastForce: 25,
+              minBlastForce: 5,
+              emissionFrequency: 0.06,
+              gravity: 0.1,
+              colors: const [Colors.amber, Colors.greenAccent, Colors.deepOrange, Colors.lightBlue, Colors.pinkAccent],
+            ),
+          ),
+          // Right side rain
+          Align(
+            alignment: Alignment.topRight,
+            child: ConfettiWidget(
+              confettiController: confettiCtrl,
+              blastDirection: -2.1,
+              shouldLoop: true,
+              numberOfParticles: 20,
+              maxBlastForce: 25,
+              minBlastForce: 5,
+              emissionFrequency: 0.06,
+              gravity: 0.1,
+              colors: const [Colors.lime, Colors.cyan, Colors.redAccent, Colors.indigoAccent, Colors.orangeAccent],
+            ),
+          ),
+        ],
+      ),
+    ).then((_) { try { confettiCtrl.dispose(); } catch (_) {} });
+  }
+
+  Future<void> _showSoldConfetti(String vehicleName, double price) async {
+    final confettiCtrl = ConfettiController(duration: const Duration(seconds: 8));
+    confettiCtrl.play();
+    final priceStr = price.toStringAsFixed(0);
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final fee = CommissionCalculator.calculate(price);
+    final netStr = (price - fee).toStringAsFixed(0);
+
+    await showDialog(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) => Stack(
+        children: [
+          AlertDialog(
+            backgroundColor: isDark ? Colors.grey.shade900 : Colors.white,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+            title: Text('🎉 Verkauft!',
+              textAlign: TextAlign.center,
+              style: GoogleFonts.inter(fontSize: 22, fontWeight: FontWeight.w800)),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(vehicleName,
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.inter(fontSize: 16, fontWeight: FontWeight.w600)),
+                const SizedBox(height: 8),
+                Text('$netStr € Erlös',
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.inter(fontSize: 24, fontWeight: FontWeight.w800, color: Colors.green.shade600)),
+                const SizedBox(height: 4),
+                Text('(Verkaufspreis: $priceStr €)',
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.inter(fontSize: 12, color: Colors.grey)),
+                const SizedBox(height: 12),
+                Text('Glückwunsch zum erfolgreichen Verkauf! 🏍️',
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.inter(fontSize: 14, color: Colors.grey.shade600)),
+                const SizedBox(height: 16),
+                TextButton(
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    confettiCtrl.dispose();
+                  },
+                  child: Text('Super! 🎊', style: GoogleFonts.inter(fontSize: 16, fontWeight: FontWeight.w700)),
+                ),
+              ],
+            ),
+          ),
+          Align(
+            alignment: Alignment.topCenter,
+            child: ConfettiWidget(
+              confettiController: confettiCtrl,
+              blastDirectionality: BlastDirectionality.explosive,
+              shouldLoop: true,
+              numberOfParticles: 50,
+              maxBlastForce: 30,
+              minBlastForce: 8,
+              emissionFrequency: 0.08,
+              gravity: 0.15,
+              colors: const [Colors.green, Colors.orange, Colors.red, Colors.blue, Colors.yellow, Colors.purple, Colors.pink, Colors.teal],
+            ),
+          ),
+          Align(
+            alignment: Alignment.topLeft,
+            child: ConfettiWidget(
+              confettiController: confettiCtrl,
+              blastDirection: -1.0,
+              shouldLoop: true,
+              numberOfParticles: 20,
+              maxBlastForce: 25,
+              minBlastForce: 5,
+              emissionFrequency: 0.06,
+              gravity: 0.1,
+              colors: const [Colors.amber, Colors.greenAccent, Colors.deepOrange, Colors.lightBlue, Colors.pinkAccent],
+            ),
+          ),
+          Align(
+            alignment: Alignment.topRight,
+            child: ConfettiWidget(
+              confettiController: confettiCtrl,
+              blastDirection: -2.1,
+              shouldLoop: true,
+              numberOfParticles: 20,
+              maxBlastForce: 25,
+              minBlastForce: 5,
+              emissionFrequency: 0.06,
+              gravity: 0.1,
+              colors: const [Colors.lime, Colors.cyan, Colors.redAccent, Colors.indigoAccent, Colors.orangeAccent],
+            ),
+          ),
+        ],
+      ),
+    ).then((_) { try { confettiCtrl.dispose(); } catch (_) {} });
+  }
+
+  void _showSendAddressSheet(int convId) {
+    final nameCtrl = TextEditingController();
+    final addrCtrl = TextEditingController();
+    final phoneCtrl = TextEditingController();
+
+    // Pre-fill from profile
+    final sb = Supabase.instance.client;
+    final userId = sb.auth.currentUser?.id;
+    if (userId != null) {
+      sb.from('profiles').select('display_name, phone').eq('id', userId).maybeSingle().then((p) {
+        if (p != null) {
+          nameCtrl.text = (p['display_name'] as String?) ?? '';
+          phoneCtrl.text = (p['phone'] as String?) ?? '';
+        }
+      });
+    }
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => Padding(
+        padding: EdgeInsets.fromLTRB(20, 20, 20, MediaQuery.of(ctx).viewInsets.bottom + 20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('📬 Kontaktdaten senden', style: GoogleFonts.inter(fontSize: 17, fontWeight: FontWeight.w700)),
+            const SizedBox(height: 16),
+            TextField(
+              controller: nameCtrl,
+              decoration: InputDecoration(
+                labelText: 'Name',
+                prefixIcon: const Icon(Icons.person_rounded),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: addrCtrl,
+              maxLines: 2,
+              decoration: InputDecoration(
+                labelText: 'Adresse (Straße, PLZ, Ort)',
+                prefixIcon: const Icon(Icons.location_on_rounded),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: phoneCtrl,
+              keyboardType: TextInputType.phone,
+              decoration: InputDecoration(
+                labelText: 'Telefonnummer',
+                prefixIcon: const Icon(Icons.phone_rounded),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+            ),
+            const SizedBox(height: 16),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                onPressed: () async {
+                  final parts = <String>[];
+                  if (nameCtrl.text.trim().isNotEmpty) parts.add('👤 ${nameCtrl.text.trim()}');
+                  if (addrCtrl.text.trim().isNotEmpty) parts.add('📍 ${addrCtrl.text.trim()}');
+                  if (phoneCtrl.text.trim().isNotEmpty) parts.add('📞 ${phoneCtrl.text.trim()}');
+                  if (parts.isNotEmpty) {
+                    final msgRepo = MessageRepository();
+                    await msgRepo.sendMessage(convId, parts.join('\n'));
+                  }
+                  if (mounted) {
+                    Navigator.pop(ctx);
+                    context.push('/messages/$convId');
+                  }
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.green.shade600,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+                child: Text('Senden & zum Chat', style: GoogleFonts.inter(fontSize: 15, fontWeight: FontWeight.w600)),
+              ),
+            ),
+          ],
+        ),
+      ),
+    ).then((_) {
+      // If sheet was dismissed without sending, still navigate to chat
+      if (mounted) context.push('/messages/$convId');
+    });
   }
 
   Future<void> _messageSeller(MarketplaceListing listing) async {

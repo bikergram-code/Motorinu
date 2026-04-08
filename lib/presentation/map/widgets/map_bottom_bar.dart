@@ -41,7 +41,7 @@ class MapBottomBar extends StatelessWidget {
     return Positioned(
       left: 12,
       right: 12,
-      bottom: 8 + bottomPadding,
+      bottom: 58 + bottomPadding,
       child: AnimatedOpacity(
         opacity: mapInteracting ? 0.0 : 1.0,
         duration: const Duration(milliseconds: 200),

@@ -115,6 +115,7 @@ class _ChatInputBarState extends State<ChatInputBar> {
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -124,10 +125,10 @@ class _ChatInputBarState extends State<ChatInputBar> {
         // Input row
         Container(
           decoration: BoxDecoration(
-            color: const Color(0xFF0D0D0D),
+            color: isDark ? const Color(0xFF0D0D0D) : Colors.white,
             border: Border(
               top: BorderSide(
-                color: Colors.white.withValues(alpha: 0.06),
+                color: isDark ? Colors.white.withValues(alpha: 0.06) : const Color(0xFFE0E0E0),
                 width: 0.5,
               ),
             ),
@@ -184,6 +185,7 @@ class _ChatInputBarState extends State<ChatInputBar> {
   }
 
   Widget _buildInputRow() {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     return Row(
       crossAxisAlignment: CrossAxisAlignment.end,
       children: [
@@ -192,7 +194,7 @@ class _ChatInputBarState extends State<ChatInputBar> {
           onPressed: widget.onAttachmentTap,
           icon: Icon(
             Icons.add_rounded,
-            color: Colors.white.withValues(alpha: 0.5),
+            color: isDark ? Colors.white.withValues(alpha: 0.5) : const Color(0xFF9E9E9E),
             size: 26,
           ),
           padding: const EdgeInsets.all(6),
@@ -203,7 +205,7 @@ class _ChatInputBarState extends State<ChatInputBar> {
         Expanded(
           child: Container(
             decoration: BoxDecoration(
-              color: const Color(0xFF1A1A1A),
+              color: isDark ? const Color(0xFF1A1A1A) : const Color(0xFFF1F3F4),
               borderRadius: BorderRadius.circular(22),
             ),
             child: Row(
@@ -213,8 +215,10 @@ class _ChatInputBarState extends State<ChatInputBar> {
                   child: TextField(
                     controller: _controller,
                     focusNode: _focusNode,
-                    style:
-                        GoogleFonts.inter(fontSize: 15, color: Colors.white),
+                    style: GoogleFonts.inter(
+                      fontSize: 15,
+                      color: isDark ? Colors.white : const Color(0xFF1A1A1A),
+                    ),
                     maxLines: 4,
                     minLines: 1,
                     textInputAction: TextInputAction.newline,
@@ -225,7 +229,7 @@ class _ChatInputBarState extends State<ChatInputBar> {
                       hintText: 'Nachricht...',
                       hintStyle: GoogleFonts.inter(
                         fontSize: 15,
-                        color: Colors.white.withValues(alpha: 0.25),
+                        color: isDark ? Colors.white.withValues(alpha: 0.25) : const Color(0xFF9E9E9E),
                       ),
                       border: InputBorder.none,
                       contentPadding: const EdgeInsets.symmetric(
@@ -241,7 +245,7 @@ class _ChatInputBarState extends State<ChatInputBar> {
                     _showEmoji
                         ? Icons.keyboard_rounded
                         : Icons.emoji_emotions_outlined,
-                    color: Colors.white.withValues(alpha: 0.4),
+                    color: isDark ? Colors.white.withValues(alpha: 0.4) : const Color(0xFF9E9E9E),
                     size: 22,
                   ),
                   padding: const EdgeInsets.all(6),

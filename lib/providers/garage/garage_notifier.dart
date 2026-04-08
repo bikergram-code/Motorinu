@@ -38,10 +38,10 @@ class GarageNotifier extends Notifier<GarageState> {
     return const GarageState();
   }
 
-  Future<void> loadVehicles() async {
+  Future<void> loadVehicles({String? userId}) async {
     state = state.copyWith(isLoading: true, error: null);
     try {
-      final vehicles = await _repo.getMyVehicles(community: _community);
+      final vehicles = await _repo.getMyVehicles(community: _community, userId: userId);
       state = GarageState(vehicles: vehicles);
     } catch (e) {
       state = state.copyWith(isLoading: false, error: e.toString());
@@ -55,7 +55,9 @@ class GarageNotifier extends Notifier<GarageState> {
     int? displacementCc,
     int? horsepower,
     String? category,
+    String? description,
     String? imageUrl,
+    List<String>? images,
     String? community,
   }) async {
     final vehicle = await _repo.addVehicle(
@@ -65,7 +67,9 @@ class GarageNotifier extends Notifier<GarageState> {
       displacementCc: displacementCc,
       horsepower: horsepower,
       category: category,
+      description: description,
       imageUrl: imageUrl,
+      images: images,
       community: community,
     );
     state = state.copyWith(vehicles: [vehicle, ...state.vehicles]);
@@ -78,7 +82,9 @@ class GarageNotifier extends Notifier<GarageState> {
     int? displacementCc,
     int? horsepower,
     String? category,
+    String? description,
     String? imageUrl,
+    List<String>? images,
   }) async {
     final updates = <String, dynamic>{};
     if (brand != null) updates['brand'] = brand;
@@ -87,7 +93,9 @@ class GarageNotifier extends Notifier<GarageState> {
     if (displacementCc != null) updates['displacement_cc'] = displacementCc;
     if (horsepower != null) updates['horsepower'] = horsepower;
     if (category != null) updates['category'] = category;
+    if (description != null) updates['description'] = description;
     if (imageUrl != null) updates['image_url'] = imageUrl;
+    if (images != null) updates['images'] = images;
 
     if (updates.isEmpty) return;
 

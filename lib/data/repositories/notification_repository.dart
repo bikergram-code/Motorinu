@@ -19,9 +19,9 @@ class NotificationRepository {
         .select()
         .eq('user_id', userId);
 
-    // Strict community filter: only show notifications for this community
+    // Community filter: show matching + unassigned (NULL) notifications
     if (community != null) {
-      query = query.eq('community', community);
+      query = query.or('community.eq.$community,community.is.null');
     }
 
     final data = await query
@@ -55,16 +55,16 @@ class NotificationRepository {
         .eq('user_id', userId)
         .eq('is_read', false);
 
-    // Strict: only mark this community's notifications
+    // Mark matching + unassigned (NULL) notifications
     if (community != null) {
-      query = query.eq('community', community);
+      query = query.or('community.eq.$community,community.is.null');
     }
 
     await query;
   }
 
   /// Get total unread notification count.
-  /// Strictly filtered by [community].
+  /// Includes matching community + unassigned (NULL).
   Future<int> getUnreadCount({String? community}) async {
     final userId = _currentUserId;
     if (userId == null) return 0;
@@ -77,7 +77,7 @@ class NotificationRepository {
           .eq('is_read', false);
 
       if (community != null) {
-        query = query.eq('community', community);
+        query = query.or('community.eq.$community,community.is.null');
       }
 
       final data = await query;

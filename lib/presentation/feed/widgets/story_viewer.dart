@@ -96,8 +96,7 @@ class StoryViewer extends ConsumerStatefulWidget {
   ConsumerState<StoryViewer> createState() => _StoryViewerState();
 }
 
-class _StoryViewerState extends ConsumerState<StoryViewer>
-    with TickerProviderStateMixin {
+class _StoryViewerState extends ConsumerState<StoryViewer> {
   // ── PageView for cube transitions between groups ──
   late PageController _pageController;
   double _currentPageValue = 0.0;
@@ -105,9 +104,11 @@ class _StoryViewerState extends ConsumerState<StoryViewer>
   // ── Per-group story index tracking ──
   final Map<int, int> _storyIndices = {};
 
-  // ── Progress animation ──
-  late AnimationController _progressController;
+  // ── Progress animation (Timer-based, immune to animator_duration_scale) ──
+  double _progress = 0.0;
+  Timer? _progressTimer;
   bool _isPaused = false;
+  static const _tickInterval = Duration(milliseconds: 16); // ~60fps
 
   // ── Like state ──
   bool _liked = false;
@@ -143,23 +144,23 @@ class _StoryViewerState extends ConsumerState<StoryViewer>
       _storyIndices[i] = 0;
     }
 
-    _progressController = AnimationController(
-      vsync: this,
-      duration: _storyDuration,
-    )..addStatusListener((status) {
-        if (status == AnimationStatus.completed) {
-          _nextStory();
-        }
-      });
+    _progressNotifier = ValueNotifier<double>(0.0);
 
-    _startStory();
+    _lastPageIndex = initialGroup;
+
+    // Delay start so it doesn't collide with onPageChanged from initial page settle
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _startStory();
+    });
   }
 
   @override
   void dispose() {
     _pageController.removeListener(_onPageScroll);
     _pageController.dispose();
-    _progressController.dispose();
+    _progressTimer?.cancel();
+    _progressNotifier.dispose();
     super.dispose();
   }
 
@@ -171,16 +172,17 @@ class _StoryViewerState extends ConsumerState<StoryViewer>
       _currentPageValue = page;
     });
 
-    // Pause progress while swiping between groups
-    final isSettled = (page - page.roundToDouble()).abs() < 0.01;
-    if (!isSettled && !_isPaused) {
-      _progressController.stop();
-    } else if (isSettled && !_isPaused && !_progressController.isAnimating) {
-      _progressController.forward();
-    }
+    // Progress is managed by _startStory / _onPageChanged only.
+    // No pause/resume here — cube animation doesn't affect timer.
   }
 
+  int _lastPageIndex = -1;
+
   void _onPageChanged(int pageIndex) {
+    // Skip if this is the same page (initial settle or duplicate call)
+    if (pageIndex == _lastPageIndex) return;
+    _lastPageIndex = pageIndex;
+
     // Reset like state when switching to a new group
     setState(() {
       _liked = false;
@@ -191,9 +193,15 @@ class _StoryViewerState extends ConsumerState<StoryViewer>
 
   // ── Story navigation ────────────────────────────────────────────────────
 
+  late ValueNotifier<double> _progressNotifier;
+
   void _startStory() {
-    _progressController.reset();
-    _progressController.forward();
+    _lastStoryStartTime = DateTime.now();
+    _progressTimer?.cancel();
+    _progress = 0.0;
+    _progressNotifier.value = 0.0;
+    debugPrint('[STORY] _startStory called, group=$_groupIndex story=$_storyIndex');
+    _progressTimer = Timer.periodic(_tickInterval, _onProgressTick);
 
     // Load like info only for other users' stories
     if (!_currentGroup.isOwn) {
@@ -201,7 +209,21 @@ class _StoryViewerState extends ConsumerState<StoryViewer>
     }
   }
 
+  void _onProgressTick(Timer timer) {
+    if (_isPaused || !mounted) return;
+    _progress += _tickInterval.inMilliseconds / _storyDuration.inMilliseconds;
+    if (_progress >= 1.0) {
+      _progress = 1.0;
+      _progressNotifier.value = 1.0;
+      timer.cancel();
+      _nextStory();
+    } else {
+      _progressNotifier.value = _progress;
+    }
+  }
+
   void _nextStory() {
+    debugPrint('[STORY] _nextStory called, group=$_groupIndex story=$_storyIndex');
     final groupIdx = _groupIndex;
     final currentStoryIdx = _storyIndices[groupIdx] ?? 0;
     final group = widget.groups[groupIdx];
@@ -246,7 +268,12 @@ class _StoryViewerState extends ConsumerState<StoryViewer>
     }
   }
 
-  void _onTapDown(TapDownDetails details) {
+  DateTime _lastStoryStartTime = DateTime.now();
+
+  void _onTapUp(TapUpDetails details) {
+    // Ignore taps within 500ms of story start to prevent accidental skips
+    if (DateTime.now().difference(_lastStoryStartTime).inMilliseconds < 500) return;
+
     final screenWidth = MediaQuery.of(context).size.width;
     if (details.globalPosition.dx < screenWidth * 0.3) {
       _prevStory();
@@ -257,12 +284,10 @@ class _StoryViewerState extends ConsumerState<StoryViewer>
 
   void _onLongPressStart(LongPressStartDetails _) {
     _isPaused = true;
-    _progressController.stop();
   }
 
   void _onLongPressEnd(LongPressEndDetails _) {
     _isPaused = false;
-    _progressController.forward();
   }
 
   // ── Like helpers ────────────────────────────────────────────────────────
@@ -328,13 +353,13 @@ class _StoryViewerState extends ConsumerState<StoryViewer>
   // ── Comment ─────────────────────────────────────────────────────────────
 
   Future<void> _openComments() async {
-    _progressController.stop();
+    _isPaused = true;
     await StoryCommentsSheet.show(
       context,
       storyId: _currentStory.id,
       storyUserId: _currentGroup.userId,
     );
-    if (mounted) _progressController.forward();
+    if (mounted) _isPaused = false;
   }
 
   // ── Share ───────────────────────────────────────────────────────────────
@@ -485,7 +510,7 @@ class _StoryViewerState extends ConsumerState<StoryViewer>
         child: Container(
           color: const Color(0xFF1A1A1A),
           child: GestureDetector(
-            onTapDown: _onTapDown,
+            onTapUp: _onTapUp,
             onLongPressStart: _onLongPressStart,
             onLongPressEnd: _onLongPressEnd,
             child: Stack(
@@ -579,8 +604,8 @@ class _StoryViewerState extends ConsumerState<StoryViewer>
                             padding: EdgeInsets.only(
                                 right: i < group.stories.length - 1 ? 4 : 0),
                             child: _ProgressBar(
-                              animation: i == storyIdx
-                                  ? _progressController
+                              progressNotifier: i == storyIdx
+                                  ? _progressNotifier
                                   : null,
                               filled: i < storyIdx,
                               accentColor: widget.accentColor,
@@ -809,12 +834,12 @@ class _StoryViewerState extends ConsumerState<StoryViewer>
 /// A single progress bar segment.
 class _ProgressBar extends StatelessWidget {
   const _ProgressBar({
-    this.animation,
+    this.progressNotifier,
     this.filled = false,
     required this.accentColor,
   });
 
-  final AnimationController? animation;
+  final ValueNotifier<double>? progressNotifier;
   final bool filled;
   final Color accentColor;
 
@@ -832,26 +857,18 @@ class _ProgressBar extends StatelessWidget {
             // Fill
             if (filled)
               Container(color: Colors.white)
-            else if (animation != null)
-              _AnimatedProgressFill(animation: animation!),
+            else if (progressNotifier != null)
+              ValueListenableBuilder<double>(
+                valueListenable: progressNotifier!,
+                builder: (_, value, __) => FractionallySizedBox(
+                  alignment: Alignment.centerLeft,
+                  widthFactor: value.clamp(0.0, 1.0),
+                  child: Container(color: Colors.white),
+                ),
+              ),
           ],
         ),
       ),
-    );
-  }
-}
-
-class _AnimatedProgressFill extends AnimatedWidget {
-  const _AnimatedProgressFill({required AnimationController animation})
-      : super(listenable: animation);
-
-  @override
-  Widget build(BuildContext context) {
-    final anim = listenable as Animation<double>;
-    return FractionallySizedBox(
-      alignment: Alignment.centerLeft,
-      widthFactor: anim.value,
-      child: Container(color: Colors.white),
     );
   }
 }

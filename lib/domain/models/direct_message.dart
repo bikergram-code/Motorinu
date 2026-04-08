@@ -19,6 +19,8 @@ abstract class Conversation with _$Conversation {
     int? groupId,
     String? groupName,
     String? groupAvatarUrl,
+    DateTime? archivedAt,
+    DateTime? deletedAt,
   }) = _Conversation;
 
   factory Conversation.fromJson(Map<String, dynamic> json) =>
@@ -42,6 +44,7 @@ abstract class DirectMessage with _$DirectMessage {
     @Default('text') String messageType, // text, image, audio, location
     @Default(false) bool isRead,
     DateTime? createdAt,
+    DateTime? editedAt,
     // Group chat enrichment
     String? senderName,
     String? senderAvatar,

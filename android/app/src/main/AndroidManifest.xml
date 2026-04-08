@@ -4,6 +4,11 @@
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!--
+      ACCESS_BACKGROUND_LOCATION: Benoetigt fuer Live-Navigation und Gruppenfahrten,
+      damit die GPS-Aufzeichnung weiterlaeuft, wenn der Bildschirm ausgeht.
+      Play Store Data Safety: als Background Location deklarieren, Use Case im Listing erklaeren.
+    -->
     <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
@@ -15,20 +20,30 @@
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE"/>
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <!--
+      USE_EXACT_ALARM: Play Store bevorzugte Variante gegenueber SCHEDULE_EXACT_ALARM.
+      Wird fuer Navigations-Ansagen und Push-Notifications gebraucht (calendar / reminder use case).
+    -->
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
 
     <uses-feature android:name="android.hardware.camera" android:required="false"/>
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false"/>
 
     <application
-            android:label="Motorino"
+            android:label="Motorinu"
             android:name=".BikergramApplication"
             android:icon="@mipmap/ic_launcher"
             android:roundIcon="@mipmap/ic_launcher_round"
             android:enableOnBackInvokedCallback="true"
-            android:usesCleartextTraffic="true">
+            android:networkSecurityConfig="@xml/network_security_config">
         <activity
                 android:name=".MainActivity"
-                android:label="Motorino"
+                android:label="Motorinu"
                 android:exported="true"
                 android:enabled="true"
                 android:launchMode="singleTop"
@@ -45,6 +60,13 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
                 <category android:name="android.intent.category.DEFAULT"/>
             </intent-filter>
+            <!-- Deep link for Supabase auth callback (email confirmation) -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="com.bikergram.app" android:host="login-callback"/>
+            </intent-filter>
         </activity>
 
         <meta-data
@@ -52,8 +74,23 @@
             android:value="AIzaSyCDfLYfcdMx1MBVmVJswpRB8MzPO5nLN9U" />
 
         <meta-data
+            android:name="com.mapbox.token"
+            android:value="pk.eyJ1IjoibW90b3JpbnUiLCJhIjoiY21uNTBzNzZwMDZkMzJwczcyemE4OHB4MyJ9.YZ5rJ2FckyWyuFyEN7ZAXw" />
+
+        <meta-data
                 android:name="flutterEmbedding"
                 android:value="2"/>
+
+        <!-- Firebase Cloud Messaging — default channel for background pushes -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="motorinu_default" />
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_icon"
+            android:resource="@mipmap/ic_launcher" />
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_color"
+            android:resource="@android:color/holo_red_light" />
     </application>
     <queries>
         <intent>

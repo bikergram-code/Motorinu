@@ -42,6 +42,7 @@ import '../../services/poi_search_service.dart';
 import '../../data/repositories/ride_repository.dart';
 import '../../providers/map/map_settings_provider.dart';
 import '../../core/api_config.dart';
+import '../widgets/bug_report_sheet.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 
 // Token moved to ApiConfig to avoid secret-scanning blocks.
@@ -144,6 +145,8 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
   // ── Off-route ──
   int _offRouteCount = 0;
   bool _isRerouting = false;
+  DateTime? _lastRerouteAt;
+  static const Duration _rerouteCooldown = Duration(seconds: 10);
 
   // ── GPS signal ──
   DateTime _lastGpsTime = DateTime.now();
@@ -1334,10 +1337,10 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
           targetZoom = 17.0;
           targetPitch = 15.0;
         } else if (_displaySpeed < 40) {
-          targetZoom = 12.5;
+          targetZoom = 16.0;
           targetPitch = 0.0;
         } else if (_displaySpeed < 60) {
-          targetZoom = 12.5;
+          targetZoom = 15.0;
           targetPitch = 0.0;
         } else if (_displaySpeed < 100) {
           targetZoom = 12.0;
@@ -1373,8 +1376,17 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
           lerpFactor = 0.08;
         }
 
-        _camLat += (_targetLat - _camLat) * lerpFactor;
-        _camLng += (_targetLng - _camLng) * lerpFactor;
+        // Snap-Reset: wenn Kamera zu weit vom Puck weg (> 200m),
+        // sofort hart zentrieren — verhindert dass Puck aus dem Bild wandert.
+        final lagDist = geo.Geolocator.distanceBetween(
+            _camLat, _camLng, _targetLat, _targetLng);
+        if (lagDist > 200) {
+          _camLat = _targetLat;
+          _camLng = _targetLng;
+        } else {
+          _camLat += (_targetLat - _camLat) * lerpFactor;
+          _camLng += (_targetLng - _camLng) * lerpFactor;
+        }
 
         // Bearing lerp — faster at high zoom for smoother feel
         final bearingLerp = _camZoom >= 14.0 ? 0.15 : 0.10;
@@ -1448,7 +1460,10 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
       requiredTicks = 3;
     }
     final dRoute = _minDistToRoute();
-    if (dRoute > offThreshold && !_isRerouting && _displaySpeed > 0) {
+    // Cooldown: mindestens 10s zwischen Reroutes (vermeidet Dauer-Neuberechnung)
+    final cooldownOk = _lastRerouteAt == null ||
+        DateTime.now().difference(_lastRerouteAt!) > _rerouteCooldown;
+    if (dRoute > offThreshold && !_isRerouting && _displaySpeed > 0 && cooldownOk) {
       _offRouteCount++;
       if (_offRouteCount >= requiredTicks) { _offRouteCount = 0; _reroute(); return; }
     } else if (dRoute < resetThreshold) { _offRouteCount = 0; }
@@ -1936,12 +1951,21 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
       if (bytes == null) return;
       _lastPuckBytes = bytes;
 
+      // Scale puck smaller when zoomed out, larger when zoomed in
+      const scaleExpr = '["interpolate",["linear"],["zoom"],'
+          '12,0.35,'
+          '14,0.5,'
+          '16,0.7,'
+          '18,0.9,'
+          '20,1.1]';
+
       _cachedLocationPuck = LocationPuck(
         locationPuck2D: LocationPuck2D(
           topImage: bytes,
           bearingImage: bytes,
           shadowImage: Uint8List(0), // no shadow — we draw our own
           opacity: 1.0,
+          scaleExpression: scaleExpr,
         ),
       );
 
@@ -1958,6 +1982,15 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
     }
   }
 
+  /// Map zoom → nav puck icon scale (smaller when zoomed out).
+  double _navPuckScale(double zoom) {
+    if (zoom >= 20) return 1.1;
+    if (zoom >= 18) return 0.9;
+    if (zoom >= 16) return 0.7;
+    if (zoom >= 14) return 0.5;
+    return 0.35;
+  }
+
   /// Update route-snapped puck position and bearing.
   /// Called every GPS tick during navigation.
   void _updateNavPuck() {
@@ -1970,6 +2003,7 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
     try {
       _navPuckAnnotation!.geometry = Point(coordinates: Position(_snapLng, _snapLat));
       _navPuckAnnotation!.iconRotate = _routeBearing;
+      _navPuckAnnotation!.iconSize = _navPuckScale(_camZoom);
       _navPuckManager!.update(_navPuckAnnotation!);
     } catch (e) {
       debugPrint('[NavPuck] Update error: $e');
@@ -2051,8 +2085,18 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
 
   Future<void> _reroute() async {
     _isRerouting = true;
+    _lastRerouteAt = DateTime.now();
     TtsAlertService.instance.clearQueue();
     _ttsSpeak('Route wird neu berechnet.');
+
+    // Clear stale instruction while rerouting — so turn-arrow doesn't show
+    // the wrong direction (user saw "left" while actually going right etc.)
+    _nextInstruction = 'Neue Route wird berechnet …';
+    _currentManeuver = null;
+    _currentStepRef = null;
+    _currentDestinations = null;
+    _distToManeuver = 0;
+    if (mounted) setState(() {});
 
     // Immediately clear old route lines from map
     if (_mapboxMap != null) {
@@ -2110,6 +2154,9 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
     _setNavPuckMode(false); // Restore native puck
     NavigationState.instance.stopNavigation(); // Show TopBar + BottomNav again
     _ttsSpeak('Navigation beendet.');
+    // Panel nach Navigationsende sofort wieder einblenden
+    _searchPanelTimer?.cancel();
+    _searchPanelHidden = false;
     setState(() {});
   }
 
@@ -2123,6 +2170,9 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
     _setNavPuckMode(false); // Restore native puck
     _followTimer?.cancel();
     NavigationState.instance.stopNavigation(); // Show TopBar + BottomNav again
+    // Panel nach Route-Abbruch sofort wieder einblenden
+    _searchPanelTimer?.cancel();
+    _searchPanelHidden = false;
     // Remove route layers + destination marker
     if (_mapboxMap != null) {
       for (int i = 0; i < 5; i++) {
@@ -2161,6 +2211,21 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
     _speedLimitTimer = Timer.periodic(const Duration(seconds: 3), (_) async {
       if (!mounted) return;
       try {
+        // Priority 0: Navigation step maxspeed (from OSRM route — exact match)
+        // Only use when actually navigating AND the step already has a maxspeed.
+        if (_isNavigating &&
+            _currentRoute != null &&
+            _currentStepIndex < _currentRoute!.steps.length) {
+          final stepLimit = _currentRoute!.steps[_currentStepIndex].maxspeedKmh;
+          if (stepLimit != null) {
+            // 0 = "none" (Autobahn unlimited)
+            if (mounted) {
+              setState(() { _speedLimit = stepLimit; });
+            }
+            return;
+          }
+        }
+
         // Priority 1: HERE API (automotive-grade, 1000 req/day free)
         final hereLimit = await HereSpeedLimitService.instance.getSpeedLimit(
           _lat, _lng, heading: _heading,
@@ -2347,15 +2412,21 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
     // Mode-aware color: red for biker, blue for auto
     final color = _routeMode == RouteMode.auto ? 0xFF2196F3 : 0xFFE53935;
 
+    // Bigger + more opaque so it stays visible over road labels/shields
     await style.addLayer(LineLayer(
       id: layerId,
       sourceId: sourceId,
       lineColor: color,
-      lineWidth: 8.0,
-      lineOpacity: 0.7,
+      lineWidth: 11.0,
+      lineOpacity: 0.92,
       lineCap: LineCap.ROUND,
       lineJoin: LineJoin.ROUND,
     ));
+
+    // Move layer to the very top so nothing (shields, labels) covers it
+    try {
+      await style.moveStyleLayer(layerId, null);
+    } catch (_) {}
   }
 
   // Register emoji as Mapbox image (renders reliably on all devices)
@@ -2814,8 +2885,22 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
       }
       // Add to local blitzer list so it shows on map + alerts work
       _blitzerReports.add(report);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('$label gespeichert (+10 XP)'),
+          backgroundColor: Colors.green,
+          duration: const Duration(seconds: 2),
+        ));
+      }
     } catch (e) {
       debugPrint('[Blitzer] Supabase save failed: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('Speichern fehlgeschlagen: $e'),
+          backgroundColor: Colors.red,
+          duration: const Duration(seconds: 5),
+        ));
+      }
     }
   }
 
@@ -3877,50 +3962,85 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
       (PoiCategory.workshop, Icons.build_rounded, 'Werkstätten', const Color(0xFF9C27B0)),
       (PoiCategory.bikerShop, Icons.two_wheeler, 'Biker Shops', const Color(0xFFE53935)),
       (PoiCategory.autoShop, Icons.directions_car, 'Auto Shops', const Color(0xFF2196F3)),
+      (PoiCategory.hospital, Icons.local_hospital_rounded, 'Krankenhäuser', const Color(0xFFE91E63)),
+      (PoiCategory.bank, Icons.account_balance_rounded, 'Banken', const Color(0xFF607D8B)),
     ];
 
     showModalBottomSheet(
       context: context,
+      isScrollControlled: true,
       backgroundColor: _isDark ? const Color(0xF0111111) : Colors.white,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      builder: (_) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            Text('POIs in der Nähe', style: TextStyle(color: _textPrimary, fontSize: 16, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 12),
-            GridView.count(
-              crossAxisCount: 3,
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              mainAxisSpacing: 10,
-              crossAxisSpacing: 10,
-              childAspectRatio: 1.3,
-              children: categories.map((c) => GestureDetector(
-                onTap: () {
-                  Navigator.pop(context);
-                  _searchPoiAndShowOnMap(c.$1);
-                },
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: _isDark ? const Color(0xFF1E1E2A) : const Color(0xFFF5F5F5),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: c.$4.withValues(alpha: 0.3)),
+      builder: (_) => Padding(
+        padding: EdgeInsets.only(
+          left: 16, right: 16, top: 20,
+          bottom: MediaQuery.of(context).padding.bottom + 16,
+        ),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          // Handle
+          Container(
+            width: 40, height: 4,
+            margin: const EdgeInsets.only(bottom: 14),
+            decoration: BoxDecoration(
+              color: _textPrimary.withValues(alpha: 0.15),
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          Text('POIs in der Nähe', style: TextStyle(color: _textPrimary, fontSize: 16, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 14),
+          GridView.count(
+            crossAxisCount: 3,
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            mainAxisSpacing: 10,
+            crossAxisSpacing: 10,
+            childAspectRatio: 1.05,
+              children: [
+                ...categories.map((c) => GestureDetector(
+                  onTap: () {
+                    Navigator.pop(context);
+                    _searchPoiAndShowOnMap(c.$1);
+                  },
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: _isDark ? const Color(0xFF1E1E2A) : const Color(0xFFF5F5F5),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: c.$4.withValues(alpha: 0.3)),
+                    ),
+                    child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                      Icon(c.$2, color: c.$4, size: 24),
+                      const SizedBox(height: 4),
+                      Text(c.$3, style: TextStyle(color: c.$4, fontSize: 10, fontWeight: FontWeight.w600),
+                        textAlign: TextAlign.center),
+                    ]),
                   ),
-                  child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-                    Icon(c.$2, color: c.$4, size: 24),
-                    const SizedBox(height: 4),
-                    Text(c.$3, style: TextStyle(color: c.$4, fontSize: 10, fontWeight: FontWeight.w600),
-                      textAlign: TextAlign.center),
-                  ]),
+                )),
+                // Treffen — navigiert zur Events-Seite
+                GestureDetector(
+                  onTap: () {
+                    Navigator.pop(context);
+                    context.push('/events');
+                  },
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: _isDark ? const Color(0xFF1E1E2A) : const Color(0xFFF5F5F5),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: const Color(0xFFFF5722).withValues(alpha: 0.3)),
+                    ),
+                    child: const Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                      Icon(Icons.groups_rounded, color: Color(0xFFFF5722), size: 24),
+                      SizedBox(height: 4),
+                      Text('Treffen', style: TextStyle(color: Color(0xFFFF5722), fontSize: 10, fontWeight: FontWeight.w600),
+                        textAlign: TextAlign.center),
+                    ]),
+                  ),
                 ),
-              )).toList(),
+              ],
             ),
           ]),
         ),
-      ),
     );
   }
 
@@ -3933,6 +4053,8 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
       'auto_shop' => const Color(0xFF2196F3),
       'restaurant' => const Color(0xFF4CAF50),
       'cafe' => const Color(0xFF795548),
+      'hospital' => const Color(0xFFE91E63),
+      'bank' => const Color(0xFF607D8B),
       _ => Colors.white,
     };
 
@@ -4294,6 +4416,17 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
             },
             onPointerCancel: (_) {
               _activePointers = (_activePointers - 1).clamp(0, 10);
+              // BUG-FIX: Mapbox cancelt einzelne Finger bei Zoom-Gesten. Wenn
+              // der Zähler hier auf 0 geht, muss auch der Show-Timer starten —
+              // sonst bleibt das Such-Panel für immer versteckt.
+              if (_activePointers == 0 && _searchPanelHidden && !_isNavigating && _currentRoute == null) {
+                _searchPanelTimer?.cancel();
+                _searchPanelTimer = Timer(const Duration(seconds: 3), () {
+                  if (mounted && !_isNavigating && _currentRoute == null) {
+                    setState(() => _searchPanelHidden = false);
+                  }
+                });
+              }
             },
             child: MapWidget(
               key: const ValueKey('mapbox-ride'),
@@ -4579,24 +4712,24 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
 
           // ── SPEED LIMIT (left) — only during navigation ──
           if (_isNavigating && _speedLimit != null && _routeMode != RouteMode.pedestrian)
-            Positioned(left: 16, bottom: (_currentRoute != null ? 260 : 100) + bp,
+            Positioned(left: 16, bottom: (_currentRoute != null ? 200 : 80) + bp,
               child: _speedLimit == 0 ? _buildUnlimitedSign() : _buildSpeedSign()),
 
           // ── SPEED BUBBLE (left) — only during navigation ──
           if (_isNavigating)
-            Positioned(left: 16, bottom: (_currentRoute != null ? 185 : 30) + bp, child: _buildSpeedBubble()),
+            Positioned(left: 16, bottom: (_currentRoute != null ? 130 : 10) + bp, child: _buildSpeedBubble()),
 
-          // ── HI MOTO + GPS TOGGLE (right column) ──
-          // Hide when search field open or scrolling recent destinations
+          // ── RIGHT CONTROL COLUMN ──
+          // All controls in one clean vertical stack
           if (!_searchOpen && !_recentScrolling)
           Positioned(
-            right: 16, bottom: (_currentRoute != null ? 280 : 30) + bp,
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
+            right: 12, bottom: (_currentRoute != null ? 110 : 50) + bp,
+            child: Column(mainAxisSize: MainAxisSize.min, spacing: 14, children: [
               // Info icon
               GestureDetector(
                 onTap: _showHiMotoInfo,
                 child: Container(
-                  width: 24, height: 24, margin: const EdgeInsets.only(bottom: 6),
+                  width: 24, height: 24,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
                     color: _bubbleBg,
@@ -4605,10 +4738,52 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
                   child: Icon(Icons.info_outline, color: _modeColor, size: 14),
                 ),
               ),
-              _buildHiMotoBtn(),
-              const SizedBox(height: 12),
-              // GPS Live Toggle — unter Hi Moto
+              // GPS Live Toggle
               _buildGpsToggle(),
+              // Hi Moto
+              _buildHiMotoBtn(),
+              // 3D Toggle (only during nav)
+              if (_isNavigating)
+                FloatingActionButton.small(
+                  heroTag: '3dtoggle',
+                  backgroundColor: _bubbleBg,
+                  onPressed: () {
+                    setState(() => _is3D = !_is3D);
+                    _mapboxMap?.flyTo(
+                      CameraOptions(
+                        center: Point(coordinates: Position(_lng, _lat)),
+                        zoom: _displaySpeed > 80 ? 15.5 : _displaySpeed > 40 ? 16.0 : 17.0,
+                        bearing: _heading,
+                        pitch: _is3D ? 55.0 : 0,
+                        padding: MbxEdgeInsets(top: _cachedPuckPad, left: 0, bottom: 0, right: 0),
+                      ),
+                      MapAnimationOptions(duration: 500),
+                    );
+                    _startFollow();
+                  },
+                  child: Text(
+                    _is3D ? '2D' : '3D',
+                    style: TextStyle(color: _modeColor, fontSize: 13, fontWeight: FontWeight.bold),
+                  ),
+                ),
+              // Recenter / Compass (only during nav)
+              if (_isNavigating)
+                FloatingActionButton.small(
+                  heroTag: 'recenter',
+                  backgroundColor: _bubbleBg,
+                  onPressed: () {
+                    setState(() {
+                      _heading = (_heading + 90) % 360;
+                      _camBearing = _heading;
+                    });
+                    _isFollowing = true;
+                    _startFollow();
+                  },
+                  child: Transform.rotate(
+                    angle: (_heading % 360) * math.pi / 180,
+                    child: Icon(Icons.navigation, color: _modeColor, size: 22),
+                  ),
+                ),
             ]),
           ),
 
@@ -4743,112 +4918,7 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
               ),
             ),
 
-          // ── SOUND TOGGLE (left side, during nav — below speed sign) ──
-          if (_isNavigating)
-            Positioned(
-              left: 12, bottom: (_currentRoute != null ? 120 : 30) + bp,
-              child: GestureDetector(
-                onTap: () {
-                  setState(() => _soundMode = (_soundMode + 1) % 3);
-                  final notifier = ref.read(blitzerSettingsProvider.notifier);
-                  switch (_soundMode) {
-                    case 0: // Stumm
-                      notifier.updateSetting((s) => s.copyWith(navSoundEnabled: false, warningSoundEnabled: false));
-                      TtsAlertService.instance.stop();
-                    case 1: // Nur Warnungen
-                      notifier.updateSetting((s) => s.copyWith(navSoundEnabled: false, warningSoundEnabled: true));
-                    case 2: // Alle
-                      notifier.updateSetting((s) => s.copyWith(navSoundEnabled: true, warningSoundEnabled: true));
-                  }
-                },
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: _bubbleBg,
-                    borderRadius: BorderRadius.circular(16),
-                    boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 4)],
-                  ),
-                  child: Row(mainAxisSize: MainAxisSize.min, children: [
-                    Icon(
-                      _soundMode == 0 ? Icons.volume_off_rounded
-                          : _soundMode == 1 ? Icons.notifications_active_rounded
-                          : Icons.volume_up_rounded,
-                      color: _soundMode == 0 ? Colors.red : _modeColor,
-                      size: 18,
-                    ),
-                    const SizedBox(width: 4),
-                    Text(
-                      _soundMode == 0 ? 'Stumm'
-                          : _soundMode == 1 ? 'Warnung'
-                          : 'Alle',
-                      style: TextStyle(
-                        color: _soundMode == 0 ? Colors.red : _modeColor,
-                        fontSize: 11,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ]),
-                ),
-              ),
-            ),
-
-          // ── 2D/3D TOGGLE (right, during nav) ──
-          if (_isNavigating)
-            Positioned(
-              right: 16, bottom: (_currentRoute != null ? 260 : 80) + bp,
-              child: FloatingActionButton.small(
-                heroTag: '3dtoggle',
-                backgroundColor: _bubbleBg,
-                onPressed: () {
-                  setState(() => _is3D = !_is3D);
-                  // Immediately snap camera to new mode (don't wait for timer)
-                  _mapboxMap?.flyTo(
-                    CameraOptions(
-                      center: Point(coordinates: Position(_lng, _lat)),
-                      zoom: _displaySpeed > 80 ? 15.5 : _displaySpeed > 40 ? 16.0 : 17.0,
-                      bearing: _heading,  // Heading-up
-                      pitch: _is3D ? 55.0 : 0,
-                      padding: MbxEdgeInsets(top: _cachedPuckPad, left: 0, bottom: 0, right: 0),
-                    ),
-                    MapAnimationOptions(duration: 500),
-                  );
-                  _startFollow();
-                },
-                child: Text(
-                  _is3D ? '2D' : '3D',
-                  style: TextStyle(
-                    color: _modeColor,
-                    fontSize: 13,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ),
-            ),
-
-          // ── RECENTER BUTTON (right, during nav) ──
-          if (_isNavigating)
-            Positioned(
-              right: 16, bottom: (_currentRoute != null ? 210 : 30) + bp,
-              child: FloatingActionButton.small(
-                heroTag: 'recenter',
-                backgroundColor: _bubbleBg,
-                onPressed: () {
-                  // 90° rotation: N→O→S→W→N
-                  setState(() {
-                    _heading = (_heading + 90) % 360;
-                    _camBearing = _heading;
-                  });
-                  _isFollowing = true;
-                  _startFollow();
-                },
-                child: Transform.rotate(
-                  angle: (_heading % 360) * math.pi / 180,
-                  child: Icon(Icons.navigation, color: _modeColor, size: 22),
-                ),
-              ),
-            ),
-
-          // Debug bearing buttons removed — heading-up mode active
+          // (3D toggle + Recenter moved into right control column above)
 
           // ── ROUTE PANEL (bottom, when route exists) ──
           if (_currentRoute != null && !_searchOpen)
@@ -4857,6 +4927,91 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
           // ── SEARCH OVERLAY ──
           if (_searchOpen)
             _buildSearchOverlay(),
+
+          // ── LEFT BOTTOM COLUMN: Sound + BETA + Fehler ──
+          Positioned(
+            bottom: (_currentRoute != null ? 70 : 10) + bp,
+            left: 12,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              spacing: 6,
+              children: [
+                // Sound toggle (only during nav)
+                if (_isNavigating)
+                  GestureDetector(
+                    onTap: () {
+                      setState(() => _soundMode = (_soundMode + 1) % 3);
+                      final notifier = ref.read(blitzerSettingsProvider.notifier);
+                      switch (_soundMode) {
+                        case 0:
+                          notifier.updateSetting((s) => s.copyWith(navSoundEnabled: false, warningSoundEnabled: false));
+                          TtsAlertService.instance.stop();
+                        case 1:
+                          notifier.updateSetting((s) => s.copyWith(navSoundEnabled: false, warningSoundEnabled: true));
+                        case 2:
+                          notifier.updateSetting((s) => s.copyWith(navSoundEnabled: true, warningSoundEnabled: true));
+                      }
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: _bubbleBg,
+                        borderRadius: BorderRadius.circular(16),
+                        boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 4)],
+                      ),
+                      child: Row(mainAxisSize: MainAxisSize.min, children: [
+                        Icon(
+                          _soundMode == 0 ? Icons.volume_off_rounded
+                              : _soundMode == 1 ? Icons.notifications_active_rounded
+                              : Icons.volume_up_rounded,
+                          color: _soundMode == 0 ? Colors.red : _modeColor,
+                          size: 18,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          _soundMode == 0 ? 'Stumm' : _soundMode == 1 ? 'Warnung' : 'Alle',
+                          style: TextStyle(color: _soundMode == 0 ? Colors.red : _modeColor, fontSize: 11, fontWeight: FontWeight.w700),
+                        ),
+                      ]),
+                    ),
+                  ),
+                // BETA + Fehler row
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: Colors.red.withValues(alpha: 0.85),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: const Text('BETA', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: Colors.white, letterSpacing: 1)),
+                    ),
+                    const SizedBox(width: 6),
+                    GestureDetector(
+                      onTap: () => BugReportSheet.show(context),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: Colors.orange.withValues(alpha: 0.85),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.bug_report_rounded, size: 12, color: Colors.white),
+                            SizedBox(width: 3),
+                            Text('Fehler', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: Colors.white)),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
 
           // ── LOADING ──
           if (_isCalculating)
@@ -5596,13 +5751,16 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
     return instr;
   }
 
-  /// Unbegrenzt-Schild (Autobahn ohne Tempolimit) — graue diagonale Streifen
+  /// StVO Zeichen 282 — Ende sämtlicher Streckenverbote (Autobahn unbegrenzt)
   Widget _buildUnlimitedSign() => Container(
     width: 56, height: 56,
     decoration: BoxDecoration(
-      shape: BoxShape.circle, color: Colors.white,
-      border: Border.all(color: Colors.grey.shade400, width: 3),
-      boxShadow: [BoxShadow(color: _shadowColor, blurRadius: 8)],
+      shape: BoxShape.circle,
+      color: Colors.white,
+      border: Border.all(color: const Color(0xFF222222), width: 2),
+      boxShadow: [
+        BoxShadow(color: _shadowColor, blurRadius: 10, offset: const Offset(0, 2)),
+      ],
     ),
     child: CustomPaint(
       painter: _UnlimitedSignPainter(),
@@ -5980,47 +6138,46 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
 
   Widget _buildGpsToggle() => GestureDetector(
     onTap: _toggleGpsLive,
-    child: Column(mainAxisSize: MainAxisSize.min, children: [
-      // ON/OFF badge
-      Container(
-        margin: const EdgeInsets.only(bottom: 4),
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-        decoration: BoxDecoration(
-          color: _gpsLive ? Colors.green : _modeColor,
-          borderRadius: BorderRadius.circular(8),
-          boxShadow: [BoxShadow(
-            color: (_gpsLive ? Colors.green : _modeColor).withValues(alpha: 0.5),
-            blurRadius: 8, offset: const Offset(0, 2),
-          )],
-        ),
-        child: Text(
-          _gpsLive ? 'ON' : 'OFF',
-          style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w900, letterSpacing: 1),
-        ),
-      ),
-      // GPS button
-      Container(
-        width: 56, height: 56,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          color: _bubbleBg,
-          border: Border.all(color: _gpsLive ? Colors.green : _modeColor.withValues(alpha: 0.5), width: 2),
-          boxShadow: [if (_gpsLive) BoxShadow(color: Colors.green.withValues(alpha: 0.4), blurRadius: 12)],
-        ),
-        child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-          Icon(
-            _gpsLive ? Icons.my_location_rounded : Icons.location_searching_rounded,
+    child: SizedBox(
+      width: 48,
+      child: Column(mainAxisSize: MainAxisSize.min, children: [
+        // ON/OFF badge
+        Container(
+          margin: const EdgeInsets.only(bottom: 3),
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+          decoration: BoxDecoration(
             color: _gpsLive ? Colors.green : _modeColor,
-            size: 22,
+            borderRadius: BorderRadius.circular(6),
           ),
-          const SizedBox(height: 2),
-          Text('GPS', style: TextStyle(
-            color: _gpsLive ? Colors.green : _modeColor,
-            fontSize: 9, fontWeight: FontWeight.w700,
-          )),
-        ]),
-      ),
-    ]),
+          child: Text(
+            _gpsLive ? 'ON' : 'OFF',
+            style: const TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.w900, letterSpacing: 0.5),
+          ),
+        ),
+        // GPS button
+        Container(
+          width: 48, height: 48,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: _bubbleBg,
+            border: Border.all(color: _gpsLive ? Colors.green : _modeColor.withValues(alpha: 0.5), width: 2),
+            boxShadow: [if (_gpsLive) BoxShadow(color: Colors.green.withValues(alpha: 0.3), blurRadius: 6)],
+          ),
+          child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+            Icon(
+              _gpsLive ? Icons.my_location_rounded : Icons.location_searching_rounded,
+              color: _gpsLive ? Colors.green : _modeColor,
+              size: 20,
+            ),
+            const SizedBox(height: 1),
+            Text('GPS', style: TextStyle(
+              color: _gpsLive ? Colors.green : _modeColor,
+              fontSize: 8, fontWeight: FontWeight.w700,
+            )),
+          ]),
+        ),
+      ]),
+    ),
   );
 
   Widget _infoBubble(String val, String label, Color c) => Column(children: [
@@ -6459,25 +6616,40 @@ class _UserMarkerClickListener extends OnPointAnnotationClickListener {
 }
 
 /// Painter for the "Unbegrenzt" (no speed limit) sign — diagonal grey stripes
+/// StVO Zeichen 282 — "Ende sämtlicher Streckenverbote"
+/// Weißer Kreis mit 4 parallelen, diagonalen schwarzen Linien.
 class _UnlimitedSignPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = Colors.black87
-      ..strokeWidth = 2.2
-      ..strokeCap = StrokeCap.round;
-    // StVO Zeichen 282: 5 thin diagonal lines from bottom-left to top-right
     final cx = size.width / 2;
     final cy = size.height / 2;
-    final r = size.width * 0.32; // Line extent from center
-    for (int i = -2; i <= 2; i++) {
-      final offset = i * 6.0;
+    final radius = size.width / 2 - 4; // inside the border
+
+    // Clip to circle so lines don't stick out
+    canvas.save();
+    canvas.clipPath(Path()
+      ..addOval(Rect.fromCircle(center: Offset(cx, cy), radius: radius)));
+
+    final paint = Paint()
+      ..color = const Color(0xFF111111)
+      ..strokeWidth = 3.0
+      ..strokeCap = StrokeCap.butt
+      ..style = PaintingStyle.stroke;
+
+    // 4 parallel diagonals (top-left → bottom-right), evenly spaced
+    // Line length across full diameter, spacing ~ radius/2
+    final diag = radius * 2.4;
+    final spacing = 5.5;
+    for (int i = -2; i <= 1; i++) {
+      final dx = i * spacing + spacing / 2;
       canvas.drawLine(
-        Offset(cx - r + offset, cy + r),
-        Offset(cx + r + offset, cy - r),
+        Offset(cx - diag / 2 + dx, cy + diag / 2 + dx),
+        Offset(cx + diag / 2 + dx, cy - diag / 2 + dx),
         paint,
       );
     }
+
+    canvas.restore();
   }
 
   @override

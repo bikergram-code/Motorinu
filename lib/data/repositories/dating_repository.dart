@@ -14,7 +14,11 @@ class DatingRepository {
       'p_community': community,
       'p_limit': limit,
     });
-    return List<Map<String, dynamic>>.from(res as List);
+    final list = List<Map<String, dynamic>>.from(res as List);
+    // Dedupe by id — the SQL function can return duplicates if a candidate
+    // has multiple vehicles/photos and the JOIN isn't DISTINCT.
+    final seen = <Object?>{};
+    return list.where((c) => seen.add(c['id'])).toList();
   }
 
   /// Record a swipe (like or nope). Returns match info if mutual like.

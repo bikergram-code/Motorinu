@@ -42,8 +42,8 @@ final liveLocationServiceProvider = Provider<LiveLocationService>((ref) {
 // which does NOT trigger framework-level rebuilds of the surrounding tree.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Global singleton holding online users in the current community.
-/// Shows ALL online users (not just followed) for badge + map.
+/// Global singleton holding online followed users in the current community.
+/// Only shows users the current user follows.
 /// Lives forever — never reset by provider rebuilds.
 final onlineUsersNotifier = ValueNotifier<Map<String, LiveUserPosition>>({});
 
@@ -92,7 +92,7 @@ Future<void> initOnlineUsers({
   debugPrint('[OnlineUsers] Initial snapshot: ${snapshot.length} users');
   _lastAllUsers = Map.from(snapshot);
   if (snapshot.isNotEmpty) {
-    onlineUsersNotifier.value = _filterByCommunity(snapshot);
+    onlineUsersNotifier.value = _filterByFollowing(snapshot);
   }
 
   // 3. Cancel old subscription before re-subscribing (community may have changed)
@@ -166,19 +166,19 @@ Map<String, LiveUserPosition> _filterByFollowing(
 
 /// Apply immediately — no debounce, for intentional logouts and filter changes.
 void _applyFilterImmediate(Map<String, LiveUserPosition> allUsers) {
-  final filtered = _filterByCommunity(allUsers);
-  debugPrint('[OnlineUsers] _applyFilterImmediate: ${allUsers.length} total → ${filtered.length} in community');
+  final filtered = _filterByFollowing(allUsers);
+  debugPrint('[OnlineUsers] _applyFilterImmediate: ${allUsers.length} total → ${filtered.length} followed+community');
   onlineUsersNotifier.value = filtered;
 }
 
-/// Update the badge with all online users in community, with debounce for network flickers.
+/// Update the badge with followed online users in community, with debounce for network flickers.
 void _applyFilter(Map<String, LiveUserPosition> allUsers) {
-  final filtered = _filterByCommunity(allUsers);
+  final filtered = _filterByFollowing(allUsers);
   final oldCount = onlineUsersNotifier.value.length;
   final newCount = filtered.length;
 
   if (oldCount != newCount) {
-    debugPrint('[OnlineUsers] _applyFilter: $oldCount→$newCount users online in community');
+    debugPrint('[OnlineUsers] _applyFilter: $oldCount→$newCount followed users online');
   }
 
   if (oldCount > 0 && newCount == 0) {
@@ -187,7 +187,7 @@ void _applyFilter(Map<String, LiveUserPosition> allUsers) {
     debugPrint('[OnlineUsers] ⚠️ count→0, debouncing 30s before hiding badge');
     _zeroBadgeDebounce = Timer(const Duration(seconds: 30), () {
       debugPrint('[OnlineUsers] Debounce fired: recheck=${_lastAllUsers.length} users');
-      onlineUsersNotifier.value = _filterByCommunity(_lastAllUsers);
+      onlineUsersNotifier.value = _filterByFollowing(_lastAllUsers);
     });
     return;
   }
@@ -264,12 +264,14 @@ class FocusMapTarget {
   final String? userId;
   final String? displayName;
   final double zoom;
+  final bool navigateTo; // true = start route calculation to this point
 
   const FocusMapTarget({
     required this.position,
     this.userId,
     this.displayName,
     this.zoom = 15,
+    this.navigateTo = false,
   });
 }
 

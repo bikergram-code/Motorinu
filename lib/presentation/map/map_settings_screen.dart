@@ -6,6 +6,7 @@ import 'package:google_fonts/google_fonts.dart';
 import '../../core/community.dart';
 import '../../providers/map/map_settings_provider.dart';
 import '../../providers/core/providers.dart';
+import '../../services/navigation_tts_service.dart';
 import '../../theme/app_theme.dart';
 
 // ─── Map Settings Screen ─────────────────────────────────────────────────────
@@ -13,11 +14,18 @@ import '../../theme/app_theme.dart';
 // Settings panel for the Community Map (alerts, audio, driving mode, battery).
 // Accessible from: Speed-Dial → Karten-Einst., or Settings → Karte
 
-class MapSettingsScreen extends ConsumerWidget {
+class MapSettingsScreen extends ConsumerStatefulWidget {
   const MapSettingsScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<MapSettingsScreen> createState() => _MapSettingsScreenState();
+}
+
+class _MapSettingsScreenState extends ConsumerState<MapSettingsScreen> {
+  String _selectedVoice = NavigationTtsService.instance.currentVoice;
+
+  @override
+  Widget build(BuildContext context) {
     final community = ref.watch(communityProvider);
     final brightness = Theme.of(context).brightness;
     final accentColor = community?.accentColor ?? AppTheme.accentDark;
@@ -282,6 +290,31 @@ class MapSettingsScreen extends ConsumerWidget {
                     mutedColor: mutedColor,
                     showDivider: false,
                   ),
+              ],
+            ),
+
+            const SizedBox(height: 24),
+
+            // ─── Navigationsstimme ──────────────────────────
+            _SectionHeader(title: 'Navigationsstimme', mutedColor: mutedColor),
+            _Card(
+              cardColor: cardColor,
+              children: [
+                for (final entry in ttsVoiceProfiles.entries) ...[
+                  _VoiceTile(
+                    profile: entry.value,
+                    isSelected: _selectedVoice == entry.key,
+                    accentColor: accentColor,
+                    textColor: textColor,
+                    mutedColor: mutedColor,
+                    onTap: () {
+                      setState(() => _selectedVoice = entry.key);
+                      NavigationTtsService.instance.setVoice(entry.key);
+                    },
+                    onPreview: () => NavigationTtsService.instance.speakSample(entry.key),
+                    showDivider: entry.key != ttsVoiceProfiles.keys.last,
+                  ),
+                ],
               ],
             ),
 
@@ -551,6 +584,87 @@ class _OptionTile extends StatelessWidget {
               }).toList()),
             ),
           ],
+        ),
+      ),
+      if (showDivider)
+        Divider(height: 1, indent: 66, color: Colors.white.withValues(alpha: 0.04)),
+    ]);
+  }
+}
+
+// ─── Voice Selection Tile ───────────────────────────────────────────────────
+
+class _VoiceTile extends StatelessWidget {
+  final TtsVoiceProfile profile;
+  final bool isSelected;
+  final Color accentColor;
+  final Color textColor;
+  final Color mutedColor;
+  final VoidCallback onTap;
+  final VoidCallback onPreview;
+  final bool showDivider;
+
+  const _VoiceTile({
+    required this.profile,
+    required this.isSelected,
+    required this.accentColor,
+    required this.textColor,
+    required this.mutedColor,
+    required this.onTap,
+    required this.onPreview,
+    this.showDivider = true,
+  });
+
+  static const _iconMap = {
+    'record_voice_over': Icons.record_voice_over_rounded,
+    'sailing': Icons.sailing_rounded,
+    'two_wheeler': Icons.two_wheeler_rounded,
+    'smart_toy': Icons.smart_toy_rounded,
+    'elderly': Icons.elderly_rounded,
+    'military_tech': Icons.military_tech_rounded,
+    'sports_motorsports': Icons.sports_motorsports_rounded,
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    final icon = _iconMap[profile.icon] ?? Icons.record_voice_over_rounded;
+    return Column(children: [
+      InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          child: Row(
+            children: [
+              Container(
+                width: 40, height: 40,
+                decoration: BoxDecoration(
+                  color: isSelected ? accentColor.withValues(alpha: 0.15) : mutedColor.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(icon, size: 22, color: isSelected ? accentColor : mutedColor),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(profile.name, style: GoogleFonts.inter(
+                      fontSize: 15, fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
+                      color: isSelected ? accentColor : textColor)),
+                    Text(profile.description, style: GoogleFonts.inter(
+                      fontSize: 12, color: mutedColor)),
+                  ],
+                ),
+              ),
+              IconButton(
+                onPressed: onPreview,
+                icon: Icon(Icons.play_circle_outline_rounded, size: 24, color: accentColor),
+                tooltip: 'Probe hören',
+              ),
+              if (isSelected)
+                Icon(Icons.check_circle_rounded, size: 22, color: accentColor),
+            ],
+          ),
         ),
       ),
       if (showDivider)

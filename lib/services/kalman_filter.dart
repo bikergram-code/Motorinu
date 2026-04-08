@@ -104,8 +104,8 @@ class KalmanFilter {
 
   // Thresholds
   static const double _jumpThresholdMeters = 500;   // Reset if position jumps >500m
-  static const double _speedEmaAlpha = 0.3;         // Speed smoothing (0 = no change, 1 = instant)
-  static const double _headingEmaAlpha = 0.4;       // Heading smoothing
+  static const double _speedEmaAlpha = 0.7;         // Speed smoothing — fast follow (motorcycle tacho feel)
+  static const double _headingEmaAlpha = 0.25;      // Heading smoothing (lower = smoother)
   static const double _maxGapSeconds = 30;           // Reset after 30s gap
   static const double _metersPerDegree = 111_320.0;  // Approx meters per degree lat
 
@@ -157,13 +157,37 @@ class KalmanFilter {
       return update(raw); // Re-process as first measurement
     }
 
-    // ── Jump detection: reset if position jumped > threshold ──
+    // ── Jump detection ──
     final jumpDist = Geolocator.distanceBetween(
       _latFilter._estimate, _lngFilter._estimate, rawLat, rawLng,
     );
+
+    // Hard reset: teleport > 500m (new location entirely)
     if (jumpDist > _jumpThresholdMeters) {
       reset();
       return update(raw);
+    }
+
+    // Speed-based plausibility: ignore GPS spikes that exceed max plausible movement
+    // maxPlausible = max(currentSpeed * dt * 2.5, 30m) — generous enough for acceleration
+    final maxPlausibleMeters = max(_lastSmoothedSpeed / 3.6 * dt * 2.5, 30.0);
+    if (jumpDist > maxPlausibleMeters) {
+      // GPS spike — keep old estimate, just update timestamp
+      _lastTimestamp = now;
+      return SmoothedPosition(
+        smoothedLat: _latFilter._estimate,
+        smoothedLng: _lngFilter._estimate,
+        smoothedSpeed: _lastSmoothedSpeed,
+        smoothedHeading: _lastSmoothedHeading,
+        rawLat: rawLat,
+        rawLng: rawLng,
+        rawSpeed: rawSpeedKmh,
+        rawHeading: rawHeading,
+        accuracy: rawAccuracy,
+        quality: quality,
+        timestamp: now,
+        altitude: raw.altitude,
+      );
     }
 
     // ── Convert accuracy from meters to degrees ──

@@ -24,6 +24,8 @@ abstract class User with _$User {
     int? birthYear,
     int? motoStartAge,
     int? carStartAge,
+    String? gender,
+    @Default('all') String showGender,
     @Default(false) bool hasTrackExperience,
     @Default(0) int experienceYears,
     @Default(false) bool trackExperience,

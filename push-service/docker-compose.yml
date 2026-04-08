@@ -1,0 +1,16 @@
+version: "3.8"
+services:
+  push-service:
+    build: .
+    container_name: bikergram-push
+    restart: unless-stopped
+    network_mode: host
+    env_file:
+      - .env
+    volumes:
+      - ./firebase-sa.json:/app/firebase-sa.json:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

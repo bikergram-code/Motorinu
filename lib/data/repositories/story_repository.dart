@@ -1,4 +1,5 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../domain/xp_calculator.dart';
 
 /// Comment on a story.
 class StoryComment {
@@ -87,7 +88,15 @@ class StoryRepository {
     final result =
         await _supabase.rpc('toggle_story_like', params: {'p_story_id': storyId});
     final map = result as Map<String, dynamic>;
-    return map['liked'] as bool;
+    final liked = map['liked'] as bool;
+    // +1 XP for liking a story
+    if (liked) {
+      final myId = _currentUserId;
+      if (myId != null) {
+        XpCalculator.awardXp(myId, XpCalculator.xpStoryLike, 'story_like');
+      }
+    }
+    return liked;
   }
 
   /// Returns (likeCount, likedByMe) for a specific story.
@@ -159,6 +168,9 @@ class StoryRepository {
         .from('stories')
         .update({'comment_count': (story['comment_count'] as int) + 1})
         .eq('id', storyId);
+
+    // +2 XP for commenting on a story
+    XpCalculator.awardXp(userId, XpCalculator.xpStoryComment, 'story_comment');
 
     return StoryComment.fromJson(data, currentUserId: _currentUserId);
   }

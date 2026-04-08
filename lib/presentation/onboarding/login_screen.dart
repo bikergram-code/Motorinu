@@ -80,52 +80,79 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
       );
     }
 
+    final keyboardOpen = MediaQuery.of(context).viewInsets.bottom > 0;
+
     return Scaffold(
       backgroundColor: Colors.black,
+      resizeToAvoidBottomInset: true,
       body: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.symmetric(horizontal: 32),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const SizedBox(height: 16),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 28),
+          child: CustomScrollView(
+            slivers: [
+              SliverFillRemaining(
+                hasScrollBody: false,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+              const SizedBox(height: 4),
 
               // Back button
               IconButton(
                 onPressed: () => context.go('/'),
-                icon: const Icon(Icons.arrow_back_rounded, color: Colors.white),
+                icon: const Icon(Icons.arrow_back_rounded, color: Colors.white, size: 22),
                 padding: EdgeInsets.zero,
                 constraints: const BoxConstraints(),
               ),
 
-              const SizedBox(height: 48),
+              const SizedBox(height: 12),
 
-              // Title
-              Text(
-                community?.displayName ?? 'Login',
-                style: GoogleFonts.inter(
-                  fontSize: 32,
-                  fontWeight: FontWeight.w700,
-                  color: Colors.white,
-                  letterSpacing: -0.5,
-                ),
+              // Title links + Logo rechts
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          community?.displayName ?? 'Motorinu',
+                          style: GoogleFonts.inter(
+                            fontSize: 26,
+                            fontWeight: FontWeight.w700,
+                            color: Colors.white,
+                            letterSpacing: -0.5,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          'Melde dich an, um fortzufahren',
+                          style: GoogleFonts.inter(
+                            fontSize: 13,
+                            color: Colors.white.withValues(alpha: 0.5),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(14),
+                    child: Image.asset(
+                      community?.iconAsset ?? 'assets/images/motorino_icon.png',
+                      width: 52,
+                      height: 52,
+                      fit: BoxFit.cover,
+                    ),
+                  ),
+                ],
               ),
 
-              const SizedBox(height: 8),
-
-              Text(
-                'Melde dich an, um fortzufahren',
-                style: GoogleFonts.inter(
-                  fontSize: 16,
-                  color: Colors.white.withValues(alpha: 0.5),
-                ),
-              ),
-
-              const SizedBox(height: 48),
+              const SizedBox(height: 20),
 
               // Email field
               _buildLabel('E-Mail'),
-              const SizedBox(height: 8),
+              const SizedBox(height: 6),
               _buildTextField(
                 controller: _emailController,
                 hint: 'deine@email.de',
@@ -134,11 +161,11 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                 accentColor: accentColor,
               ),
 
-              const SizedBox(height: 24),
+              const SizedBox(height: 14),
 
               // Password field
               _buildLabel('Passwort'),
-              const SizedBox(height: 8),
+              const SizedBox(height: 6),
               _buildTextField(
                 controller: _passwordController,
                 hint: '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022',
@@ -158,7 +185,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                 ),
               ),
 
-              const SizedBox(height: 12),
+              const SizedBox(height: 4),
 
               // Forgot password
               Align(
@@ -173,7 +200,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                   child: Text(
                     'Passwort vergessen?',
                     style: GoogleFonts.inter(
-                      fontSize: 13,
+                      fontSize: 12,
                       color: accentColor,
                       fontWeight: FontWeight.w500,
                     ),
@@ -181,12 +208,12 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                 ),
               ),
 
-              const SizedBox(height: 32),
+              const SizedBox(height: 16),
 
               // Login button
               SizedBox(
                 width: double.infinity,
-                height: 52,
+                height: 48,
                 child: ElevatedButton(
                   onPressed: isLoading ? null : _handleLogin,
                   style: ElevatedButton.styleFrom(
@@ -216,7 +243,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                 ),
               ),
 
-              const SizedBox(height: 24),
+              const SizedBox(height: 16),
 
               // Divider
               Row(
@@ -227,11 +254,11 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                     ),
                   ),
                   Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    padding: const EdgeInsets.symmetric(horizontal: 14),
                     child: Text(
                       'oder',
                       style: GoogleFonts.inter(
-                        fontSize: 13,
+                        fontSize: 12,
                         color: Colors.white.withValues(alpha: 0.35),
                       ),
                     ),
@@ -244,7 +271,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                 ],
               ),
 
-              const SizedBox(height: 24),
+              const SizedBox(height: 16),
 
               // Social sign-in buttons
               SocialSignInButtons(
@@ -257,12 +284,13 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                 },
               ),
 
-              const SizedBox(height: 24),
+              if (!keyboardOpen) const Spacer(),
+              if (!keyboardOpen) const SizedBox(height: 8),
 
               // Register button
               SizedBox(
                 width: double.infinity,
-                height: 52,
+                height: 48,
                 child: OutlinedButton(
                   onPressed: () => context.go('/register'),
                   style: OutlinedButton.styleFrom(
@@ -276,7 +304,7 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                   child: Text(
                     'Neues Konto erstellen',
                     style: GoogleFonts.inter(
-                      fontSize: 16,
+                      fontSize: 15,
                       fontWeight: FontWeight.w600,
                       color: Colors.white,
                     ),
@@ -284,7 +312,10 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                 ),
               ),
 
-              const SizedBox(height: 48),
+              const SizedBox(height: 16),
+                  ],
+                ),
+              ),
             ],
           ),
         ),

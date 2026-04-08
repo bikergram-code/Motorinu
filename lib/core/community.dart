@@ -31,6 +31,12 @@ enum Community {
         Community.cargram => 'Meine Garage',
       };
 
+  /// Label for the dating tab.
+  String get datingLabel => switch (this) {
+        Community.bikergram => 'Biker',
+        Community.cargram => 'Racer',
+      };
+
   /// API namespace prefix — backend uses this to separate communities.
   /// e.g. /api/v1/bikergram/posts vs /api/v1/cargram/posts
   String get apiNamespace => name;
@@ -45,13 +51,13 @@ enum Community {
 
   /// Primary accent color for the community.
   Color get accentColor => switch (this) {
-        Community.bikergram => const Color(0xFFFF6B35), // Warm orange
+        Community.bikergram => const Color(0xFFCC0000), // Ducati red
         Community.cargram => const Color(0xFF4A90D9),   // Cool blue
       };
 
   /// Subtle glow / tint for borders, shadows, overlays.
   Color get accentGlow => switch (this) {
-        Community.bikergram => const Color(0x40FF6B35), // Orange 25%
+        Community.bikergram => const Color(0x40CC0000), // Ducati red 25%
         Community.cargram => const Color(0x404A90D9),   // Blue 25%
       };
 
@@ -77,7 +83,7 @@ enum Community {
 
   /// Subtle border color for cards, dividers.
   Color get borderColor => switch (this) {
-        Community.bikergram => const Color(0x18FF6B35), // orange 9%
+        Community.bikergram => const Color(0x18CC0000), // orange 9%
         Community.cargram => const Color(0x184A90D9),   // blue 9%
       };
 
@@ -86,9 +92,9 @@ enum Community {
   /// Scaffold background for the given [brightness].
   Color scaffoldFor(Brightness b) => switch ((this, b)) {
         (Community.bikergram, Brightness.dark)  => const Color(0xFF080604),
-        (Community.bikergram, Brightness.light) => const Color(0xFFF8F5F0),
+        (Community.bikergram, Brightness.light) => const Color(0xFFFFFFFF),
         (Community.cargram,   Brightness.dark)  => const Color(0xFF040810),
-        (Community.cargram,   Brightness.light) => const Color(0xFFF0F4FA),
+        (Community.cargram,   Brightness.light) => const Color(0xFFFFFFFF),
       };
 
   /// Card / container background for the given [brightness].
@@ -109,8 +115,8 @@ enum Community {
 
   /// Subtle border color for the given [brightness].
   Color borderFor(Brightness b) => switch ((this, b)) {
-        (Community.bikergram, Brightness.dark)  => const Color(0x18FF6B35),
-        (Community.bikergram, Brightness.light) => const Color(0x30FF6B35),
+        (Community.bikergram, Brightness.dark)  => const Color(0x18CC0000),
+        (Community.bikergram, Brightness.light) => const Color(0x30CC0000),
         (Community.cargram,   Brightness.dark)  => const Color(0x184A90D9),
         (Community.cargram,   Brightness.light) => const Color(0x304A90D9),
       };

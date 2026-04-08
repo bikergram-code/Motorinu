@@ -11,7 +11,6 @@ class RideRecord {
   final double avgSpeedKmh;
   final double maxSpeedKmh;
   final int xpEarned;
-  final bool isLiveGo;
   final DateTime? createdAt;
 
   const RideRecord({
@@ -24,7 +23,6 @@ class RideRecord {
     this.avgSpeedKmh = 0,
     this.maxSpeedKmh = 0,
     this.xpEarned = 0,
-    this.isLiveGo = false,
     this.createdAt,
   });
 
@@ -41,7 +39,6 @@ class RideRecord {
       avgSpeedKmh: double.tryParse('${json['avg_speed_kmh']}') ?? 0,
       maxSpeedKmh: double.tryParse('${json['max_speed_kmh']}') ?? 0,
       xpEarned: json['xp_earned'] as int? ?? 0,
-      isLiveGo: json['is_live_go'] == true,
       createdAt: json['created_at'] != null
           ? DateTime.tryParse('${json['created_at']}')
           : null,
@@ -89,7 +86,6 @@ class RideRepository {
     required int durationSeconds,
     required double avgSpeedKmh,
     double maxSpeedKmh = 0,
-    bool isLiveGo = false,
   }) async {
     final userId = _currentUserId;
     if (userId == null) throw Exception('Nicht eingeloggt');
@@ -108,28 +104,13 @@ class RideRepository {
           'avg_speed_kmh': avgSpeedKmh,
           'max_speed_kmh': maxSpeedKmh,
           'xp_earned': xpEarned,
-          'is_live_go': isLiveGo,
         })
         .select()
         .single();
 
-    // Award XP to user profile
+    // Award XP via central method (updates profile + logs transaction)
     if (xpEarned > 0) {
-      try {
-        final profile = await _supabase
-            .from('profiles')
-            .select('xp_total, level')
-            .eq('id', userId)
-            .single();
-
-        final newXp = (profile['xp_total'] as int? ?? 0) + xpEarned;
-        final newLevel = (newXp ~/ 100) + 1;
-
-        await _supabase.from('profiles').update({
-          'xp_total': newXp,
-          'level': newLevel,
-        }).eq('id', userId);
-      } catch (_) {}
+      XpCalculator.awardXp(userId, xpEarned, 'ride');
     }
 
     return RideRecord.fromJson(data);

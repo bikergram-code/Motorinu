@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../data/repositories/dating_repository.dart';
+import '../../data/repositories/message_repository.dart';
 import '../../data/repositories/notification_repository.dart';
 import '../../data/repositories/profile_repository.dart';
 
@@ -78,6 +79,7 @@ class DatingNotifier extends Notifier<DatingState> {
         isLike: isLike,
         community: community,
       );
+      debugPrint('[Dating] recordSwipe result: $result (swipedId=$swipedId, isLike=$isLike)');
 
       // Get my display name and ID for notifications
       String myName = 'Jemand';
@@ -90,14 +92,32 @@ class DatingNotifier extends Notifier<DatingState> {
       } catch (_) {}
 
       if (result['matched'] == true) {
+        debugPrint('[Dating] *** MATCH! *** swipedId=$swipedId serverConvId=${result['conversation_id']}');
+
+        // ⚠️ WICHTIG: conversation_id vom Server ist FALSCH (enthält falsche Teilnehmer)!
+        // Stattdessen CLIENT-seitig die richtige Konversation holen/erstellen:
+        int? correctConvId;
+        try {
+          correctConvId = await MessageRepository()
+              .getOrCreateConversation(swipedId, community: community);
+          debugPrint('[Dating] ✓ Korrekte convId vom Client: $correctConvId (zwischen $myId ↔ $swipedId)');
+        } catch (e) {
+          debugPrint('[Dating] ✗ getOrCreateConversation failed: $e');
+        }
+
         final matchData = Map<String, dynamic>.from(result);
+        matchData['matched_user_id'] = swipedId;
+        // Server-convId überschreiben mit der korrekten:
+        if (correctConvId != null) {
+          matchData['conversation_id'] = correctConvId;
+        }
         if (matchedAvatarUrl != null) {
           matchData['matched_avatar_url'] = matchedAvatarUrl;
         }
         state = state.copyWith(lastMatch: matchData);
 
         // 🔔 Push-Notification an den gematchten User senden
-        final convId = result['conversation_id'];
+        debugPrint('[Dating] Push match → target=$swipedId convId=$correctConvId actorId=$myId');
         NotificationRepository().createNotification(
           targetUserId: swipedId,
           type: 'like',
@@ -106,12 +126,13 @@ class DatingNotifier extends Notifier<DatingState> {
           community: community,
           data: {
             'type': 'match',
-            if (convId != null) 'conversation_id': convId,
+            if (correctConvId != null) 'conversation_id': correctConvId.toString(),
             if (myId != null) 'actor_id': myId,
           },
         );
       } else if (isLike) {
         // 🔔 Benachrichtigung: User hat dich geliked (kein Match noch)
+        debugPrint('[Dating] Push like → target=$swipedId actorId=$myId');
         NotificationRepository().createNotification(
           targetUserId: swipedId,
           type: 'like',

@@ -1,9 +1,20 @@
+import 'dart:convert';
+
 import 'package:audioplayers/audioplayers.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../../domain/models/direct_message.dart';
+import '../../../services/geocoding_service.dart';
+
+/// Callback for offer actions in vehicle_offer messages.
+/// [action] is 'accept', 'decline', or 'counter'.
+/// [offerData] contains the parsed offer JSON.
+typedef OfferActionCallback = void Function(String action, Map<String, dynamic> offerData);
 
 class MessageBubble extends StatelessWidget {
   const MessageBubble({
@@ -15,7 +26,10 @@ class MessageBubble extends StatelessWidget {
     this.otherUsername,
     this.onSwipeReply,
     this.onImageTap,
+    this.onDelete,
+    this.onEdit,
     this.isGroupChat = false,
+    this.onOfferAction,
   });
 
   final DirectMessage message;
@@ -25,43 +39,35 @@ class MessageBubble extends StatelessWidget {
   final String? otherUsername;
   final VoidCallback? onSwipeReply;
   final VoidCallback? onImageTap;
+  final VoidCallback? onDelete;
+  final VoidCallback? onEdit;
   final bool isGroupChat;
+  final OfferActionCallback? onOfferAction;
 
   @override
   Widget build(BuildContext context) {
-    return Dismissible(
-      key: ValueKey('swipe_${message.id}'),
-      direction: DismissDirection.startToEnd,
-      confirmDismiss: (_) async {
-        onSwipeReply?.call();
-        return false; // Don't actually dismiss
-      },
-      background: Align(
-        alignment: Alignment.centerLeft,
-        child: Padding(
-          padding: const EdgeInsets.only(left: 16),
-          child: Icon(Icons.reply_rounded,
-              color: Colors.white.withValues(alpha: 0.5), size: 24),
+    return Align(
+      alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
+      child: Container(
+        constraints: BoxConstraints(
+          maxWidth: MediaQuery.of(context).size.width * 0.75,
         ),
-      ),
-      child: Align(
-        alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
-        child: Container(
-          constraints: BoxConstraints(
-            maxWidth: MediaQuery.of(context).size.width * 0.75,
-          ),
-          margin: EdgeInsets.only(
-            top: 3,
-            bottom: 3,
-            left: isMe ? 48 : (isGroupChat ? 0 : 0),
-            right: isMe ? 0 : 48,
-          ),
+        margin: EdgeInsets.only(
+          top: 3,
+          bottom: 3,
+          left: isMe ? 48 : (isGroupChat ? 0 : 0),
+          right: isMe ? 0 : 48,
+        ),
+        child: InkWell(
+          onLongPress: () => _showMessageActions(context),
+          splashColor: Colors.transparent,
+          highlightColor: Colors.white.withValues(alpha: 0.05),
+          borderRadius: BorderRadius.circular(18),
           child: isGroupChat && !isMe
               ? Row(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    // Sender mini-avatar
                     Padding(
                       padding: const EdgeInsets.only(right: 6, bottom: 2),
                       child: _buildSenderAvatar(),
@@ -70,6 +76,84 @@ class MessageBubble extends StatelessWidget {
                   ],
                 )
               : _buildBubbleContent(context),
+        ),
+      ),
+    );
+  }
+
+  void _showMessageActions(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final isTextMessage = message.messageType == 'text' || message.messageType == null;
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: isDark ? const Color(0xFF1A1A1A) : Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Handle bar
+              Container(
+                width: 36, height: 4,
+                margin: const EdgeInsets.only(bottom: 8),
+                decoration: BoxDecoration(
+                  color: Colors.grey.withValues(alpha: 0.3),
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              // Antworten
+              if (onSwipeReply != null)
+                ListTile(
+                  leading: Icon(Icons.reply_rounded, color: accentColor),
+                  title: Text('Antworten', style: GoogleFonts.inter(fontSize: 15)),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    onSwipeReply?.call();
+                  },
+                ),
+              // Kopieren (nur Text-Nachrichten)
+              if (isTextMessage && message.body.isNotEmpty)
+                ListTile(
+                  leading: Icon(Icons.copy_rounded, color: accentColor),
+                  title: Text('Kopieren', style: GoogleFonts.inter(fontSize: 15)),
+                  onTap: () {
+                    Clipboard.setData(ClipboardData(text: message.body));
+                    Navigator.pop(ctx);
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Kopiert'),
+                        duration: Duration(seconds: 1),
+                        behavior: SnackBarBehavior.floating,
+                      ),
+                    );
+                  },
+                ),
+              // Bearbeiten (nur eigene Text-Nachrichten)
+              if (isMe && isTextMessage && onEdit != null)
+                ListTile(
+                  leading: Icon(Icons.edit_rounded, color: accentColor),
+                  title: Text('Bearbeiten', style: GoogleFonts.inter(fontSize: 15)),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    onEdit?.call();
+                  },
+                ),
+              // Löschen (nur eigene)
+              if (isMe && onDelete != null)
+                ListTile(
+                  leading: const Icon(Icons.delete_rounded, color: Colors.red),
+                  title: Text('Löschen', style: GoogleFonts.inter(fontSize: 15, color: Colors.red)),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    onDelete?.call();
+                  },
+                ),
+            ],
+          ),
         ),
       ),
     );
@@ -99,17 +183,227 @@ class MessageBubble extends StatelessWidget {
   Widget _buildBubbleContent(BuildContext context) {
     final type = message.messageType;
 
-    if (type == 'image') return _buildImageBubble(context);
-    if (type == 'audio') return _buildAudioBubble(context);
-    if (type == 'location') return _buildLocationBubble(context);
-    return _buildTextBubble(context);
+    Widget bubble;
+    if (type == 'vehicle_offer') {
+      bubble = _buildOfferBubble(context);
+    } else if (type == 'image') {
+      bubble = _buildImageBubble(context);
+    } else if (type == 'audio') {
+      bubble = _buildAudioBubble(context);
+    } else if (type == 'location') {
+      bubble = _buildLocationBubble(context);
+    } else {
+      bubble = _buildTextBubble(context);
+    }
+
+    // Add ⋮ menu button for own messages
+    if (isMe && (onDelete != null || onEdit != null)) {
+      bubble = Stack(
+        children: [
+          bubble,
+          Positioned(
+            top: 2,
+            right: 2,
+            child: GestureDetector(
+              onTap: () => _showMessageActions(context),
+              child: Container(
+                padding: const EdgeInsets.all(4),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(
+                  Icons.more_vert,
+                  size: 14,
+                  color: Colors.white.withValues(alpha: 0.7),
+                ),
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+
+    return bubble;
+  }
+
+  // ── Vehicle Offer Bubble (Kleinanzeigen-style) ──
+  Widget _buildOfferBubble(BuildContext context) {
+    Map<String, dynamic> offerData = {};
+    try {
+      offerData = json.decode(message.body) as Map<String, dynamic>;
+    } catch (_) {
+      // Fallback to text bubble if JSON parsing fails
+      return _buildTextBubble(context);
+    }
+
+    final offerType = offerData['type'] as String? ?? 'offer';
+    final vehicleName = offerData['vehicle_name'] as String? ?? '';
+    final amount = (offerData['price'] as num?)?.toDouble() ?? (offerData['amount'] as num?)?.toDouble() ?? 0;
+    final title = offerData['title'] as String? ?? '';
+    final body = offerData['body'] as String? ?? '';
+
+    // Icon + color based on offer type
+    final (IconData icon, Color color, String label) = switch (offerType) {
+      'like' => (Icons.favorite_rounded, Colors.red, 'Gefällt mir'),
+      'offer' => (Icons.local_offer_rounded, accentColor, 'Angebot'),
+      'counter' => (Icons.swap_horiz_rounded, Colors.orange, 'Gegenangebot'),
+      'accepted' => (Icons.check_circle_rounded, Colors.green, 'Angenommen'),
+      'declined' => (Icons.cancel_rounded, Colors.red, 'Abgelehnt'),
+      _ => (Icons.local_offer_rounded, accentColor, 'Angebot'),
+    };
+
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: isMe
+            ? accentColor.withValues(alpha: 0.15)
+            : (isDark ? const Color(0xFF1E1E1E) : Colors.white),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: color.withValues(alpha: 0.3), width: 1.2),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Header with icon + label
+          Row(
+            children: [
+              Icon(icon, size: 18, color: color),
+              const SizedBox(width: 6),
+              Text(label,
+                style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w700, color: color)),
+              const Spacer(),
+              if (vehicleName.isNotEmpty)
+                Flexible(
+                  child: Text(vehicleName,
+                    overflow: TextOverflow.ellipsis,
+                    style: GoogleFonts.inter(fontSize: 11,
+                      color: isDark ? Colors.white.withValues(alpha: 0.4) : const Color(0xFF6C757D))),
+                ),
+            ],
+          ),
+
+          // Amount (if not a like)
+          if (offerType != 'like' && amount > 0) ...[
+            const SizedBox(height: 8),
+            Text('${amount.toStringAsFixed(2)} \u20ac',
+              style: GoogleFonts.inter(fontSize: 22, fontWeight: FontWeight.w700,
+                color: isDark ? Colors.white : const Color(0xFF1A1A1A))),
+          ],
+
+          // Title / Body
+          if (title.isNotEmpty && offerType == 'like') ...[
+            const SizedBox(height: 4),
+            Text(title,
+              style: GoogleFonts.inter(fontSize: 13,
+                color: isDark ? Colors.white.withValues(alpha: 0.7) : const Color(0xFF1A1A1A))),
+          ],
+
+          // Action buttons (only for incoming pending offers/counter-offers)
+          if (!isMe && (offerType == 'offer' || offerType == 'counter') && onOfferAction != null) ...[
+            const SizedBox(height: 12),
+            // Annehmen button (full width)
+            SizedBox(
+              width: double.infinity,
+              height: 34,
+              child: OutlinedButton.icon(
+                onPressed: () => onOfferAction?.call('accept', offerData),
+                icon: const Icon(Icons.check_circle_rounded, size: 16),
+                label: Text('Annehmen',
+                  style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.green)),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Colors.green,
+                  side: BorderSide(color: Colors.green.withValues(alpha: 0.5)),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  padding: EdgeInsets.zero,
+                ),
+              ),
+            ),
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                Expanded(
+                  child: SizedBox(
+                    height: 34,
+                    child: OutlinedButton(
+                      onPressed: () => onOfferAction?.call('counter', offerData),
+                      style: OutlinedButton.styleFrom(
+                        side: BorderSide(color: accentColor.withValues(alpha: 0.5)),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                        padding: EdgeInsets.zero,
+                      ),
+                      child: Text('Gegenangebot',
+                        style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600, color: accentColor)),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: SizedBox(
+                    height: 34,
+                    child: OutlinedButton(
+                      onPressed: () => onOfferAction?.call('decline', offerData),
+                      style: OutlinedButton.styleFrom(
+                        side: BorderSide(color: Colors.red.withValues(alpha: 0.4)),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                        padding: EdgeInsets.zero,
+                      ),
+                      child: Text('Nein danke',
+                        style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.red)),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+
+          // Accepted: show body (PLZ info) + Navigate button
+          if (offerType == 'accepted' && body.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Text(body,
+              style: GoogleFonts.inter(fontSize: 13,
+                color: isDark ? Colors.white.withValues(alpha: 0.7) : const Color(0xFF1A1A1A))),
+          ],
+          // Navigate button removed — navigation only available after contact data is sent
+
+          // Timestamp
+          const SizedBox(height: 4),
+          _buildTimestamp(context),
+        ],
+      ),
+    );
   }
 
   // ── Text Bubble ──
   Widget _buildTextBubble(BuildContext context) {
+    final isContactData = message.body.contains('Meine Kontaktdaten:') && message.body.contains('📍');
+    // Extract address from contact data for navigation
+    String? contactAddress;
+    if (isContactData) {
+      final addrMatch = RegExp(r'📍\s*(.+)', multiLine: true).firstMatch(message.body);
+      if (addrMatch != null) contactAddress = addrMatch.group(1)?.trim();
+    }
+
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-      decoration: _bubbleDecoration(),
+      decoration: isContactData
+          ? BoxDecoration(
+              color: isMe
+                  ? accentColor.withValues(alpha: 0.25)
+                  : Theme.of(context).brightness == Brightness.dark
+                      ? const Color(0xFF1E1E1E)
+                      : const Color(0xFFF0F5F0),
+              borderRadius: BorderRadius.only(
+                topLeft: Radius.circular(isMe ? 18 : 4),
+                topRight: Radius.circular(isMe ? 4 : 18),
+                bottomLeft: const Radius.circular(18),
+                bottomRight: const Radius.circular(18),
+              ),
+              border: Border.all(color: Colors.green.withValues(alpha: 0.3), width: 1.2),
+            )
+          : _bubbleDecoration(context),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -126,18 +420,69 @@ class MessageBubble extends StatelessWidget {
               ),
             ),
           if (replyToMessage != null) _buildReplyQuote(),
+          if (isContactData) ...[
+            Row(
+              children: [
+                const Icon(Icons.contact_phone_rounded, size: 18, color: Colors.green),
+                const SizedBox(width: 6),
+                Text('Kontaktdaten', style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w700, color: Colors.green)),
+              ],
+            ),
+            const SizedBox(height: 8),
+          ],
           Text(
             message.body,
             style: GoogleFonts.inter(
               fontSize: 14,
               color: isMe
                   ? Colors.white
-                  : Colors.white.withValues(alpha: 0.85),
+                  : _receivedTextColor(context),
               height: 1.4,
             ),
           ),
+          // Navigate button for contact data messages (only for receiver)
+          if (isContactData && !isMe && contactAddress != null) ...[
+            const SizedBox(height: 10),
+            SizedBox(
+              width: double.infinity,
+              height: 36,
+              child: OutlinedButton.icon(
+                onPressed: () async {
+                  // Geocode address and start our own navigation
+                  try {
+                    final results = await GeocodingService().searchPlace(contactAddress!, limit: 1);
+                    if (results.isNotEmpty && context.mounted) {
+                      final r = results.first;
+                      context.push('/mapbox-nav', extra: {
+                        'destLat': r.location.latitude,
+                        'destLng': r.location.longitude,
+                        'destName': contactAddress,
+                      });
+                    } else if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Adresse konnte nicht gefunden werden')));
+                    }
+                  } catch (e) {
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('Fehler: $e')));
+                    }
+                  }
+                },
+                icon: const Icon(Icons.navigation_rounded, size: 16),
+                label: Text('Zum Verkäufer navigieren',
+                  style: GoogleFonts.inter(fontSize: 12, fontWeight: FontWeight.w600)),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Colors.green,
+                  side: BorderSide(color: Colors.green.withValues(alpha: 0.5)),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                ),
+              ),
+            ),
+          ],
           const SizedBox(height: 4),
-          _buildTimestamp(),
+          _buildTimestamp(context),
         ],
       ),
     );
@@ -146,7 +491,7 @@ class MessageBubble extends StatelessWidget {
   // ── Image Bubble ──
   Widget _buildImageBubble(BuildContext context) {
     return Container(
-      decoration: _bubbleDecoration(),
+      decoration: _bubbleDecoration(context),
       clipBehavior: Clip.antiAlias,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -195,13 +540,13 @@ class MessageBubble extends StatelessWidget {
                   fontSize: 14,
                   color: isMe
                       ? Colors.white
-                      : Colors.white.withValues(alpha: 0.85),
+                      : _receivedTextColor(context),
                 ),
               ),
             ),
           Padding(
             padding: const EdgeInsets.fromLTRB(14, 4, 14, 8),
-            child: _buildTimestamp(),
+            child: _buildTimestamp(context),
           ),
         ],
       ),
@@ -212,7 +557,7 @@ class MessageBubble extends StatelessWidget {
   Widget _buildAudioBubble(BuildContext context) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: _bubbleDecoration(),
+      decoration: _bubbleDecoration(context),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -224,7 +569,7 @@ class MessageBubble extends StatelessWidget {
             accentColor: accentColor,
           ),
           const SizedBox(height: 4),
-          _buildTimestamp(),
+          _buildTimestamp(context),
         ],
       ),
     );
@@ -236,7 +581,7 @@ class MessageBubble extends StatelessWidget {
     final lng = message.locationLng;
 
     return Container(
-      decoration: _bubbleDecoration(),
+      decoration: _bubbleDecoration(context),
       clipBehavior: Clip.antiAlias,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -299,7 +644,7 @@ class MessageBubble extends StatelessWidget {
                       fontWeight: FontWeight.w500,
                       color: isMe
                           ? Colors.white
-                          : Colors.white.withValues(alpha: 0.85),
+                          : _receivedTextColor(context),
                     ),
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
@@ -310,7 +655,7 @@ class MessageBubble extends StatelessWidget {
           ),
           Padding(
             padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
-            child: _buildTimestamp(),
+            child: _buildTimestamp(context),
           ),
         ],
       ),
@@ -375,17 +720,35 @@ class MessageBubble extends StatelessWidget {
   }
 
   // ── Timestamp + Checkmarks ──
-  Widget _buildTimestamp() {
+  Widget _buildTimestamp([BuildContext? context]) {
+    final isDark = context != null
+        ? Theme.of(context).brightness == Brightness.dark
+        : true;
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
+        if (message.editedAt != null)
+          Text(
+            'bearbeitet  ',
+            style: GoogleFonts.inter(
+              fontSize: 10,
+              fontStyle: FontStyle.italic,
+              color: isMe
+                  ? Colors.white.withValues(alpha: 0.5)
+                  : isDark
+                      ? Colors.white.withValues(alpha: 0.2)
+                      : Colors.black.withValues(alpha: 0.35),
+            ),
+          ),
         Text(
           _formatTime(message.createdAt),
           style: GoogleFonts.inter(
             fontSize: 11,
             color: isMe
                 ? Colors.white.withValues(alpha: 0.6)
-                : Colors.white.withValues(alpha: 0.25),
+                : isDark
+                    ? Colors.white.withValues(alpha: 0.25)
+                    : Colors.black.withValues(alpha: 0.4),
           ),
         ),
         if (isMe) ...[
@@ -404,9 +767,16 @@ class MessageBubble extends StatelessWidget {
     );
   }
 
-  BoxDecoration _bubbleDecoration() {
+  BoxDecoration _bubbleDecoration([BuildContext? context]) {
+    final isDark = context != null
+        ? Theme.of(context).brightness == Brightness.dark
+        : true;
     return BoxDecoration(
-      color: isMe ? accentColor : Colors.white.withValues(alpha: 0.08),
+      color: isMe
+          ? accentColor
+          : isDark
+              ? Colors.white.withValues(alpha: 0.08)
+              : const Color(0xFFE8E8ED),
       borderRadius: BorderRadius.only(
         topLeft: const Radius.circular(18),
         topRight: const Radius.circular(18),
@@ -414,6 +784,13 @@ class MessageBubble extends StatelessWidget {
         bottomRight: Radius.circular(isMe ? 4 : 18),
       ),
     );
+  }
+
+  Color _receivedTextColor(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    return isDark
+        ? Colors.white.withValues(alpha: 0.85)
+        : const Color(0xFF1A1A1A);
   }
 
   String _formatTime(DateTime? time) {

@@ -1,11 +1,25 @@
 import 'dart:ui';
 
+import 'package:flutter/foundation.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+
 /// Zentraler XP-Calculator für das Bikergram Punktesystem.
 ///
-/// Formeln:
-/// - Base XP: 1 XP pro km
-/// - Distanz-Bonus: pro 1000 km → 100 XP extra
-/// - Level: (xp_total ~/ 100) + 1
+/// XP-Tabelle:
+/// - Fahrt: 1 XP pro km + 100 Bonus pro 1000km
+/// - Post erstellen: +5
+/// - Like geben: +1
+/// - Like bekommen: +2
+/// - Kommentar: +2
+/// - Story-Like: +1
+/// - Story-Kommentar: +2
+/// - Follower gewinnen: +2
+/// - Marktplatz-Verkauf: +10
+/// - Daily Login: +3
+/// - 7-Tage-Streak: +50
+/// - 30-Tage-Streak: +200
+///
+/// Level: (xp_total ~/ 100) + 1
 class XpCalculator {
   XpCalculator._();
 
@@ -38,6 +52,54 @@ class XpCalculator {
     if (level >= 10) return 'Cruiser';
     if (level >= 5) return 'Rider';
     return 'Rookie';
+  }
+
+  // ── XP Award Constants ──
+  static const int xpLikeGiven = 1;
+  static const int xpLikeReceived = 2;
+  static const int xpComment = 2;
+  static const int xpStoryLike = 1;
+  static const int xpStoryComment = 2;
+  static const int xpNewFollower = 2;
+  static const int xpPostCreated = 5;
+  static const int xpMarketplaceSale = 10;
+  static const int xpDailyLogin = 3;
+  static const int xpStreak7 = 50;
+  static const int xpStreak30 = 200;
+
+  /// Zentrale XP-Vergabe: aktualisiert profiles.xp_total + level,
+  /// loggt in xp_transactions. Fire-and-forget, Fehler werden geloggt.
+  static Future<void> awardXp(String userId, int amount, String reason) async {
+    if (amount <= 0 || userId.isEmpty) return;
+    try {
+      final sb = Supabase.instance.client;
+      // 1. Aktuelles XP laden
+      final profile = await sb
+          .from('profiles')
+          .select('xp_total')
+          .eq('id', userId)
+          .single();
+      final oldXp = profile['xp_total'] as int? ?? 0;
+      final newXp = oldXp + amount;
+      final newLevel = levelFromXp(newXp);
+
+      // 2. Profil updaten
+      await sb.from('profiles').update({
+        'xp_total': newXp,
+        'level': newLevel,
+      }).eq('id', userId);
+
+      // 3. Transaction loggen
+      await sb.from('xp_transactions').insert({
+        'user_id': userId,
+        'amount': amount,
+        'reason': reason,
+      });
+
+      debugPrint('[XP] +$amount ($reason) → $newXp XP, Level $newLevel');
+    } catch (e) {
+      debugPrint('[XP] ERROR awarding $amount ($reason) to $userId: $e');
+    }
   }
 
   /// Level-Farbe passend zum Rang

@@ -7,6 +7,7 @@ import '../../core/community.dart';
 import '../../providers/core/providers.dart';
 import '../../providers/notifications/notification_notifier.dart';
 import '../../theme/app_theme.dart';
+import '../widgets/immersive_scroll_wrapper.dart';
 
 class NotificationsScreen extends ConsumerWidget {
   const NotificationsScreen({super.key});
@@ -113,7 +114,7 @@ class NotificationsScreen extends ConsumerWidget {
       return _buildEmptyState();
     }
 
-    return RefreshIndicator(
+    return ImmersiveScrollWrapper(child: RefreshIndicator(
       color: accentColor,
       onRefresh: () =>
           ref.read(notificationNotifierProvider.notifier).refresh(),
@@ -138,7 +139,7 @@ class NotificationsScreen extends ConsumerWidget {
           );
         },
       ),
-    );
+    ));
   }
 
   Widget _buildEmptyState() {
@@ -195,28 +196,21 @@ class NotificationsScreen extends ConsumerWidget {
         // ── Dating notifications (like with type=dating_like or match) ──
         final subType = data['type'] as String?;
         if (subType == 'match') {
-          final convId = data['conversation_id'];
-          if (convId != null) {
-            final id = convId is int ? convId : int.tryParse('$convId');
-            if (id != null) {
-              context.push('/messages/$id');
-              return;
-            }
-          }
-          // Fallback: go to match partner's profile
+          // ⚠️ Nicht direkt zu /messages navigieren — conversation_id kann falsch sein!
+          // Stattdessen zum Profil mit showDating=true → dort wird korrekte Konversation aufgelöst.
           final matchActorId = data['actor_id'] as String?;
           if (matchActorId != null && matchActorId.isNotEmpty) {
-            context.push('/profile/$matchActorId');
+            context.push('/profile/$matchActorId?showDating=true');
             return;
           }
           context.go('/feed');
           return;
         }
         if (subType == 'dating_like') {
-          // Navigate to the liker's profile
+          // Navigate to the liker's profile with dating card auto-open
           final likerId = data['actor_id'] as String?;
           if (likerId != null && likerId.isNotEmpty) {
-            context.push('/profile/$likerId');
+            context.push('/profile/$likerId?showDating=true');
             return;
           }
           context.go('/feed');

@@ -265,11 +265,10 @@ class MarkerIconService {
     if (_navVehicleCache.containsKey(cacheKey)) return _navVehicleCache[cacheKey]!;
 
     const double circleArea = 160;
-    const double arrowH = 20; // Small nose arrow flush with circle
-    const double size = circleArea + arrowH;
+    const double size = circleArea; // No arrow — map rotates instead
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder, const Rect.fromLTWH(0, 0, circleArea, size));
-    const center = Offset(circleArea / 2, arrowH + circleArea / 2 - 6);
+    const center = Offset(circleArea / 2, circleArea / 2);
 
     final profileImage = await _loadAvatar(avatarUrl, size.toInt());
 
@@ -329,7 +328,7 @@ class MarkerIconService {
         ..strokeWidth = 4);
 
     // ── Vehicle mode badge at bottom ──
-    final badgeCenter = Offset(circleArea / 2, arrowH + circleArea - 32);
+    final badgeCenter = Offset(circleArea / 2, circleArea - 18);
     // White outline circle
     canvas.drawCircle(badgeCenter, 20, Paint()..color = Colors.white);
     // Colored circle
@@ -347,20 +346,7 @@ class MarkerIconService {
         badgeCenter.dx - vehicleTp.width / 2,
         badgeCenter.dy - vehicleTp.height / 2));
 
-    // ── Direction nose arrow flush with circle top ──
-    final arrowPath = Path()
-      ..moveTo(circleArea / 2, 0) // Tip
-      ..lineTo(circleArea / 2 - 14, arrowH + 2) // Bottom left
-      ..lineTo(circleArea / 2, arrowH - 4) // Inner notch
-      ..lineTo(circleArea / 2 + 14, arrowH + 2) // Bottom right
-      ..close();
-    canvas.drawPath(arrowPath, Paint()..color = modeColor);
-    canvas.drawPath(arrowPath,
-      Paint()
-        ..color = Colors.white
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 2
-        ..strokeJoin = StrokeJoin.round);
+    // No direction arrow — map rotates with heading instead
 
     final picture = recorder.endRecording();
     final image = await picture.toImage(circleArea.toInt(), size.toInt());

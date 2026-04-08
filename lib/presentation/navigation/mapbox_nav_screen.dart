@@ -9,6 +9,7 @@ import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../../data/repositories/blitzer_repository.dart';
+import '../../data/repositories/ride_repository.dart';
 import '../../services/blitzer_alert_service.dart';
 import '../../services/osm_blitzer_service.dart';
 import '../../services/osrm_service.dart';
@@ -18,6 +19,7 @@ import '../../services/voice_command_service.dart';
 import '../../services/vosk_wake_word_service.dart';
 import '../../providers/map/map_settings_provider.dart';
 import '../../core/api_config.dart';
+import '../widgets/bug_report_sheet.dart';
 
 // Token moved to ApiConfig to avoid secret-scanning blocks.
 String get _mapboxPublicToken => ApiConfig.mapboxPublicToken;
@@ -85,6 +87,12 @@ class _MapboxNavScreenState extends State<MapboxNavScreen> {
   String? _blitzerWarning;
   bool _blitzerLoaded = false;
 
+  // ── Ride tracking ──
+  double _totalDrivenMeters = 0;
+  double _prevLat = 0;
+  double _prevLng = 0;
+  DateTime? _rideStartedAt;
+
   // ── Hi Moto ──
   bool _hiMotoListening = false;
   String? _hiMotoFeedback;
@@ -103,12 +111,38 @@ class _MapboxNavScreenState extends State<MapboxNavScreen> {
 
   @override
   void dispose() {
+    _saveRideIfMeaningful();
     _positionSub?.cancel();
     _followTimer?.cancel();
     _speedLimitTimer?.cancel();
     _restoreVoskHandler();
     WakelockPlus.disable();
     super.dispose();
+  }
+
+  /// Save the driven distance as a ride entry (for KM stats & XP).
+  void _saveRideIfMeaningful() {
+    final distKm = _totalDrivenMeters / 1000.0;
+    debugPrint('[RideSave] totalMeters=$_totalDrivenMeters distKm=$distKm started=$_rideStartedAt');
+    if (distKm < 0.5 || _rideStartedAt == null) {
+      debugPrint('[RideSave] SKIP: too short or no start time');
+      return;
+    }
+    final duration = DateTime.now().difference(_rideStartedAt!);
+    if (duration.inSeconds < 60) {
+      debugPrint('[RideSave] SKIP: duration < 60s (${duration.inSeconds}s)');
+      return;
+    }
+    final avgSpeed = distKm / (duration.inSeconds / 3600.0);
+    debugPrint('[RideSave] SAVING: ${distKm.toStringAsFixed(2)} km, ${duration.inSeconds}s, avg ${avgSpeed.toStringAsFixed(1)} km/h');
+    RideRepository().saveRide(
+      startedAt: _rideStartedAt!,
+      endedAt: DateTime.now(),
+      distanceKm: distKm,
+      durationSeconds: duration.inSeconds,
+      avgSpeedKmh: avgSpeed.clamp(0, 300),
+    ).then((_) => debugPrint('[RideSave] SUCCESS'))
+     .catchError((e) => debugPrint('[RideSave] ERROR: $e'));
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -145,6 +179,15 @@ class _MapboxNavScreenState extends State<MapboxNavScreen> {
       _lng = pos.longitude;
       _speed = (pos.speed * 3.6).clamp(0, 300);
       if (pos.heading >= 0 && _speed > 3) _heading = pos.heading;
+
+      // Accumulate driven distance
+      if (_prevLat != 0 && _speed > 3) {
+        final segDist = geo.Geolocator.distanceBetween(_prevLat, _prevLng, _lat, _lng);
+        if (segDist < 500) _totalDrivenMeters += segDist;
+        _rideStartedAt ??= DateTime.now();
+      }
+      _prevLat = _lat;
+      _prevLng = _lng;
 
       if (_isNavigating) {
         _onGpsTick();
@@ -549,6 +592,14 @@ class _MapboxNavScreenState extends State<MapboxNavScreen> {
   void _onMapCreated(MapboxMap map) async {
     _mapboxMap = map;
 
+    // Scale puck smaller when zoomed out, larger when zoomed in
+    const scaleExpr = '["interpolate",["linear"],["zoom"],'
+        '12,0.35,'
+        '14,0.5,'
+        '16,0.7,'
+        '18,0.9,'
+        '20,1.1]';
+
     await map.location.updateSettings(LocationComponentSettings(
       enabled: true,
       pulsingEnabled: true,
@@ -557,6 +608,11 @@ class _MapboxNavScreenState extends State<MapboxNavScreen> {
       showAccuracyRing: false,
       puckBearingEnabled: true,
       puckBearing: PuckBearing.HEADING,
+      locationPuck: LocationPuck(
+        locationPuck2D: LocationPuck2D(
+          scaleExpression: scaleExpr,
+        ),
+      ),
     ));
   }
 
@@ -807,6 +863,44 @@ class _MapboxNavScreenState extends State<MapboxNavScreen> {
                   ),
                 ],
               ),
+            ),
+          ),
+
+          // ── Beta Badge + Bug Report (bottom-left) ──
+          Positioned(
+            bottom: 24 + MediaQuery.of(context).padding.bottom,
+            left: 14,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.red.withValues(alpha: 0.85),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: const Text('BETA', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w800, color: Colors.white, letterSpacing: 1)),
+                ),
+                const SizedBox(width: 6),
+                GestureDetector(
+                  onTap: () => BugReportSheet.show(context),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: Colors.orange.withValues(alpha: 0.85),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.bug_report_rounded, size: 12, color: Colors.white),
+                        SizedBox(width: 3),
+                        Text('Fehler', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: Colors.white)),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
 

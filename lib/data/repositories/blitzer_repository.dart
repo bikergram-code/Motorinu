@@ -26,6 +26,8 @@ class BlitzerReport {
   final BlitzerSource source;
   // OSM-specific: speed limit
   final int? speedLimit;
+  // OSM road reference (e.g. "B229", "A3", "L288")
+  final String? roadRef;
 
   const BlitzerReport({
     required this.id,
@@ -42,6 +44,7 @@ class BlitzerReport {
     this.reporterUsername,
     this.source = BlitzerSource.community,
     this.speedLimit,
+    this.roadRef,
   });
 
   factory BlitzerReport.fromJson(Map<String, dynamic> json) {
@@ -82,6 +85,7 @@ class BlitzerReport {
       createdAt: DateTime.now(),
       source: BlitzerSource.osm,
       speedLimit: camera.maxspeed,
+      roadRef: camera.ref,
     );
   }
 

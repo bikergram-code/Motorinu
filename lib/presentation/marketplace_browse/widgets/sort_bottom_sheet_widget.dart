@@ -20,7 +20,7 @@ class SortBottomSheetWidget extends StatelessWidget {
       {'label': 'Preis aufsteigend', 'icon': 'arrow_upward'},
       {'label': 'Preis absteigend', 'icon': 'arrow_downward'},
       {'label': 'Entfernung', 'icon': 'location_on'},
-      {'label': 'Neueste zuerst', 'icon': 'schedule'},
+      {'label': 'Neueste', 'icon': 'schedule'},
     ];
 
     return Container(

@@ -1,5 +1,3 @@
-import 'dart:typed_data';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -10,6 +8,7 @@ import '../../../data/repositories/vehicle_repository.dart';
 import '../../../providers/core/providers.dart';
 import '../../../providers/garage/garage_notifier.dart';
 import '../../../theme/app_theme.dart';
+import '../../shared/widgets/vehicle_brand_picker.dart';
 
 class AddVehicleSheet extends ConsumerStatefulWidget {
   const AddVehicleSheet({super.key, this.vehicle});
@@ -33,62 +32,107 @@ class AddVehicleSheet extends ConsumerStatefulWidget {
 }
 
 class _AddVehicleSheetState extends ConsumerState<AddVehicleSheet> {
-  final _brandController = TextEditingController();
-  final _modelController = TextEditingController();
+  String? _selectedBrand;
+  String? _selectedModel;
   final _yearController = TextEditingController();
   final _ccmController = TextEditingController();
   final _psController = TextEditingController();
+  final _descController = TextEditingController();
   String? _selectedCategory;
   bool _isSubmitting = false;
   String? _error;
 
-  // Image
-  Uint8List? _selectedImageBytes;
-  String? _selectedImageName;
-  String? _existingImageUrl;
+  // Images (multi)
+  final List<String> _imageUrls = []; // uploaded URLs
+  bool _isUploading = false;
 
   @override
   void initState() {
     super.initState();
     final v = widget.vehicle;
     if (v != null) {
-      _brandController.text = v.brand;
-      _modelController.text = v.model;
+      _selectedBrand = v.brand;
+      _selectedModel = v.model;
       if (v.year != null) _yearController.text = '${v.year}';
       if (v.displacementCc != null) {
         _ccmController.text = '${v.displacementCc}';
       }
       if (v.horsepower != null) _psController.text = '${v.horsepower}';
+      if (v.description != null) _descController.text = v.description!;
       _selectedCategory = v.category;
-      _existingImageUrl = v.imageUrl;
+      _imageUrls.addAll(v.allImages);
     }
   }
 
   @override
   void dispose() {
-    _brandController.dispose();
-    _modelController.dispose();
     _yearController.dispose();
     _ccmController.dispose();
     _psController.dispose();
+    _descController.dispose();
     super.dispose();
   }
 
-  Future<void> _pickImage(ImageSource source) async {
+  Future<void> _pickAndUploadImage(ImageSource source) async {
+    if (_imageUrls.length >= 5) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Maximal 5 Bilder')));
+      }
+      return;
+    }
     final picker = ImagePicker();
-    final picked = await picker.pickImage(
-      source: source,
-      maxWidth: 1200,
-      maxHeight: 1200,
-      imageQuality: 85,
-    );
-    if (picked == null) return;
 
-    final bytes = await picked.readAsBytes();
-    setState(() {
-      _selectedImageBytes = bytes;
-      _selectedImageName = picked.name;
-    });
+    // Gallery: allow multi-select, Camera: single image
+    if (source == ImageSource.gallery) {
+      final remaining = 5 - _imageUrls.length;
+      final files = await picker.pickMultiImage(
+        maxWidth: 1200,
+        maxHeight: 1200,
+        imageQuality: 85,
+        limit: remaining,
+      );
+      if (files.isEmpty) return;
+      setState(() => _isUploading = true);
+      try {
+        final repo = ref.read(vehicleRepositoryProvider);
+        for (final file in files) {
+          if (_imageUrls.length >= 5) break;
+          final bytes = await file.readAsBytes();
+          final url = await repo.uploadVehicleImage(bytes, file.name);
+          if (mounted) setState(() => _imageUrls.add(url));
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Fehler: $e')));
+        }
+      } finally {
+        if (mounted) setState(() => _isUploading = false);
+      }
+    } else {
+      final picked = await picker.pickImage(
+        source: source,
+        maxWidth: 1200,
+        maxHeight: 1200,
+        imageQuality: 85,
+      );
+      if (picked == null) return;
+      setState(() => _isUploading = true);
+      try {
+        final bytes = await picked.readAsBytes();
+        final repo = ref.read(vehicleRepositoryProvider);
+        final url = await repo.uploadVehicleImage(bytes, picked.name);
+        if (mounted) setState(() => _imageUrls.add(url));
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Fehler: $e')));
+        }
+      } finally {
+        if (mounted) setState(() => _isUploading = false);
+      }
+    }
   }
 
   void _showImageSourcePicker(Color accentColor) {
@@ -116,7 +160,7 @@ class _AddVehicleSheetState extends ConsumerState<AddVehicleSheet> {
                     style: GoogleFonts.inter(color: pickerText)),
                 onTap: () {
                   Navigator.pop(ctx);
-                  _pickImage(ImageSource.gallery);
+                  _pickAndUploadImage(ImageSource.gallery);
                 },
               ),
               ListTile(
@@ -125,24 +169,9 @@ class _AddVehicleSheetState extends ConsumerState<AddVehicleSheet> {
                     style: GoogleFonts.inter(color: pickerText)),
                 onTap: () {
                   Navigator.pop(ctx);
-                  _pickImage(ImageSource.camera);
+                  _pickAndUploadImage(ImageSource.camera);
                 },
               ),
-              if (_selectedImageBytes != null || _existingImageUrl != null)
-                ListTile(
-                  leading: const Icon(Icons.delete_outline_rounded,
-                      color: Colors.red),
-                  title: Text('Bild entfernen',
-                      style: GoogleFonts.inter(color: Colors.red)),
-                  onTap: () {
-                    Navigator.pop(ctx);
-                    setState(() {
-                      _selectedImageBytes = null;
-                      _selectedImageName = null;
-                      _existingImageUrl = null;
-                    });
-                  },
-                ),
             ],
           ),
         ),
@@ -151,8 +180,8 @@ class _AddVehicleSheetState extends ConsumerState<AddVehicleSheet> {
   }
 
   Future<void> _handleSave() async {
-    final brand = _brandController.text.trim();
-    final model = _modelController.text.trim();
+    final brand = _selectedBrand?.trim() ?? '';
+    final model = _selectedModel?.trim() ?? '';
 
     if (brand.isEmpty || model.isEmpty) {
       setState(() => _error = 'Marke und Modell sind Pflichtfelder.');
@@ -165,16 +194,20 @@ class _AddVehicleSheetState extends ConsumerState<AddVehicleSheet> {
     });
 
     try {
-      final repo = ref.read(vehicleRepositoryProvider);
-
-      // Upload image if new one was selected
-      String? imageUrl = _existingImageUrl;
-      if (_selectedImageBytes != null && _selectedImageName != null) {
-        imageUrl = await repo.uploadVehicleImage(
-            _selectedImageBytes!, _selectedImageName!);
-      }
+      final imageUrl = _imageUrls.isNotEmpty ? _imageUrls.first : null;
 
       if (widget.isEditing) {
+        final updates = <String, dynamic>{
+          'brand': brand,
+          'model': model,
+          'year': int.tryParse(_yearController.text.trim()),
+          'displacement_cc': int.tryParse(_ccmController.text.trim()),
+          'horsepower': int.tryParse(_psController.text.trim()),
+          'category': _selectedCategory,
+          'description': _descController.text.trim().isEmpty ? null : _descController.text.trim(),
+          'image_url': imageUrl,
+          'images': _imageUrls,
+        };
         await ref.read(garageNotifierProvider.notifier).updateVehicle(
               widget.vehicle!.id,
               brand: brand,
@@ -183,7 +216,9 @@ class _AddVehicleSheetState extends ConsumerState<AddVehicleSheet> {
               displacementCc: int.tryParse(_ccmController.text.trim()),
               horsepower: int.tryParse(_psController.text.trim()),
               category: _selectedCategory,
+              description: _descController.text.trim().isEmpty ? null : _descController.text.trim(),
               imageUrl: imageUrl,
+              images: _imageUrls,
             );
       } else {
         final community = ref.read(communityProvider);
@@ -194,7 +229,9 @@ class _AddVehicleSheetState extends ConsumerState<AddVehicleSheet> {
               displacementCc: int.tryParse(_ccmController.text.trim()),
               horsepower: int.tryParse(_psController.text.trim()),
               category: _selectedCategory,
+              description: _descController.text.trim().isEmpty ? null : _descController.text.trim(),
               imageUrl: imageUrl,
+              images: _imageUrls,
               community: community?.name,
             );
       }
@@ -299,33 +336,29 @@ class _AddVehicleSheetState extends ConsumerState<AddVehicleSheet> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // ── Fahrzeugbild ──
-                  _buildLabel('Foto'),
+                  // ── Fahrzeugbilder (multi) ──
+                  _buildLabel('Fotos (max. 5)'),
                   const SizedBox(height: 10),
-                  GestureDetector(
-                    onTap: () => _showImageSourcePicker(accentColor),
-                    child: _buildImagePreview(accentColor, isBiker),
+                  _buildImageGallery(accentColor, isBiker),
+
+                  const SizedBox(height: 20),
+
+                  // Marke + Modell via VehicleBrandPicker
+                  VehicleBrandPicker(
+                    selectedBrand: _selectedBrand,
+                    selectedModel: _selectedModel,
+                    isMotorcycle: isBiker,
+                    accentColor: accentColor,
+                    cardColor: textOnCard.withValues(alpha: 0.04),
+                    textColor: textOnCard,
+                    onBrandChanged: (brand) => setState(() {
+                      _selectedBrand = brand;
+                      _selectedModel = null;
+                    }),
+                    onModelChanged: (model) => setState(() {
+                      _selectedModel = model;
+                    }),
                   ),
-
-                  const SizedBox(height: 20),
-                  _buildLabel('Marke *'),
-                  const SizedBox(height: 8),
-                  _buildInput(
-                      controller: _brandController,
-                      hint: isBiker
-                          ? 'z.B. Kawasaki, Ducati...'
-                          : 'z.B. BMW, Mercedes...',
-                      accentColor: accentColor),
-
-                  const SizedBox(height: 20),
-                  _buildLabel('Modell *'),
-                  const SizedBox(height: 8),
-                  _buildInput(
-                      controller: _modelController,
-                      hint: isBiker
-                          ? 'z.B. Z900, Panigale V4...'
-                          : 'z.B. M3, AMG C63...',
-                      accentColor: accentColor),
 
                   const SizedBox(height: 20),
                   Row(
@@ -376,6 +409,15 @@ class _AddVehicleSheetState extends ConsumerState<AddVehicleSheet> {
                       ),
                     ],
                   ),
+
+                  const SizedBox(height: 20),
+                  _buildLabel('Beschreibung'),
+                  const SizedBox(height: 8),
+                  _buildInput(
+                      controller: _descController,
+                      hint: 'Zustand, Extras, Besonderheiten...',
+                      accentColor: accentColor,
+                      maxLines: 3),
 
                   const SizedBox(height: 20),
                   _buildLabel('Kategorie'),
@@ -462,97 +504,96 @@ class _AddVehicleSheetState extends ConsumerState<AddVehicleSheet> {
     );
   }
 
-  Widget _buildImagePreview(Color accentColor, bool isBiker) {
-    // Newly selected image
-    if (_selectedImageBytes != null) {
-      return ClipRRect(
-        borderRadius: BorderRadius.circular(14),
-        child: Stack(
-          children: [
-            Image.memory(
-              _selectedImageBytes!,
-              width: double.infinity,
-              height: 180,
-              fit: BoxFit.cover,
-            ),
-            Positioned(
-              top: 8,
-              right: 8,
-              child: _imageActionButton(accentColor),
-            ),
-          ],
-        ),
-      );
-    }
-
-    // Existing image from server
-    if (_existingImageUrl != null && _existingImageUrl!.isNotEmpty) {
-      return ClipRRect(
-        borderRadius: BorderRadius.circular(14),
-        child: Stack(
-          children: [
-            Image.network(
-              _existingImageUrl!,
-              width: double.infinity,
-              height: 180,
-              fit: BoxFit.cover,
-              errorBuilder: (_, __, ___) =>
-                  _buildImagePlaceholder(accentColor, isBiker),
-            ),
-            Positioned(
-              top: 8,
-              right: 8,
-              child: _imageActionButton(accentColor),
-            ),
-          ],
-        ),
-      );
-    }
-
-    // Placeholder
-    return _buildImagePlaceholder(accentColor, isBiker);
-  }
-
-  Widget _imageActionButton(Color accentColor) {
-    return Container(
-      padding: const EdgeInsets.all(6),
-      decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.6),
-        shape: BoxShape.circle,
-      ),
-      child: Icon(Icons.edit_rounded, color: accentColor, size: 20),
-    );
-  }
-
-  Widget _buildImagePlaceholder(Color accentColor, bool isBiker) {
-    return Container(
-      width: double.infinity,
-      height: 140,
-      decoration: BoxDecoration(
-        color: accentColor.withValues(alpha: 0.06),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(
-          color: accentColor.withValues(alpha: 0.15),
-          width: 1,
-        ),
-      ),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
+  Widget _buildImageGallery(Color accentColor, bool isBiker) {
+    return SizedBox(
+      height: 110,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
         children: [
-          Icon(
-            Icons.add_a_photo_rounded,
-            size: 32,
-            color: accentColor.withValues(alpha: 0.5),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            isBiker ? 'Foto vom Bike' : 'Foto vom Auto',
-            style: GoogleFonts.inter(
-              fontSize: 13,
-              fontWeight: FontWeight.w500,
-              color: accentColor.withValues(alpha: 0.6),
+          // Existing images
+          for (int i = 0; i < _imageUrls.length; i++)
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: Stack(
+                children: [
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: Image.network(
+                      _imageUrls[i],
+                      width: 100, height: 100,
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, __, ___) => Container(
+                        width: 100, height: 100,
+                        color: Colors.grey.withValues(alpha: 0.3),
+                        child: const Icon(Icons.broken_image_rounded),
+                      ),
+                    ),
+                  ),
+                  // Delete button
+                  Positioned(
+                    top: 4, right: 4,
+                    child: GestureDetector(
+                      onTap: () => setState(() => _imageUrls.removeAt(i)),
+                      child: Container(
+                        padding: const EdgeInsets.all(3),
+                        decoration: BoxDecoration(
+                          color: Colors.black.withValues(alpha: 0.7),
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(Icons.close, color: Colors.white, size: 14),
+                      ),
+                    ),
+                  ),
+                  // Badge number
+                  if (i == 0)
+                    Positioned(
+                      bottom: 4, left: 4,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: accentColor,
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Text('Hauptbild', style: GoogleFonts.inter(fontSize: 9, fontWeight: FontWeight.w600, color: Colors.white)),
+                      ),
+                    ),
+                ],
+              ),
             ),
-          ),
+          // Upload spinner
+          if (_isUploading)
+            Container(
+              width: 100, height: 100,
+              margin: const EdgeInsets.only(right: 8),
+              decoration: BoxDecoration(
+                color: accentColor.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: accentColor.withValues(alpha: 0.2)),
+              ),
+              child: Center(child: CircularProgressIndicator(strokeWidth: 2, color: accentColor)),
+            ),
+          // Add button (if < 5)
+          if (_imageUrls.length < 5 && !_isUploading)
+            GestureDetector(
+              onTap: () => _showImageSourcePicker(accentColor),
+              child: Container(
+                width: 100, height: 100,
+                decoration: BoxDecoration(
+                  color: accentColor.withValues(alpha: 0.06),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: accentColor.withValues(alpha: 0.2)),
+                ),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(Icons.add_a_photo_rounded, size: 28, color: accentColor.withValues(alpha: 0.5)),
+                    const SizedBox(height: 4),
+                    Text(isBiker ? 'Foto' : 'Foto',
+                      style: GoogleFonts.inter(fontSize: 11, color: accentColor.withValues(alpha: 0.6))),
+                  ],
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -575,6 +616,7 @@ class _AddVehicleSheetState extends ConsumerState<AddVehicleSheet> {
     required String hint,
     required Color accentColor,
     TextInputType keyboardType = TextInputType.text,
+    int maxLines = 1,
   }) {
     final brightness = Theme.of(context).brightness;
     final community = ref.watch(communityProvider);
@@ -583,6 +625,7 @@ class _AddVehicleSheetState extends ConsumerState<AddVehicleSheet> {
     return TextField(
       controller: controller,
       keyboardType: keyboardType,
+      maxLines: maxLines,
       style: GoogleFonts.inter(fontSize: 15, color: textOnCard),
       decoration: InputDecoration(
         hintText: hint,

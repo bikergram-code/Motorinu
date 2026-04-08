@@ -208,11 +208,14 @@ class _DatingScreenState extends ConsumerState<DatingScreen>
         final g = c['gender'] as String?;
         if (g != _showGender) return false;
       }
-      // Age filter
+      // Age filter — Minderjährige IMMER ausschließen
       final birthYear = c['birth_year'] as int?;
       if (birthYear != null) {
         final age = now - birthYear;
+        if (age < 18) return false; // Minderjährigenschutz
         if (age < _minAge || age > _maxAge) return false;
+      } else {
+        return false; // Kein Geburtsjahr = kein Dating
       }
       // Distance filter
       if (_maxDistKm > 0 && _myLat != null && _myLng != null) {
@@ -566,7 +569,7 @@ class _DatingScreenState extends ConsumerState<DatingScreen>
                 // ── Action buttons ──
                 if (datingState.candidates.isNotEmpty)
                   Padding(
-                    padding: const EdgeInsets.only(bottom: 4, top: 4),
+                    padding: EdgeInsets.only(bottom: MediaQuery.of(context).padding.bottom + 60, top: 8),
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
@@ -648,9 +651,9 @@ class _DatingScreenState extends ConsumerState<DatingScreen>
           right: 20,
           bottom: 4,
           child: GestureDetector(
-            onPanStart: _onPanStart,
-            onPanUpdate: _onPanUpdate,
-            onPanEnd: _onPanEnd,
+            onHorizontalDragStart: _onPanStart,
+            onHorizontalDragUpdate: _onPanUpdate,
+            onHorizontalDragEnd: _onPanEnd,
             child: ListenableBuilder(
               listenable: _isFlying ? _flyController : _springController,
               builder: (context, child) {

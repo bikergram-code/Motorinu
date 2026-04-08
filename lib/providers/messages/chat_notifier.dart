@@ -1,7 +1,9 @@
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -213,7 +215,9 @@ class ChatNotifier extends Notifier<ChatState> {
 
   void _subscribeToMessages(int conversationId) {
     _channel?.unsubscribe();
+    debugPrint('[Chat] Subscribing to realtime for conv=$conversationId');
     _channel = _repo.subscribeToMessages(conversationId, (newRecord) async {
+      debugPrint('[Chat] RT INSERT conv=$conversationId type=${newRecord['message_type']} id=${newRecord['id']} bodyLen=${(newRecord['body'] as String?)?.length ?? 0}');
       var message = _parseMessage(newRecord);
       final currentUserId = Supabase.instance.client.auth.currentUser?.id;
 
@@ -233,10 +237,32 @@ class ChatNotifier extends Notifier<ChatState> {
         );
       }
 
-      if (message.senderId != currentUserId) {
-        _repo.markAsRead(conversationId);
-        ref.read(unreadMessagesProvider.notifier).refresh();
+      // Only mark as read if user is actually viewing this chat
+      // (don't auto-mark when user is on another tab)
+      if (message.senderId != currentUserId && state.isLoading == false && state.messages.isNotEmpty) {
+        // Delay slightly to let the UI show the message first
+        Future.delayed(const Duration(milliseconds: 500), () {
+          _repo.markAsRead(conversationId);
+          ref.read(unreadMessagesProvider.notifier).refresh();
+        });
       }
+    }, onUpdate: (updatedRecord) {
+      // Handle edited/updated messages in realtime
+      final updated = _parseMessage(updatedRecord);
+      final msgs = state.messages.map((m) {
+        if (m.id == updated.id) return updated.copyWith(senderName: m.senderName, senderAvatar: m.senderAvatar);
+        return m;
+      }).toList();
+      state = state.copyWith(messages: msgs);
+    }, onDelete: (oldRecord) {
+      // Handle deleted messages in realtime (other user deleted a message)
+      final deletedId = oldRecord['id'];
+      if (deletedId == null) return;
+      final id = deletedId is int ? deletedId : int.tryParse('$deletedId');
+      if (id == null) return;
+      final msgs = List<DirectMessage>.from(state.messages);
+      msgs.removeWhere((m) => m.id == id);
+      state = state.copyWith(messages: msgs);
     });
   }
 
@@ -277,6 +303,30 @@ class ChatNotifier extends Notifier<ChatState> {
     });
   }
 
+  /// Re-subscribe and re-fetch messages — call on app resume to recover
+  /// from dropped Realtime connections (Samsung Battery-Manager etc.).
+  Future<void> reconnect() async {
+    debugPrint('[Chat] reconnect() conv=$_conversationId');
+    try {
+      // Re-fetch latest messages so we don't miss anything that arrived
+      // while the WebSocket was paused.
+      final data = await _repo.getMessages(_conversationId);
+      List<DirectMessage> messages;
+      if (state.isGroupChat) {
+        messages = await _enrichGroupMessages(data);
+      } else {
+        messages = data.map((row) => _parseMessage(row)).toList();
+      }
+      state = state.copyWith(messages: messages);
+      await _repo.markAsRead(_conversationId);
+      ref.read(unreadMessagesProvider.notifier).refresh();
+    } catch (e) {
+      debugPrint('[Chat] reconnect refetch error: $e');
+    }
+    // Force a fresh Realtime channel
+    _subscribeToMessages(_conversationId);
+  }
+
   /// Notify that the current user is typing.
   void setTyping(bool isTyping) {
     final currentUserId = Supabase.instance.client.auth.currentUser?.id;
@@ -294,6 +344,29 @@ class ChatNotifier extends Notifier<ChatState> {
 
   void clearReplyTo() {
     state = state.copyWith(clearReplyTo: true);
+  }
+
+  // ── Delete message ──
+
+  Future<void> deleteMessage(int messageId) async {
+    final sb = Supabase.instance.client;
+    final uid = sb.auth.currentUser?.id;
+    debugPrint('[Chat] deleteMessage($messageId) uid=$uid');
+    if (uid == null) return;
+    try {
+      final result = await sb.from('messages')
+          .delete()
+          .eq('id', messageId)
+          .eq('user_id', uid)
+          .select();
+      debugPrint('[Chat] deleteMessage result: $result');
+      // Remove from local state
+      final msgs = List<DirectMessage>.from(state.messages);
+      msgs.removeWhere((m) => m.id == messageId);
+      state = state.copyWith(messages: msgs);
+    } catch (e) {
+      debugPrint('[Chat] Delete error: $e');
+    }
   }
 
   // ── Send methods ──
@@ -322,10 +395,37 @@ class ChatNotifier extends Notifier<ChatState> {
       } else {
         state = state.copyWith(isSending: false, clearReplyTo: true);
       }
+
+      // Trigger push notification to receiver
+      _triggerPush(body);
     } catch (e) {
       debugPrint('Error sending message: $e');
       state = state.copyWith(isSending: false, error: e.toString());
     }
+  }
+
+  /// Send push notification via our server
+  void _triggerPush(String content) {
+    final receiverId = state.otherUserId;
+    final senderId = Supabase.instance.client.auth.currentUser?.id;
+    if (receiverId == null || senderId == null) return;
+
+    // Fire and forget — don't block the UI
+    http.post(
+      Uri.parse('https://api.bikergram.com/webhook/message'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'record': {
+          'sender_id': senderId,
+          'receiver_id': receiverId,
+          'content': content,
+        }
+      }),
+    ).then((_) {
+      debugPrint('[Push] Triggered for $receiverId');
+    }).catchError((e) {
+      debugPrint('[Push] Trigger failed: $e');
+    });
   }
 
   Future<void> sendImageMessage(XFile image, {String? caption}) async {
@@ -359,6 +459,8 @@ class ChatNotifier extends Notifier<ChatState> {
       } else {
         state = state.copyWith(isSending: false, clearReplyTo: true);
       }
+
+      _triggerPush(caption?.isNotEmpty == true ? caption! : '📷 Bild');
     } catch (e) {
       debugPrint('Error sending image: $e');
       state = state.copyWith(isSending: false, error: e.toString());
@@ -469,6 +571,36 @@ class ChatNotifier extends Notifier<ChatState> {
       createdAt: row['created_at'] != null
           ? DateTime.tryParse(row['created_at'] as String)
           : null,
+      editedAt: row['edited_at'] != null
+          ? DateTime.tryParse(row['edited_at'].toString())
+          : null,
     );
+  }
+
+  // ── Edit message ──
+
+  Future<void> editMessage(int messageId, String newBody) async {
+    final sb = Supabase.instance.client;
+    final uid = sb.auth.currentUser?.id;
+    if (uid == null || newBody.trim().isEmpty) return;
+    try {
+      await sb.from('messages')
+          .update({
+            'body': newBody.trim(),
+            'edited_at': DateTime.now().toIso8601String(),
+          })
+          .eq('id', messageId)
+          .eq('user_id', uid);
+      // Update local state
+      final msgs = state.messages.map((m) {
+        if (m.id == messageId) {
+          return m.copyWith(body: newBody.trim(), editedAt: DateTime.now());
+        }
+        return m;
+      }).toList();
+      state = state.copyWith(messages: msgs);
+    } catch (e) {
+      debugPrint('[Chat] Edit error: $e');
+    }
   }
 }

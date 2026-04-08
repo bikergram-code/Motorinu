@@ -1,12 +1,20 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../data/repositories/message_repository.dart';
 import '../core/providers.dart';
 import 'incoming_message_provider.dart';
+
+/// Tracks app lifecycle for notification decisions
+class _AppLifecycle {
+  static final instance = _AppLifecycle._();
+  _AppLifecycle._();
+  bool isBackground = false;
+}
 
 /// Global unread message count provider.
 /// Uses Supabase Realtime + polling fallback (every 15s).
@@ -78,10 +86,27 @@ class UnreadMessagesNotifier extends Notifier<int> {
     });
   }
 
-  /// Check if a conversation belongs to the current community before showing.
+  /// Check if the current user is a participant AND the conversation
+  /// belongs to the current community before showing.
   Future<void> _checkConversationCommunity(
       int convId, Map<String, dynamic> newMessage) async {
     try {
+      final currentUserId = Supabase.instance.client.auth.currentUser?.id;
+      if (currentUserId == null) return;
+
+      // 1. Check if user is actually a participant of this conversation
+      final participant = await Supabase.instance.client
+          .from('conversation_participants')
+          .select('user_id')
+          .eq('conversation_id', convId)
+          .eq('user_id', currentUserId)
+          .maybeSingle();
+      if (participant == null) {
+        debugPrint('[UnreadMsg] Not a participant of conv $convId → SKIP');
+        return;
+      }
+
+      // 2. Check community
       final conv = await Supabase.instance.client
           .from('conversations')
           .select('community')
@@ -95,10 +120,10 @@ class UnreadMessagesNotifier extends Notifier<int> {
         return;
       }
       // Community matches (or is null) — increment and show toast
-      debugPrint('[UnreadMsg] Community OK (conv=$convCommunity, mine=$_community) → increment');
+      debugPrint('[UnreadMsg] Participant + Community OK → increment');
       _incrementAndEmit(newMessage);
     } catch (e) {
-      debugPrint('[UnreadMsg] Community check error: $e');
+      debugPrint('[UnreadMsg] Participation/community check error: $e');
       // On error, still show it (better safe)
       _incrementAndEmit(newMessage);
     }
@@ -111,6 +136,83 @@ class UnreadMessagesNotifier extends Notifier<int> {
     _lastRealtimeIncrement = DateTime.now();
     debugPrint('[UnreadMsg] Incremented to $state');
     IncomingMessageBus.instance.emit(newMessage);
+    _showLocalNotification(newMessage);
+  }
+
+  /// Show a local notification for the new message — creates app icon badge
+  Future<void> _showLocalNotification(Map<String, dynamic> msg) async {
+    try {
+      final senderId = msg['user_id']?.toString();
+      if (senderId == null) return;
+
+      // Fetch sender name
+      String senderName = 'Neue Nachricht';
+      try {
+        final profile = await Supabase.instance.client
+            .from('profiles')
+            .select('username')
+            .eq('id', senderId)
+            .maybeSingle();
+        senderName = profile?['username'] as String? ?? 'Jemand';
+      } catch (_) {}
+
+      final content = msg['content']?.toString() ?? '';
+      final displayContent = content.length > 100
+          ? '${content.substring(0, 100)}...'
+          : content;
+
+      final convId = msg['conversation_id'];
+      final groupKey = convId != null
+          ? 'com.bikergram.conv_$convId'
+          : 'com.bikergram.messages';
+
+      final flnp = FlutterLocalNotificationsPlugin();
+
+      // Individual message notification (grouped by conversation)
+      final androidDetails = AndroidNotificationDetails(
+        'messages',
+        'Nachrichten',
+        channelDescription: 'Neue Nachrichten',
+        importance: Importance.high,
+        priority: Priority.high,
+        number: state, // Badge count = total unread
+        showWhen: true,
+        groupKey: groupKey,
+      );
+      final details = NotificationDetails(android: androidDetails);
+
+      await flnp.show(
+        DateTime.now().millisecondsSinceEpoch ~/ 1000, // unique ID per message
+        senderName,
+        displayContent.isEmpty ? 'Neue Nachricht' : displayContent,
+        details,
+      );
+
+      // Summary notification for grouping (Android auto-groups when > 1)
+      final summaryDetails = AndroidNotificationDetails(
+        'messages',
+        'Nachrichten',
+        channelDescription: 'Neue Nachrichten',
+        importance: Importance.high,
+        priority: Priority.high,
+        groupKey: groupKey,
+        setAsGroupSummary: true,
+        styleInformation: InboxStyleInformation(
+          ['$senderName: ${displayContent.isEmpty ? 'Neue Nachricht' : displayContent}'],
+          contentTitle: '$state neue Nachrichten',
+          summaryText: '$state ungelesen',
+        ),
+      );
+      await flnp.show(
+        convId?.hashCode ?? 0, // same ID per conversation = updates summary
+        '$state neue Nachrichten',
+        '',
+        NotificationDetails(android: summaryDetails),
+      );
+      debugPrint('[UnreadMsg] Local notification shown for $senderName');
+    } catch (e) {
+      debugPrint('[UnreadMsg] Notification error: $e');
+    }
   }
 
   /// Poll every 15s as fallback if Realtime doesn't fire.
@@ -118,7 +220,7 @@ class UnreadMessagesNotifier extends Notifier<int> {
   /// less than 5 seconds ago, we skip the poll to avoid resetting the badge.
   void _startPolling() {
     _pollTimer?.cancel();
-    _pollTimer = Timer.periodic(const Duration(seconds: 15), (_) async {
+    _pollTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
       try {
         // Don't poll if we just got a realtime event — the DB might
         // not have caught up yet (replication lag, etc.).

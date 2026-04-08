@@ -37,9 +37,12 @@ class _SwipeCardState extends State<SwipeCard> {
     final birthYear = candidate['birth_year'] as int?;
     final age = birthYear != null ? DateTime.now().year - birthYear : null;
     final bio = candidate['bio'] as String?;
+    // Multi-vehicle support (dating_vehicles array), fallback to legacy single fields
+    final datingVehicles = candidate['dating_vehicles'] as List? ?? [];
     final vehicleBrand = candidate['vehicle_brand'] as String?;
     final vehicleModel = candidate['vehicle_model'] as String?;
     final vehicleHp = candidate['vehicle_hp'] as int?;
+    final totalFeedLikes = (candidate['total_feed_likes'] as int?) ?? 0;
     final xp = (candidate['xp_total'] as int?) ?? 0;
     final level = XpCalculator.levelFromXp(xp);
     final levelName = XpCalculator.levelName(level);
@@ -189,10 +192,68 @@ class _SwipeCardState extends State<SwipeCard> {
 
                   const SizedBox(height: 6),
 
-                  // Vehicle + Distance row
-                  Row(
-                    children: [
-                      if (vehicleBrand != null) ...[
+                  // Vehicle(s) + Distance row
+                  if (datingVehicles.isNotEmpty) ...[
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 4,
+                      children: [
+                        ...datingVehicles.take(3).map((v) {
+                          final vBrand = v['brand'] ?? '';
+                          final vModel = v['model'] ?? '';
+                          final vHp = v['horsepower'] as int?;
+                          final vCommunity = v['community'] as String?;
+                          final isBike = vCommunity == 'bikergram';
+                          return Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withValues(alpha: 0.12),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  isBike ? Icons.two_wheeler_rounded : Icons.directions_car_rounded,
+                                  size: 14,
+                                  color: isBike ? Colors.orange : Colors.blue,
+                                ),
+                                const SizedBox(width: 4),
+                                Text(
+                                  '$vBrand $vModel${vHp != null ? ' · ${vHp}PS' : ''}',
+                                  style: GoogleFonts.inter(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                    color: Colors.white.withValues(alpha: 0.9),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+                        }),
+                        if (datingVehicles.length > 3)
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withValues(alpha: 0.12),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Text(
+                              '+${datingVehicles.length - 3}',
+                              style: GoogleFonts.inter(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.white.withValues(alpha: 0.7),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                  ] else if (vehicleBrand != null) ...[
+                    // Legacy single vehicle fallback
+                    Row(
+                      children: [
                         Icon(
                           community == Community.bikergram
                               ? Icons.two_wheeler_rounded
@@ -217,12 +278,12 @@ class _SwipeCardState extends State<SwipeCard> {
                           ),
                         ),
                       ],
-                      if (vehicleBrand != null && distance != null)
-                        Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 8),
-                          child: Text('•', style: TextStyle(color: Colors.white.withValues(alpha: 0.4))),
-                        ),
-                      if (distance != null) ...[
+                    ),
+                    const SizedBox(height: 4),
+                  ],
+                  if (distance != null)
+                    Row(
+                      children: [
                         Icon(Icons.location_on_rounded, size: 14, color: Colors.white.withValues(alpha: 0.6)),
                         const SizedBox(width: 2),
                         Text(
@@ -233,26 +294,54 @@ class _SwipeCardState extends State<SwipeCard> {
                           ),
                         ),
                       ],
-                    ],
-                  ),
+                    ),
 
                   const SizedBox(height: 6),
 
-                  // Level badge
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                    decoration: BoxDecoration(
-                      color: accentColor.withValues(alpha: 0.2),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Text(
-                      'Lvl $level · $levelName',
-                      style: GoogleFonts.inter(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                        color: accentColor,
+                  // Level badge + Feed likes badge
+                  Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: accentColor.withValues(alpha: 0.2),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          'Lvl $level · $levelName',
+                          style: GoogleFonts.inter(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: accentColor,
+                          ),
+                        ),
                       ),
-                    ),
+                      if (totalFeedLikes > 0) ...[
+                        const SizedBox(width: 6),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: Colors.red.withValues(alpha: 0.2),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.favorite_rounded, size: 12, color: Colors.red),
+                              const SizedBox(width: 4),
+                              Text(
+                                '$totalFeedLikes',
+                                style: GoogleFonts.inter(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                  color: Colors.red,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ],
                   ),
 
                   // Bio

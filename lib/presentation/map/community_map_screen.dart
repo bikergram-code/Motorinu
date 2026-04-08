@@ -43,6 +43,7 @@ import '../../services/vosk_wake_word_service.dart';
 import '../../services/voice_command_service.dart';
 import '../../services/fast_answer_service.dart';
 import '../../services/biker_ai_service.dart';
+import '../../providers/navigation_state.dart';
 import '../../theme/app_theme.dart';
 import 'widgets/blitzer_alert_banner.dart';
 import 'widgets/live_user_bubble.dart';
@@ -59,6 +60,9 @@ final Map<String, BitmapDescriptor> _markerIconCache = {};
 
 // ─── Profile picture nav icon cache ──────────────────────────────────────────
 final Map<String, BitmapDescriptor> _navIconCache = {};
+// Raw bytes + aspect for zoom-dependent puck scaling
+Uint8List? _navIconRawBytes;
+double _navIconRawAspect = 1.0;
 
 /// Creates a circular profile picture marker with accent-colored border.
 /// Falls back to a vehicle icon if no avatar URL is available.
@@ -70,8 +74,8 @@ Future<BitmapDescriptor> _getProfileNavIcon({
   final cacheKey = '${avatarUrl ?? 'fallback'}_${accentColor.value}';
   if (_navIconCache.containsKey(cacheKey)) return _navIconCache[cacheKey]!;
 
-  const double circleSize = 128;
-  const double arrowHeight = 36; // Arrow extends above circle
+  const double circleSize = 56;
+  const double arrowHeight = 16; // Arrow extends above circle
   const double canvasWidth = circleSize;
   const double canvasHeight = circleSize + arrowHeight;
   const borderColor = Color(0xFF00C853); // Leuchtgrün = Online
@@ -86,9 +90,9 @@ Future<BitmapDescriptor> _getProfileNavIcon({
     ..style = PaintingStyle.fill;
   final arrowPath = Path()
     ..moveTo(canvasWidth / 2, 0) // Tip (top center)
-    ..lineTo(canvasWidth / 2 - 18, arrowHeight + 4) // Bottom left
-    ..lineTo(canvasWidth / 2, arrowHeight - 8) // Inner notch
-    ..lineTo(canvasWidth / 2 + 18, arrowHeight + 4) // Bottom right
+    ..lineTo(canvasWidth / 2 - 9, arrowHeight + 2) // Bottom left
+    ..lineTo(canvasWidth / 2, arrowHeight - 4) // Inner notch
+    ..lineTo(canvasWidth / 2 + 9, arrowHeight + 2) // Bottom right
     ..close();
   canvas.drawPath(arrowPath, arrowPaint);
   // Arrow border
@@ -145,7 +149,7 @@ Future<BitmapDescriptor> _getProfileNavIcon({
       ..text = TextSpan(
         text: String.fromCharCode(iconData.codePoint),
         style: TextStyle(
-          fontSize: 52,
+          fontSize: 36,
           fontFamily: iconData.fontFamily,
           package: iconData.fontPackage,
           color: borderColor,
@@ -168,6 +172,9 @@ Future<BitmapDescriptor> _getProfileNavIcon({
   final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
   final bytes = byteData!.buffer.asUint8List();
 
+  // Store raw bytes globally for zoom-dependent scaling
+  _navIconRawBytes = bytes;
+  _navIconRawAspect = canvasHeight / canvasWidth;
   // Anchor at circle center (not image center) so GPS position aligns correctly
   final descriptor = BitmapDescriptor.bytes(bytes, width: 48, height: (48 * canvasHeight / canvasWidth).round().toDouble());
   _navIconCache[cacheKey] = descriptor;
@@ -248,7 +255,7 @@ Future<BitmapDescriptor> _getCustomMarkerIcon(String type, {double opacity = 1.0
   final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
   final bytes = byteData!.buffer.asUint8List();
 
-  final descriptor = BitmapDescriptor.bytes(bytes, width: 36, height: 36);
+  final descriptor = BitmapDescriptor.bytes(bytes, width: 22, height: 22);
   _markerIconCache[cacheKey] = descriptor;
   return descriptor;
 }
@@ -458,6 +465,9 @@ class _CommunityMapScreenState extends ConsumerState<CommunityMapScreen> {
   // Extra guard: set to true in dispose() to block ALL async callbacks
   bool _disposed = false;
 
+  // Current zoom level — used to scale puck marker
+  double _currentZoom = 15.0;
+
   // GPS is NOT active by default — user sees PLZ position first
   bool _gpsActive = false;
 
@@ -475,6 +485,7 @@ class _CommunityMapScreenState extends ConsumerState<CommunityMapScreen> {
 
   // Auto-hide UI on map interaction (zoom/pan/rotate)
   bool _mapInteracting = false;
+  bool _mapFullscreen = false; // Tap on map → hide everything
   bool _isProgrammaticMove = false;
   Timer? _mapIdleTimer;
 
@@ -564,6 +575,7 @@ class _CommunityMapScreenState extends ConsumerState<CommunityMapScreen> {
   @override
   void dispose() {
     _disposed = true;
+    if (_mapFullscreen) NavigationState.instance.setFeedScrolling(false);
     _reportPollingTimer?.cancel();
     _blitzerRealtimeChannel?.unsubscribe();
     _liveSub?.cancel();
@@ -633,6 +645,7 @@ class _CommunityMapScreenState extends ConsumerState<CommunityMapScreen> {
 
   Future<void> _preloadMarkerIcons() async {
     const types = ['fixed', 'fixed_osm', 'mobile', 'construction', 'accident', 'police', 'workshop', 'gas_station', 'biker_meetup', 'scenic_route'];
+    // Preload icons at full opacity — distance-based transparency via Marker.alpha
     for (final type in types) {
       await _getCustomMarkerIcon(type);
     }
@@ -753,18 +766,25 @@ class _CommunityMapScreenState extends ConsumerState<CommunityMapScreen> {
     if (_currentPosition != null && _navMarkerIcon != null && (_gpsActive || _sosActive)) {
       final ownSos = _sosActive;
 
+      // Zoom-dependent puck size: shrinks when zoomed in (so route line is visible)
+      // zoom 10 → scale 1.0, zoom 15 → scale 0.65, zoom 18 → scale 0.45
+      final puckScale = (1.4 - (_currentZoom / 20.0)).clamp(0.35, 1.0);
+      final puckW = (48 * puckScale).roundToDouble();
+      final puckH = (puckW * _navIconRawAspect).roundToDouble();
+
       // Bei SOS: zwischen SOS-Icon und normalem Icon wechseln
       BitmapDescriptor ownIcon;
       if (ownSos) {
         final uid = Supabase.instance.client.auth.currentUser?.id;
         final sosIcon = uid != null ? _sosUserIcons[uid] : null;
         if (sosIcon != null) {
-          // SOS-Icon geladen → zwischen SOS (rot) und normal (grün) blinken
           ownIcon = _sosBlinkVisible ? sosIcon : _navMarkerIcon!;
         } else {
-          // SOS-Icon noch nicht geladen → Sichtbarkeit blinken
           ownIcon = _navMarkerIcon!;
         }
+      } else if (_navIconRawBytes != null) {
+        // Use raw bytes with zoom-scaled size
+        ownIcon = BitmapDescriptor.bytes(_navIconRawBytes!, width: puckW, height: puckH);
       } else {
         ownIcon = _navMarkerIcon!;
       }
@@ -775,8 +795,8 @@ class _CommunityMapScreenState extends ConsumerState<CommunityMapScreen> {
         icon: ownIcon,
         rotation: _currentHeading,
         anchor: const Offset(0.5, 0.72), // Circle center (below arrow)
-        flat: true,
-        zIndex: ownSos ? 100 : 30,
+        flat: false, // Upright so zIndex works correctly vs blitzer markers
+        zIndex: 200, // Always on top of everything
         // Bei SOS ohne SOS-Icon: Sichtbarkeit blinken
         visible: ownSos && _sosUserIcons[Supabase.instance.client.auth.currentUser?.id] == null
             ? _sosBlinkVisible : true,
@@ -2018,7 +2038,7 @@ class _CommunityMapScreenState extends ConsumerState<CommunityMapScreen> {
     return g;
   }
 
-  void _buildBlitzerMarkers() {
+  Future<void> _buildBlitzerMarkers() async {
     final policyState = ref.read(countryPolicyProvider);
     final policy = policyState.policy;
     final isDangerZone = policy != null && policy.isDangerZone;
@@ -2048,7 +2068,7 @@ class _CommunityMapScreenState extends ConsumerState<CommunityMapScreen> {
       // Markers far away are transparent, nearby ones are fully visible
       _cachedDangerZones = {};
       _blitzerMarkers = {};
-      _buildDistanceBasedMarkers();
+      await _buildDistanceBasedMarkers();
     }
   }
 
@@ -2059,33 +2079,34 @@ class _CommunityMapScreenState extends ConsumerState<CommunityMapScreen> {
 
     for (final report in _reports) {
       // Calculate distance-based opacity
-      double opacity = 1.0;
+      double opacity = 0.25; // Default without GPS: very faint
       if (_currentPosition != null) {
         final distM = _approxDistanceMeters(
           _currentPosition!.latitude, _currentPosition!.longitude,
           report.latitude, report.longitude,
         );
         if (distM > 10000) {
-          opacity = 0.4; // > 10 km: faint but visible
+          opacity = 0.15; // > 10 km: very faint
         } else if (distM > 5000) {
-          opacity = 0.55; // 5-10 km: semi-transparent
+          opacity = 0.25; // 5-10 km: faint
         } else if (distM > 2000) {
-          opacity = 0.7; // 2-5 km: mostly visible
+          opacity = 0.3; // 2-5 km: subtle
         } else if (distM > 500) {
-          opacity = 0.85; // 500m-2km: clearly visible
+          opacity = 0.35; // 500m-2km: visible
         } else {
-          opacity = 1.0; // < 500m: fully visible
+          opacity = 0.4; // < 500m: max 40%
         }
       }
 
       final iconKey = report.isOsm ? 'fixed_osm' : report.type;
-      final icon = await _getCustomMarkerIcon(iconKey, opacity: opacity);
+      final icon = await _getCustomMarkerIcon(iconKey);
 
       markers.add(Marker(
         markerId: MarkerId('blitzer_${report.id}'),
         position: LatLng(report.latitude, report.longitude),
         icon: icon,
-        alpha: opacity, // Google Maps marker alpha (additional layer)
+        alpha: opacity, // Google Maps native transparency
+        zIndex: 1, // below puck (30) and live users (10+)
         onTap: () => _showReportDetail(report),
       ));
     }
@@ -3146,7 +3167,7 @@ class _CommunityMapScreenState extends ConsumerState<CommunityMapScreen> {
             circles: _cachedDangerZones,
             mapType: _mapType,
             padding: EdgeInsets.only(
-              bottom: 120 + MediaQuery.of(context).padding.bottom, // push Google logo behind bottom nav
+              bottom: 80 + MediaQuery.of(context).padding.bottom, // push Google logo behind bottom nav
             ),
             style: _darkMapStyle, // Always dark — matches app theme
             onCameraMoveStarted: () {
@@ -3161,9 +3182,14 @@ class _CommunityMapScreenState extends ConsumerState<CommunityMapScreen> {
                 setState(() => _mapInteracting = true);
               }
             },
-            onCameraMove: (_) {
+            onCameraMove: (pos) {
               // Keep hiding while user is still moving
               _mapIdleTimer?.cancel();
+              // Track zoom for puck scaling
+              if ((pos.zoom - _currentZoom).abs() > 0.5) {
+                _currentZoom = pos.zoom;
+                _rebuildCachedMarkers();
+              }
             },
             onCameraIdle: () {
               // Delay fade-in so UI doesn't flicker during multi-gesture
@@ -3171,10 +3197,26 @@ class _CommunityMapScreenState extends ConsumerState<CommunityMapScreen> {
               _mapIdleTimer = Timer(const Duration(milliseconds: 400), () {
                 if (mounted && _mapInteracting) setState(() => _mapInteracting = false);
               });
+              // Update puck size after zoom settled
+              _mapController?.getZoomLevel().then((z) {
+                if ((z - _currentZoom).abs() > 0.3) {
+                  _currentZoom = z;
+                  _rebuildCachedMarkers();
+                  if (mounted) setState(() {});
+                }
+              });
             },
             onTap: (_) {
               if (_showProfileBubble || _selectedLiveUser != null) {
                 setState(() { _showProfileBubble = false; _selectedLiveUser = null; });
+                return;
+              }
+              // Toggle fullscreen: hide/show all bars + map UI
+              setState(() => _mapFullscreen = !_mapFullscreen);
+              if (_mapFullscreen) {
+                NavigationState.instance.setFeedScrolling(true); // reuse to hide global bars
+              } else {
+                NavigationState.instance.setFeedScrolling(false);
               }
             },
           ),
@@ -3211,7 +3253,7 @@ class _CommunityMapScreenState extends ConsumerState<CommunityMapScreen> {
           // ══════════════════════════════════════════════════════════════
           // PROFIL-BUBBLE — erscheint wenn man auf den Profil-Marker tippt
           // ══════════════════════════════════════════════════════════════
-          if (_showProfileBubble && !_mapInteracting && ref.watch(authNotifierProvider) is Authenticated)
+          if (_showProfileBubble && !_mapInteracting && !_mapFullscreen && ref.watch(authNotifierProvider) is Authenticated)
             MapProfileBubble(
               user: (ref.watch(authNotifierProvider) as Authenticated).user,
               accentColor: accentColor,
@@ -3222,7 +3264,7 @@ class _CommunityMapScreenState extends ConsumerState<CommunityMapScreen> {
           // ══════════════════════════════════════════════════════════════
           // LIVE-USER BUBBLE — erscheint wenn man auf einen Live-User tippt
           // ══════════════════════════════════════════════════════════════
-          if (_selectedLiveUser != null && !_mapInteracting)
+          if (_selectedLiveUser != null && !_mapInteracting && !_mapFullscreen)
             LiveUserBubble(
               user: _selectedLiveUser!,
               accentColor: accentColor,
@@ -3234,13 +3276,13 @@ class _CommunityMapScreenState extends ConsumerState<CommunityMapScreen> {
           // ══════════════════════════════════════════════════════════════
           if (ref.read(liveLocationServiceProvider).activeGroupId != null)
             Positioned(
-              bottom: 130 + MediaQuery.of(context).padding.bottom,
+              bottom: 120 + MediaQuery.of(context).padding.bottom,
               left: 16,
               child: AnimatedOpacity(
-                opacity: _mapInteracting ? 0.0 : 1.0,
+                opacity: (_mapInteracting || _mapFullscreen) ? 0.0 : 1.0,
                 duration: const Duration(milliseconds: 200),
                 child: IgnorePointer(
-                  ignoring: _mapInteracting,
+                  ignoring: _mapInteracting || _mapFullscreen,
                   child: FilterChip(
                     selected: _groupFilterActive,
                     avatar: Icon(
@@ -3283,7 +3325,7 @@ class _CommunityMapScreenState extends ConsumerState<CommunityMapScreen> {
             onlineCount: liveCount,
             isLive: isLive,
             accentColor: accentColor,
-            mapInteracting: _mapInteracting,
+            mapInteracting: _mapInteracting || _mapFullscreen,
             onOnlineTap: () => _showCommunityUsersSheet(brightness),
             onGroupsTap: () {
               showModalBottomSheet(
@@ -3305,12 +3347,12 @@ class _CommunityMapScreenState extends ConsumerState<CommunityMapScreen> {
           // ── GPS Toggle Button mit permanentem ON/OFF Badge ──
           Positioned(
             right: 16,
-            bottom: 130 + MediaQuery.of(context).padding.bottom,
+            bottom: 140 + MediaQuery.of(context).padding.bottom,
             child: AnimatedOpacity(
-              opacity: _mapInteracting ? 0.0 : 1.0,
+              opacity: (_mapInteracting || _mapFullscreen) ? 0.0 : 1.0,
               duration: const Duration(milliseconds: 200),
               child: IgnorePointer(
-                ignoring: _mapInteracting,
+                ignoring: _mapInteracting || _mapFullscreen,
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -3388,12 +3430,12 @@ class _CommunityMapScreenState extends ConsumerState<CommunityMapScreen> {
           // ── SOS Button (Long-Press 3s) ──
           Positioned(
             left: 16,
-            bottom: 180 + MediaQuery.of(context).padding.bottom,
+            bottom: 170 + MediaQuery.of(context).padding.bottom,
             child: AnimatedOpacity(
-              opacity: _mapInteracting ? 0.0 : 1.0,
+              opacity: (_mapInteracting || _mapFullscreen) ? 0.0 : 1.0,
               duration: const Duration(milliseconds: 200),
               child: IgnorePointer(
-                ignoring: _mapInteracting,
+                ignoring: _mapInteracting || _mapFullscreen,
                 child: _buildSosButton(brightness),
               ),
             ),
@@ -3862,6 +3904,13 @@ class _CommunityMapScreenState extends ConsumerState<CommunityMapScreen> {
 
   Future<void> _processMapVoiceCommand(String text) async {
     final command = VoiceCommandService.parse(text);
+
+    // Global garbage filter — ask "Wie bitte?" for unrecognized speech
+    if (command.intent == VoiceIntent.unknown) {
+      _mapSpeakWithVoskPause('Wie bitte, Racer?');
+      return;
+    }
+
     switch (command.intent) {
       case VoiceIntent.searchPoi:
         final label = command.poiLabel ?? text;
@@ -3895,6 +3944,12 @@ class _CommunityMapScreenState extends ConsumerState<CommunityMapScreen> {
         break;
       case VoiceIntent.stopNavigation:
         _mapSpeakWithVoskPause('Keine Navigation aktiv auf der Karte.');
+        break;
+      case VoiceIntent.navigateTo:
+        _mapSpeakWithVoskPause('Navigation geht nur während einer Gruppenfahrt, Racer.');
+        break;
+      case VoiceIntent.searchEvents:
+        _mapSpeakWithVoskPause('Racer Events findest du während einer Gruppenfahrt, Racer.');
         break;
       case VoiceIntent.aiQuery:
         VoskWakeWordService.instance.setPaused(true);
@@ -3936,6 +3991,20 @@ class _CommunityMapScreenState extends ConsumerState<CommunityMapScreen> {
         break;
       case VoiceIntent.unknown:
         debugPrint('[MapVosk] Unknown: "$text"');
+        break;
+      // New intents handled by MapboxRideScreen — fallback here
+      case VoiceIntent.reportPolice:
+      case VoiceIntent.reportHazard:
+      case VoiceIntent.reportTraffic:
+      case VoiceIntent.announceRoute:
+      case VoiceIntent.switchTab:
+      case VoiceIntent.thankMoto:
+      case VoiceIntent.askWeather:
+      case VoiceIntent.askSpeed:
+      case VoiceIntent.askLocation:
+      case VoiceIntent.confirmYes:
+      case VoiceIntent.confirmNo:
+        _mapSpeakWithVoskPause('Das geht auf der Karte, Racer.');
         break;
     }
   }

@@ -23,10 +23,17 @@ class _FilterModalWidgetState extends State<FilterModalWidget> {
 
   final List<String> _categories = [
     'Alle',
-    'Teile',
-    'Ausrüstung',
-    'Motorräder',
-    'Track-Gear',
+    'Fahrzeuge',
+    'Ersatzteile',
+    'Motorrad-Bekleidung',
+    'Rennbekleidung',
+    'Zubehör',
+    'Elektronik',
+    'Haus & Garten',
+    'Sport & Freizeit',
+    'Mode & Beauty',
+    'Dienstleistungen',
+    'Sonstiges',
   ];
   final List<String> _conditions = ['Alle', 'Neu', 'Neuwertig', 'Gebraucht'];
   final List<String> _sellerTypes = ['Alle', 'Privat', 'Gewerblich'];

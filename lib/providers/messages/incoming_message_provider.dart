@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -48,14 +49,32 @@ class IncomingMessageBus {
 
     // Determine preview text based on message type
     String previewText;
-    if (messageType == 'image' || newMessage['image_url'] != null) {
-      previewText = body.isNotEmpty ? body : '📷 Bild';
+    if (messageType == 'vehicle_offer') {
+      // Parse offer JSON for human-readable preview
+      try {
+        final data = json.decode(body) as Map<String, dynamic>;
+        final type = data['type'] as String? ?? 'offer';
+        final vehicleName = data['vehicle_name'] as String? ?? '';
+        final amount = (data['price'] as num?)?.toDouble() ?? (data['amount'] as num?)?.toDouble() ?? 0;
+        previewText = switch (type) {
+          'like' => '\u2764\ufe0f $vehicleName gefällt mir',
+          'offer' => '\ud83d\udcb0 Angebot: ${amount.toStringAsFixed(0)} \u20ac für $vehicleName',
+          'counter' => '\ud83d\udd04 Gegenangebot: ${amount.toStringAsFixed(0)} \u20ac für $vehicleName',
+          'accepted' => '\u2705 Angebot angenommen! $vehicleName',
+          'declined' => '\u274c Angebot abgelehnt: $vehicleName',
+          _ => '\ud83d\udcb0 Angebot für $vehicleName',
+        };
+      } catch (_) {
+        previewText = 'Fahrzeug-Angebot';
+      }
+    } else if (messageType == 'image' || newMessage['image_url'] != null) {
+      previewText = body.isNotEmpty ? body : '\ud83d\udcf7 Bild';
     } else if (messageType == 'audio' || newMessage['audio_url'] != null) {
-      previewText = '🎤 Sprachnachricht';
+      previewText = '\ud83c\udfa4 Sprachnachricht';
     } else if (messageType == 'location' ||
         newMessage['location_lat'] != null) {
       previewText =
-          '📍 ${newMessage['location_name']?.toString() ?? 'Standort'}';
+          '\ud83d\udccd ${newMessage['location_name']?.toString() ?? 'Standort'}';
     } else {
       previewText = body;
     }
@@ -94,8 +113,37 @@ class IncomingMessageBus {
 
     _controller.add(msg);
 
+    // Auto-unarchive in background (fire-and-forget, don't block message delivery)
+    if (conversationId > 0) {
+      _autoUnarchive(conversationId);
+    }
+
     // Also push to Android notification system (for Android Auto messaging)
     _showAndroidNotification(msg);
+  }
+
+  /// Fire-and-forget: unarchive conversation if archived.
+  void _autoUnarchive(int conversationId) async {
+    try {
+      final userId = Supabase.instance.client.auth.currentUser?.id;
+      if (userId == null) return;
+      final participant = await Supabase.instance.client
+          .from('conversation_participants')
+          .select('archived_at')
+          .eq('conversation_id', conversationId)
+          .eq('user_id', userId)
+          .maybeSingle();
+      if (participant != null && participant['archived_at'] != null) {
+        await Supabase.instance.client
+            .from('conversation_participants')
+            .update({'archived_at': null})
+            .eq('conversation_id', conversationId)
+            .eq('user_id', userId);
+        debugPrint('[MessageBus] Auto-unarchived conversation $conversationId');
+      }
+    } catch (e) {
+      debugPrint('[MessageBus] Auto-unarchive error: $e');
+    }
   }
 
   /// MethodChannel to push MessagingStyle notifications to Android.
