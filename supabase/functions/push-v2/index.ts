@@ -61,6 +61,9 @@ async function pushUser(uid: string, title: string, body: string, data: Record<s
   for (const d of devs) await sendPush(d.fcm_token, title, body, data, sb);
 }
 
+// Dedup: skip messages already processed within 30 seconds
+const recentlyProcessed = new Map<string, number>();
+
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: { 'Access-Control-Allow-Origin': '*' } });
   try {
@@ -73,6 +76,18 @@ Deno.serve(async (req: Request) => {
     const table = body.table as string;
     const rec = body.record as Record<string, unknown>;
     if (body.type !== 'INSERT') return new Response(JSON.stringify({ ok: true, skip: true }), { headers: { 'Content-Type': 'application/json' } });
+
+    // Dedup: skip if same record was processed recently (pg_net retry protection)
+    const dedupKey = `${table}:${rec.id ?? ''}`;
+    const now = Date.now();
+    const lastProcessed = recentlyProcessed.get(dedupKey);
+    if (lastProcessed && now - lastProcessed < 30000) {
+      console.log('[Push-v2] Skipping duplicate: ' + dedupKey);
+      return new Response(JSON.stringify({ ok: true, skip: 'duplicate' }), { headers: { 'Content-Type': 'application/json' } });
+    }
+    recentlyProcessed.set(dedupKey, now);
+    // Cleanup old entries
+    for (const [k, v] of recentlyProcessed) { if (now - v > 60000) recentlyProcessed.delete(k); }
     const sb = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!);
     if (table === 'notifications') {
       const uid = rec.user_id as string;

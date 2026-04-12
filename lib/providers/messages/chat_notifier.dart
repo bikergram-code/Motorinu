@@ -1,9 +1,5 @@
-import 'dart:convert';
-import 'dart:typed_data';
-
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -90,7 +86,7 @@ class ChatNotifier extends Notifier<ChatState> {
   final int _conversationId;
   late MessageRepository _repo;
   RealtimeChannel? _channel;
-  RealtimeChannel? _presenceChannel;
+  bool _isCurrentlyTyping = false;
 
   @override
   ChatState build() {
@@ -98,7 +94,20 @@ class ChatNotifier extends Notifier<ChatState> {
 
     ref.onDispose(() {
       _channel?.unsubscribe();
-      _presenceChannel?.unsubscribe();
+      // Reset typing on dispose
+      if (_isCurrentlyTyping) {
+        _isCurrentlyTyping = false;
+        final uid = Supabase.instance.client.auth.currentUser?.id;
+        if (uid != null) {
+          Supabase.instance.client
+              .from('conversation_participants')
+              .update({'is_typing': false})
+              .eq('conversation_id', _conversationId)
+              .eq('user_id', uid)
+              .then((_) {})
+              .catchError((_) {});
+        }
+      }
     });
 
     // Delay async work until after build() has returned and state is
@@ -172,7 +181,6 @@ class ChatNotifier extends Notifier<ChatState> {
       ref.read(unreadMessagesProvider.notifier).refresh();
 
       _subscribeToMessages(conversationId);
-      _subscribeToPresence(conversationId);
     } catch (e) {
       debugPrint('Error loading chat: $e');
       state = state.copyWith(isLoading: false, error: e.toString());
@@ -215,11 +223,11 @@ class ChatNotifier extends Notifier<ChatState> {
 
   void _subscribeToMessages(int conversationId) {
     _channel?.unsubscribe();
+    final currentUserId = Supabase.instance.client.auth.currentUser?.id;
     debugPrint('[Chat] Subscribing to realtime for conv=$conversationId');
     _channel = _repo.subscribeToMessages(conversationId, (newRecord) async {
       debugPrint('[Chat] RT INSERT conv=$conversationId type=${newRecord['message_type']} id=${newRecord['id']} bodyLen=${(newRecord['body'] as String?)?.length ?? 0}');
       var message = _parseMessage(newRecord);
-      final currentUserId = Supabase.instance.client.auth.currentUser?.id;
 
       // Enrich with sender info for group chats
       if (state.isGroupChat) {
@@ -232,22 +240,22 @@ class ChatNotifier extends Notifier<ChatState> {
 
       final exists = state.messages.any((m) => m.id == message.id);
       if (!exists) {
+        // New message from other user → they stopped typing
+        final clearTyping = message.senderId != currentUserId && state.isOtherTyping;
         state = state.copyWith(
           messages: _trimMessages([...state.messages, message]),
+          isOtherTyping: clearTyping ? false : null,
         );
       }
 
       // Only mark as read if user is actually viewing this chat
-      // (don't auto-mark when user is on another tab)
       if (message.senderId != currentUserId && state.isLoading == false && state.messages.isNotEmpty) {
-        // Delay slightly to let the UI show the message first
         Future.delayed(const Duration(milliseconds: 500), () {
           _repo.markAsRead(conversationId);
           ref.read(unreadMessagesProvider.notifier).refresh();
         });
       }
     }, onUpdate: (updatedRecord) {
-      // Handle edited/updated messages in realtime
       final updated = _parseMessage(updatedRecord);
       final msgs = state.messages.map((m) {
         if (m.id == updated.id) return updated.copyWith(senderName: m.senderName, senderAvatar: m.senderAvatar);
@@ -255,7 +263,6 @@ class ChatNotifier extends Notifier<ChatState> {
       }).toList();
       state = state.copyWith(messages: msgs);
     }, onDelete: (oldRecord) {
-      // Handle deleted messages in realtime (other user deleted a message)
       final deletedId = oldRecord['id'];
       if (deletedId == null) return;
       final id = deletedId is int ? deletedId : int.tryParse('$deletedId');
@@ -263,42 +270,13 @@ class ChatNotifier extends Notifier<ChatState> {
       final msgs = List<DirectMessage>.from(state.messages);
       msgs.removeWhere((m) => m.id == id);
       state = state.copyWith(messages: msgs);
-    });
-  }
-
-  /// Subscribe to presence for typing indicators.
-  void _subscribeToPresence(int conversationId) {
-    final currentUserId = Supabase.instance.client.auth.currentUser?.id;
-    _presenceChannel?.unsubscribe();
-    _presenceChannel = Supabase.instance.client
-        .channel('presence:chat:$conversationId')
-        .onPresenceSync((payload) {
-      bool otherTyping = false;
-      try {
-        final presences = _presenceChannel?.presenceState();
-        if (presences is Map) {
-          for (final entry in (presences as Map).entries) {
-            if (entry.value is List) {
-              for (final p in entry.value as List) {
-                final payload =
-                    (p is Map) ? p : (p as dynamic).payload as Map?;
-                if (payload != null &&
-                    payload['user_id'] != currentUserId &&
-                    payload['typing'] == true) {
-                  otherTyping = true;
-                }
-              }
-            }
-          }
-        }
-      } catch (_) {}
-      state = state.copyWith(isOtherTyping: otherTyping);
-    }).subscribe((status, [error]) async {
-      if (status == RealtimeSubscribeStatus.subscribed) {
-        await _presenceChannel?.track({
-          'user_id': currentUserId,
-          'typing': false,
-        });
+    }, onTyping: (record) {
+      final typingUserId = record['user_id']?.toString();
+      if (typingUserId == null || typingUserId == currentUserId) return;
+      final isTyping = record['is_typing'] == true;
+      debugPrint('[Chat] Typing DB change: user=$typingUserId, typing=$isTyping');
+      if (state.isOtherTyping != isTyping) {
+        state = state.copyWith(isOtherTyping: isTyping);
       }
     });
   }
@@ -308,8 +286,6 @@ class ChatNotifier extends Notifier<ChatState> {
   Future<void> reconnect() async {
     debugPrint('[Chat] reconnect() conv=$_conversationId');
     try {
-      // Re-fetch latest messages so we don't miss anything that arrived
-      // while the WebSocket was paused.
       final data = await _repo.getMessages(_conversationId);
       List<DirectMessage> messages;
       if (state.isGroupChat) {
@@ -323,17 +299,23 @@ class ChatNotifier extends Notifier<ChatState> {
     } catch (e) {
       debugPrint('[Chat] reconnect refetch error: $e');
     }
-    // Force a fresh Realtime channel
     _subscribeToMessages(_conversationId);
   }
 
-  /// Notify that the current user is typing.
+  /// Notify that the current user is typing (DB-based).
   void setTyping(bool isTyping) {
+    if (_isCurrentlyTyping == isTyping) return;
+    _isCurrentlyTyping = isTyping;
     final currentUserId = Supabase.instance.client.auth.currentUser?.id;
-    _presenceChannel?.track({
-      'user_id': currentUserId,
-      'typing': isTyping,
-    });
+    if (currentUserId == null) return;
+    debugPrint('[Chat] setTyping($isTyping) for conv=$_conversationId (DB)');
+    Supabase.instance.client
+        .from('conversation_participants')
+        .update({'is_typing': isTyping, 'typing_at': DateTime.now().toIso8601String()})
+        .eq('conversation_id', _conversationId)
+        .eq('user_id', currentUserId)
+        .then((_) => debugPrint('[Chat] Typing DB update OK'))
+        .catchError((e) => debugPrint('[Chat] Typing DB update error: $e'));
   }
 
   // ── Reply-to ──
@@ -396,36 +378,11 @@ class ChatNotifier extends Notifier<ChatState> {
         state = state.copyWith(isSending: false, clearReplyTo: true);
       }
 
-      // Trigger push notification to receiver
-      _triggerPush(body);
+      // Push notification handled by DB trigger → push-v2 Edge Function
     } catch (e) {
       debugPrint('Error sending message: $e');
       state = state.copyWith(isSending: false, error: e.toString());
     }
-  }
-
-  /// Send push notification via our server
-  void _triggerPush(String content) {
-    final receiverId = state.otherUserId;
-    final senderId = Supabase.instance.client.auth.currentUser?.id;
-    if (receiverId == null || senderId == null) return;
-
-    // Fire and forget — don't block the UI
-    http.post(
-      Uri.parse('https://api.bikergram.com/webhook/message'),
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({
-        'record': {
-          'sender_id': senderId,
-          'receiver_id': receiverId,
-          'content': content,
-        }
-      }),
-    ).then((_) {
-      debugPrint('[Push] Triggered for $receiverId');
-    }).catchError((e) {
-      debugPrint('[Push] Trigger failed: $e');
-    });
   }
 
   Future<void> sendImageMessage(XFile image, {String? caption}) async {
@@ -460,7 +417,7 @@ class ChatNotifier extends Notifier<ChatState> {
         state = state.copyWith(isSending: false, clearReplyTo: true);
       }
 
-      _triggerPush(caption?.isNotEmpty == true ? caption! : '📷 Bild');
+      // Push notification handled by DB trigger → push-v2 Edge Function
     } catch (e) {
       debugPrint('Error sending image: $e');
       state = state.copyWith(isSending: false, error: e.toString());

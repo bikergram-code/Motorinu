@@ -7,7 +7,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' hide AuthState;
+import 'package:url_launcher/url_launcher.dart';
 
+import '../../core/web_redirect_stub.dart'
+    if (dart.library.html) '../../core/web_redirect_web.dart';
+
+import '../../services/online_status_service.dart';
 import '../../services/push_notification_service.dart';
 
 import '../../core/community.dart';
@@ -212,6 +217,10 @@ class AuthNotifier extends Notifier<AuthState> {
   }
 
   Future<void> logout() async {
+    // Mark user offline in profiles table
+    try {
+      await globalOnlineStatusService.stop();
+    } catch (_) {}
     // Go offline immediately — sends goodbye payload so other users see us
     // disappear right away, and clears the top badge.
     try {
@@ -239,6 +248,43 @@ class AuthNotifier extends Notifier<AuthState> {
   Future<void> signInWithGoogle() async {
     state = const AuthLoading();
     try {
+      if (kIsWeb) {
+        // Web: get OAuth URL from Supabase, redirect browser
+        debugPrint('[Auth] Google sign-in via Supabase OAuth (web)');
+        final res = await _supabase.auth.getOAuthSignInUrl(
+          provider: OAuthProvider.google,
+          redirectTo: 'https://app.bikergram.com',
+        );
+        final oauthUrl = res.url;
+        debugPrint('[Auth] OAuth URL: $oauthUrl');
+
+        // Try 1: dart:html window.location.href (not blocked by popup blockers)
+        try {
+          webRedirect(oauthUrl);
+          debugPrint('[Auth] webRedirect called OK');
+          return;
+        } catch (e) {
+          debugPrint('[Auth] webRedirect failed: $e');
+        }
+
+        // Try 2: url_launcher in same tab
+        try {
+          final ok = await launchUrl(
+            Uri.parse(oauthUrl),
+            webOnlyWindowName: '_self',
+          );
+          debugPrint('[Auth] launchUrl result: $ok');
+          if (ok) return;
+        } catch (e) {
+          debugPrint('[Auth] launchUrl failed: $e');
+        }
+
+        // Both failed — show URL so user can open manually
+        state = AuthError('Öffne diesen Link manuell:\n$oauthUrl');
+        return;
+      }
+
+      // Mobile: use google_sign_in package for native flow
       const webClientId = '611571947292-8ma9r2hcopn38g9un4acgei56gjmtgtc.apps.googleusercontent.com';
       debugPrint('[Auth] Google sign-in starting with clientId: $webClientId');
       final googleSignIn = GoogleSignIn(serverClientId: webClientId);
@@ -286,7 +332,12 @@ class AuthNotifier extends Notifier<AuthState> {
         state = const Unauthenticated();
         return;
       }
-      state = AuthError(_friendlyError(e));
+      // Show real error on web for debugging
+      if (kIsWeb) {
+        state = AuthError('Google-Fehler: $e');
+      } else {
+        state = AuthError(_friendlyError(e));
+      }
     }
   }
 
@@ -387,6 +438,9 @@ class AuthNotifier extends Notifier<AuthState> {
 
       state = Authenticated(user);
       debugPrint('[Auth] Authenticated as: ${user.username} (${user.id}), avatar: ${user.avatarUrl}');
+
+      // ── Mark user online ──
+      globalOnlineStatusService.start();
 
       // ── Daily Login XP + Streak ──
       _checkDailyLogin(authUser.id, profileData);

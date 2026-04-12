@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:math';
 
 import 'package:emoji_picker_flutter/emoji_picker_flutter.dart'
     as emoji_picker;
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -46,6 +48,8 @@ class _ChatInputBarState extends State<ChatInputBar> {
   bool _isRecording = false;
   DateTime? _recordStart;
   Timer? _typingTimer;
+  Timer? _recordTimer;
+  int _recordSeconds = 0;
 
   @override
   void initState() {
@@ -71,6 +75,7 @@ class _ChatInputBarState extends State<ChatInputBar> {
     _controller.dispose();
     _focusNode.dispose();
     _typingTimer?.cancel();
+    _recordTimer?.cancel();
     super.dispose();
   }
 
@@ -95,21 +100,30 @@ class _ChatInputBarState extends State<ChatInputBar> {
   }
 
   void _startRecording() {
+    debugPrint('[MicBtn] _startRecording() called');
     HapticFeedback.mediumImpact();
     setState(() {
       _isRecording = true;
       _recordStart = DateTime.now();
+      _recordSeconds = 0;
+    });
+    _recordTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      setState(() => _recordSeconds++);
     });
     widget.onMicStart();
   }
 
   void _stopRecording() {
+    _recordTimer?.cancel();
     final duration = _recordStart != null
         ? DateTime.now().difference(_recordStart!).inMilliseconds
         : 0;
+    debugPrint('[MicBtn] _stopRecording() duration=${duration}ms');
     setState(() => _isRecording = false);
     if (duration > 500) {
       widget.onMicStop(duration);
+    } else {
+      debugPrint('[MicBtn] Too short (<500ms), discarded');
     }
   }
 
@@ -222,6 +236,16 @@ class _ChatInputBarState extends State<ChatInputBar> {
                     maxLines: 4,
                     minLines: 1,
                     textInputAction: TextInputAction.newline,
+                    contentInsertionConfiguration: ContentInsertionConfiguration(
+                      allowedMimeTypes: const [
+                        'image/png', 'image/jpeg', 'image/gif',
+                        'audio/*', 'audio/mpeg', 'audio/aac', 'audio/ogg',
+                      ],
+                      onContentInserted: (content) {
+                        debugPrint('[ChatInput] Content inserted: ${content.mimeType}, uri=${content.uri}');
+                        // Gboard voice → accept silently, text gets inserted via normal input
+                      },
+                    ),
                     onTap: () {
                       if (_showEmoji) setState(() => _showEmoji = false);
                     },
@@ -287,8 +311,7 @@ class _ChatInputBarState extends State<ChatInputBar> {
           )
         else
           GestureDetector(
-            onLongPressStart: (_) => _startRecording(),
-            onLongPressEnd: (_) => _stopRecording(),
+            onTap: _startRecording,
             child: Container(
               width: 42,
               height: 42,
@@ -307,40 +330,70 @@ class _ChatInputBarState extends State<ChatInputBar> {
     );
   }
 
+  String get _recordDuration {
+    final m = _recordSeconds ~/ 60;
+    final s = _recordSeconds % 60;
+    return '${m.toString().padLeft(1, '0')}:${s.toString().padLeft(2, '0')}';
+  }
+
   Widget _buildRecordingBar() {
     return Row(
       children: [
-        // Red pulsing dot
-        _RecordingDot(color: Colors.red),
-        const SizedBox(width: 12),
-        Expanded(
-          child: Text(
-            'Aufnahme...',
-            style: GoogleFonts.inter(
-              fontSize: 15,
-              color: Colors.white.withValues(alpha: 0.7),
+        // Cancel button
+        GestureDetector(
+          onTap: _cancelRecording,
+          child: Container(
+            width: 42,
+            height: 42,
+            decoration: BoxDecoration(
+              color: Colors.red.withValues(alpha: 0.15),
+              shape: BoxShape.circle,
             ),
-          ),
-        ),
-        Text(
-          'Loslassen zum Senden',
-          style: GoogleFonts.inter(
-            fontSize: 12,
-            color: Colors.white.withValues(alpha: 0.35),
+            child: const Icon(Icons.close_rounded, color: Colors.red, size: 20),
           ),
         ),
         const SizedBox(width: 8),
-        Container(
-          width: 42,
-          height: 42,
-          decoration: BoxDecoration(
-            color: Colors.red.withValues(alpha: 0.15),
-            shape: BoxShape.circle,
+        // Pulsing dot
+        _RecordingDot(color: Colors.red),
+        const SizedBox(width: 8),
+        // Timer
+        Text(
+          _recordDuration,
+          style: GoogleFonts.inter(
+            fontSize: 14,
+            fontWeight: FontWeight.w600,
+            color: Colors.white.withValues(alpha: 0.8),
+            fontFeatures: const [FontFeature.tabularFigures()],
           ),
-          child: const Icon(Icons.mic_rounded, color: Colors.red, size: 22),
+        ),
+        const SizedBox(width: 10),
+        // Waveform
+        Expanded(
+          child: _AudioWaveform(accentColor: widget.accentColor),
+        ),
+        const SizedBox(width: 8),
+        // Stop & send button
+        GestureDetector(
+          onTap: _stopRecording,
+          child: Container(
+            width: 42,
+            height: 42,
+            decoration: BoxDecoration(
+              color: widget.accentColor,
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(Icons.send_rounded, color: Colors.white, size: 20),
+          ),
         ),
       ],
     );
+  }
+
+  void _cancelRecording() {
+    debugPrint('[MicBtn] Recording cancelled');
+    _recordTimer?.cancel();
+    setState(() => _isRecording = false);
+    // Don't call onMicStop — just discard
   }
 
   Widget _buildReplyPreview() {
@@ -404,6 +457,76 @@ class _ChatInputBarState extends State<ChatInputBar> {
                 const BoxConstraints(minWidth: 32, minHeight: 32),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Animated waveform bars that simulate audio levels.
+class _AudioWaveform extends StatefulWidget {
+  const _AudioWaveform({required this.accentColor});
+  final Color accentColor;
+
+  @override
+  State<_AudioWaveform> createState() => _AudioWaveformState();
+}
+
+class _AudioWaveformState extends State<_AudioWaveform>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+  final _random = Random();
+  final List<double> _bars = List.generate(28, (_) => 0.3);
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 120),
+    )..addStatusListener((status) {
+        if (status == AnimationStatus.completed) {
+          _updateBars();
+          _controller.forward(from: 0);
+        }
+      });
+    _controller.forward();
+  }
+
+  void _updateBars() {
+    if (!mounted) return;
+    setState(() {
+      for (int i = 0; i < _bars.length; i++) {
+        // Smooth random movement
+        final target = 0.15 + _random.nextDouble() * 0.85;
+        _bars[i] = _bars[i] + (target - _bars[i]) * 0.4;
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 28,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: List.generate(_bars.length, (i) {
+          return AnimatedContainer(
+            duration: const Duration(milliseconds: 100),
+            width: 2.5,
+            height: 4 + _bars[i] * 24,
+            decoration: BoxDecoration(
+              color: widget.accentColor.withValues(alpha: 0.5 + _bars[i] * 0.5),
+              borderRadius: BorderRadius.circular(2),
+            ),
+          );
+        }),
       ),
     );
   }

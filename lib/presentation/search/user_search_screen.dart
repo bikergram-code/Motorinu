@@ -7,6 +7,7 @@ import 'package:google_fonts/google_fonts.dart';
 
 import '../../core/community.dart';
 import '../../providers/core/providers.dart';
+import '../widgets/online_status_avatar.dart';
 import '../../theme/app_theme.dart';
 
 class UserSearchScreen extends ConsumerStatefulWidget {
@@ -171,25 +172,9 @@ class _UserSearchScreenState extends ConsumerState<UserSearchScreen> {
         ),
         titleSpacing: 0,
       ),
-      body: Column(
-        children: [
-          // Quick-access chips
-          Padding(
-            padding: const EdgeInsets.fromLTRB(14, 8, 14, 4),
-            child: Row(
-              children: [
-                ActionChip(
-                  avatar: Icon(Icons.groups_rounded, size: 16, color: accentColor),
-                  label: Text('Gruppen', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600, color: textColor)),
-                  backgroundColor: cardBg,
-                  side: BorderSide(color: accentColor.withValues(alpha: 0.3)),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                  onPressed: () => context.push('/groups'),
-                ),
-              ],
-            ),
-          ),
-          Expanded(child: _buildBody(
+      // Gruppen-Chip wurde hier entfernt — Gruppen-Navigation
+      // liegt jetzt im Map/Navigation-Screen (POI-Sheet).
+      body: _buildBody(
         isSearching: isSearching,
         accentColor: accentColor,
         textColor: textColor,
@@ -197,8 +182,6 @@ class _UserSearchScreenState extends ConsumerState<UserSearchScreen> {
         cardBg: cardBg,
         brightness: brightness,
         community: community,
-      )),
-        ],
       ),
     );
   }
@@ -393,8 +376,13 @@ class _UserTile extends StatelessWidget {
             ),
             child: Row(
               children: [
-                // Avatar
-                _buildAvatar(avatarUrl, username),
+                // Avatar with online status
+                OnlineStatusAvatar(
+                  userId: user['id'] as String? ?? '',
+                  avatarUrl: avatarUrl,
+                  size: 44,
+                  fallbackIcon: _avatarFallback(username),
+                ),
                 const SizedBox(width: 12),
 
                 // Info

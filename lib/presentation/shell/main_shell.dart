@@ -1,6 +1,5 @@
 import 'dart:async';
-import 'dart:io';
-
+import 'package:flutter/foundation.dart' show defaultTargetPlatform, kIsWeb, TargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -10,6 +9,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart' show LatLng;
 import 'package:permission_handler/permission_handler.dart';
 
 import '../../core/community.dart';
+import '../../services/online_status_service.dart';
 import '../../services/push_notification_service.dart';
 import '../../providers/auth/auth_notifier.dart';
 import '../../providers/auth/auth_state.dart';
@@ -304,7 +304,7 @@ class _MainShellState extends ConsumerState<MainShell>
 
   /// Request POST_NOTIFICATIONS permission on Android 13+ (API 33).
   Future<void> _requestNotificationPermission() async {
-    if (!Platform.isAndroid) return;
+    if (defaultTargetPlatform != TargetPlatform.android) return;
     final status = await Permission.notification.status;
     if (!status.isGranted) {
       await Permission.notification.request();
@@ -335,23 +335,33 @@ class _MainShellState extends ConsumerState<MainShell>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     super.didChangeAppLifecycleState(state);
-    if (state == AppLifecycleState.detached ||
-        state == AppLifecycleState.paused) {
-      debugPrint('[MainShell] App lifecycle: $state — going offline');
+    if (state == AppLifecycleState.detached) {
+      // App killed — go fully offline so other users see us disappear.
+      debugPrint('[MainShell] App lifecycle: detached — going offline');
+      globalOnlineStatusService.stop();
       final service = ref.read(liveLocationServiceProvider);
       if (service.isLive) {
         service.goOffline();
         isLiveNotifier.value = false;
       }
-      // Update badge count when going to background
+    } else if (state == AppLifecycleState.paused) {
+      // App backgrounded (screen off, app switch) — pause GPS but keep
+      // heartbeat alive so we stay "online" on other users' maps.
+      debugPrint('[MainShell] App lifecycle: paused — pausing GPS (staying online)');
+      final service = ref.read(liveLocationServiceProvider);
+      if (service.isLive) {
+        service.pauseGps();
+      }
       PushNotificationService.instance.updateBadge();
     } else if (state == AppLifecycleState.resumed) {
-      debugPrint('[MainShell] App lifecycle: resumed — re-checking live state');
-      // Update badge from DB (statt clearBadge — sonst wird die Zahl gelöscht
-      // sobald der User die App nur kurz öffnet, auch wenn noch ungelesene
-      // Items in der DB sind. updateBadge setzt automatisch 0 wenn alles gelesen).
+      debugPrint('[MainShell] App lifecycle: resumed — resuming GPS');
+      globalOnlineStatusService.start();
+      final service = ref.read(liveLocationServiceProvider);
+      if (service.isLive) {
+        service.resumeGps();
+      }
       PushNotificationService.instance.updateBadge();
-      // Re-start live if it was active before the pause
+      // Re-start live if it wasn't active (e.g. after detached → reopen)
       _autoStartGlobalLive();
     }
   }
@@ -558,25 +568,38 @@ class _MainShellState extends ConsumerState<MainShell>
         Scaffold(
       body: Stack(
         children: [
-          // ── Tab content (full screen) ──
-          widget.child,
+          // ── Tab content ──
+          // On web: constrain feed/profile/etc to mobile-like width (like Instagram Web).
+          // Map stays full-width.
+          kIsWeb && !location.startsWith('/map')
+              ? Center(child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 600),
+                  child: widget.child,
+                ))
+              : widget.child,
 
           // ── Global Top Bar (animated slide for feed scroll, instant for navigation) ──
-          AnimatedSlide(
-            offset: NavigationState.instance.barsVisible ? Offset.zero : const Offset(0, -1),
-            duration: NavigationState.instance.feedScrolling || !NavigationState.instance.barsVisible
-                ? const Duration(milliseconds: 200)
-                : const Duration(milliseconds: 150),
-            curve: Curves.easeOutCubic,
-            child: AnimatedOpacity(
-              opacity: NavigationState.instance.barsVisible ? 1.0 : 0.0,
-              duration: const Duration(milliseconds: 200),
-              child: _buildGlobalTopBar(
-                community: community,
-                brightness: brightness,
-                accentColor: accentColor,
-                title: tabTitle,
-                location: location,
+          // IMPORTANT: Positioned MUST be a direct child of Stack.
+          // Wrapping it inside AnimatedSlide/AnimatedOpacity causes
+          // "ParentData is not a subtype of StackParentData" → grey overlay in release.
+          Positioned(
+            top: 0, left: 0, right: 0,
+            child: AnimatedSlide(
+              offset: NavigationState.instance.barsVisible ? Offset.zero : const Offset(0, -1),
+              duration: NavigationState.instance.feedScrolling || !NavigationState.instance.barsVisible
+                  ? const Duration(milliseconds: 200)
+                  : const Duration(milliseconds: 150),
+              curve: Curves.easeOutCubic,
+              child: AnimatedOpacity(
+                opacity: NavigationState.instance.barsVisible ? 1.0 : 0.0,
+                duration: const Duration(milliseconds: 200),
+                child: _buildGlobalTopBar(
+                  community: community,
+                  brightness: brightness,
+                  accentColor: accentColor,
+                  title: tabTitle,
+                  location: location,
+                ),
               ),
             ),
           ),
@@ -610,7 +633,7 @@ class _MainShellState extends ConsumerState<MainShell>
                         bottom: MediaQuery.of(context).viewPadding.bottom,
                       ),
                       child: SizedBox(
-                        height: 34,
+                        height: kIsWeb ? 48 : 34,
                         child: Row(
                           children: [
                             for (int i = 0; i < _allTabs.length; i++)
@@ -688,16 +711,16 @@ class _MainShellState extends ConsumerState<MainShell>
         _buildMessageIcon(accentColor, effectiveIconColor),
         IconButton(
           onPressed: () => context.push('/search'),
-          icon: Icon(Icons.search_rounded, color: effectiveIconColor, size: 16),
+          icon: Icon(Icons.search_rounded, color: effectiveIconColor, size: kIsWeb ? 22 : 16),
           padding: EdgeInsets.zero,
-          constraints: const BoxConstraints(minWidth: 24, minHeight: 34),
+          constraints: BoxConstraints(minWidth: kIsWeb ? 36 : 24, minHeight: kIsWeb ? 44 : 34),
         ),
         if (location == '/profile')
           IconButton(
             onPressed: () => context.push('/settings'),
-            icon: Icon(Icons.settings_outlined, color: effectiveIconColor, size: 16),
+            icon: Icon(Icons.settings_outlined, color: effectiveIconColor, size: kIsWeb ? 22 : 16),
             padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 24, minHeight: 34),
+            constraints: BoxConstraints(minWidth: kIsWeb ? 36 : 24, minHeight: kIsWeb ? 44 : 34),
           )
         else
           GestureDetector(
@@ -708,21 +731,18 @@ class _MainShellState extends ConsumerState<MainShell>
       ],
     );
 
-    return Positioned(
-      top: 0, left: 0, right: 0,
-      child: SafeArea(
-        bottom: false,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-          child: SizedBox(
-            height: 38,
-            child: Row(
-              children: [
-                const CommunitySwitcher(),
-                const Spacer(),
-                iconRow,
-              ],
-            ),
+    return SafeArea(
+      bottom: false,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        child: SizedBox(
+          height: kIsWeb ? 48 : 38,
+          child: Row(
+            children: [
+              const CommunitySwitcher(),
+              const Spacer(),
+              iconRow,
+            ],
           ),
         ),
       ),
@@ -736,11 +756,11 @@ class _MainShellState extends ConsumerState<MainShell>
     return IconButton(
       onPressed: () => context.push('/notifications'),
       padding: EdgeInsets.zero,
-      constraints: const BoxConstraints(minWidth: 24, minHeight: 34),
+      constraints: BoxConstraints(minWidth: kIsWeb ? 36 : 24, minHeight: kIsWeb ? 44 : 34),
       icon: Stack(
         clipBehavior: Clip.none,
         children: [
-          Icon(Icons.notifications_outlined, color: iconColor, size: 16),
+          Icon(Icons.notifications_outlined, color: iconColor, size: kIsWeb ? 22 : 16),
           if (unreadCount > 0)
             Positioned(
               right: -4, top: -4,
@@ -771,11 +791,11 @@ class _MainShellState extends ConsumerState<MainShell>
     return IconButton(
       onPressed: () => context.push('/messages'),
       padding: EdgeInsets.zero,
-      constraints: const BoxConstraints(minWidth: 24, minHeight: 34),
+      constraints: BoxConstraints(minWidth: kIsWeb ? 36 : 24, minHeight: kIsWeb ? 44 : 34),
       icon: Stack(
         clipBehavior: Clip.none,
         children: [
-          Icon(Icons.chat_bubble_outline_rounded, color: iconColor, size: 16),
+          Icon(Icons.chat_bubble_outline_rounded, color: iconColor, size: kIsWeb ? 22 : 16),
           if (unreadCount > 0)
             Positioned(
               right: -4, top: -4,
@@ -812,8 +832,9 @@ class _MainShellState extends ConsumerState<MainShell>
         : user?.avatarUrl;
 
     if (avatarUrl != null && avatarUrl.isNotEmpty) {
+      final avatarSize = kIsWeb ? 34.0 : 28.0;
       return Container(
-        width: 28, height: 28,
+        width: avatarSize, height: avatarSize,
         decoration: BoxDecoration(
           shape: BoxShape.circle,
           border: Border.all(color: accentColor, width: 2),
@@ -828,14 +849,15 @@ class _MainShellState extends ConsumerState<MainShell>
   }
 
   Widget _buildInitialAvatar(String initial, Color accentColor) {
+    final avatarSize = kIsWeb ? 34.0 : 28.0;
     return Container(
-      width: 28, height: 28,
+      width: avatarSize, height: avatarSize,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
         gradient: LinearGradient(colors: [accentColor, accentColor.withValues(alpha: 0.6)]),
       ),
       child: Center(
-        child: Text(initial, style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w700, color: Colors.white)),
+        child: Text(initial, style: GoogleFonts.inter(fontSize: kIsWeb ? 15 : 13, fontWeight: FontWeight.w700, color: Colors.white)),
       ),
     );
   }
@@ -989,8 +1011,8 @@ class _MainShellState extends ConsumerState<MainShell>
 
     return SizedBox(
       key: ValueKey('profile_garage_$isActive'),
-      width: 32,
-      height: 28,
+      width: kIsWeb ? 40 : 32,
+      height: kIsWeb ? 34 : 28,
       child: Stack(
         clipBehavior: Clip.none,
         children: [
@@ -1001,7 +1023,7 @@ class _MainShellState extends ConsumerState<MainShell>
             child: Icon(
               isActive ? Icons.person_rounded : Icons.person_outlined,
               color: color,
-              size: 26,
+              size: kIsWeb ? 32 : 26,
             ),
           ),
           // Small car badge bottom-right
@@ -1011,7 +1033,7 @@ class _MainShellState extends ConsumerState<MainShell>
             child: Icon(
               Icons.directions_car_rounded,
               color: color,
-              size: 14,
+              size: kIsWeb ? 18 : 14,
             ),
           ),
         ],
@@ -1055,7 +1077,7 @@ class _MainShellState extends ConsumerState<MainShell>
                     color: isActive
                         ? accentColor
                         : (Theme.of(context).brightness == Brightness.dark ? Colors.white.withValues(alpha: 0.4) : const Color(0xFF6C757D)),
-                    size: 26,
+                    size: kIsWeb ? 32 : 26,
                   ),
           ),
         ),

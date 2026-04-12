@@ -411,13 +411,15 @@ class MessageRepository {
   }
 
   /// Subscribe to new, updated, and deleted messages in a conversation (realtime).
+  /// Also listens for typing indicator changes on conversation_participants.
   RealtimeChannel subscribeToMessages(
     int conversationId,
     void Function(Map<String, dynamic> message) onInsert,
     {void Function(Map<String, dynamic> message)? onUpdate,
-     void Function(Map<String, dynamic> oldRecord)? onDelete}
+     void Function(Map<String, dynamic> oldRecord)? onDelete,
+     void Function(Map<String, dynamic> record)? onTyping}
   ) {
-    return _supabase
+    var channel = _supabase
         .channel('messages:$conversationId')
         .onPostgresChanges(
           event: PostgresChangeEvent.insert,
@@ -457,8 +459,26 @@ class MessageRepository {
           callback: (payload) {
             onDelete?.call(payload.oldRecord);
           },
-        )
-        .subscribe();
+        );
+
+    // Typing indicator: listen for conversation_participants updates
+    if (onTyping != null) {
+      channel = channel.onPostgresChanges(
+        event: PostgresChangeEvent.update,
+        schema: 'public',
+        table: 'conversation_participants',
+        filter: PostgresChangeFilter(
+          type: PostgresChangeFilterType.eq,
+          column: 'conversation_id',
+          value: conversationId,
+        ),
+        callback: (payload) {
+          onTyping(payload.newRecord);
+        },
+      );
+    }
+
+    return channel.subscribe();
   }
 
   /// Get total unread message count across all conversations.

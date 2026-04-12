@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../data/repositories/message_repository.dart';
 import '../../domain/models/direct_message.dart';
@@ -11,21 +14,26 @@ class MessagesState {
     this.conversations = const [],
     this.isLoading = false,
     this.error,
+    this.typingConversationIds = const {},
   });
 
   final List<Conversation> conversations;
   final bool isLoading;
   final String? error;
+  /// Conversation IDs where someone is currently typing.
+  final Set<int> typingConversationIds;
 
   MessagesState copyWith({
     List<Conversation>? conversations,
     bool? isLoading,
     String? error,
+    Set<int>? typingConversationIds,
   }) {
     return MessagesState(
       conversations: conversations ?? this.conversations,
       isLoading: isLoading ?? this.isLoading,
       error: error,
+      typingConversationIds: typingConversationIds ?? this.typingConversationIds,
     );
   }
 }
@@ -33,6 +41,8 @@ class MessagesState {
 class MessagesNotifier extends Notifier<MessagesState> {
   late MessageRepository _repo;
   String? _community;
+  RealtimeChannel? _typingChannel;
+  final Map<int, Timer> _typingTimers = {};
 
   @override
   MessagesState build() {
@@ -44,9 +54,62 @@ class MessagesNotifier extends Notifier<MessagesState> {
     // initialised. Without this, loadConversations() tries to read/write
     // `state` before it exists → "Tried to read the state of an
     // uninitialized provider".
-    Future.microtask(() => loadConversations());
+    Future.microtask(() {
+      loadConversations();
+      _subscribeToTypingBroadcast();
+    });
+
+    ref.onDispose(() {
+      _typingChannel?.unsubscribe();
+      for (final t in _typingTimers.values) { t.cancel(); }
+    });
 
     return const MessagesState(isLoading: true);
+  }
+
+  /// Subscribe to conversation_participants changes for typing indicators.
+  /// Uses Postgres Changes — no filter (listens to all updates), client-side
+  /// filters by user_id.
+  void _subscribeToTypingBroadcast() {
+    final currentUserId = Supabase.instance.client.auth.currentUser?.id;
+    _typingChannel?.unsubscribe();
+    _typingChannel = Supabase.instance.client
+        .channel('typing:participants')
+        .onPostgresChanges(
+          event: PostgresChangeEvent.update,
+          schema: 'public',
+          table: 'conversation_participants',
+          callback: (payload) {
+            final record = payload.newRecord;
+            final convId = record['conversation_id'];
+            final userId = record['user_id']?.toString();
+            final isTyping = record['is_typing'] == true;
+            if (convId == null || userId == null || userId == currentUserId) return;
+
+            final cid = convId is int ? convId : int.tryParse('$convId');
+            if (cid == null) return;
+
+            debugPrint('[Messages] Typing DB change: conv=$cid, user=$userId, typing=$isTyping');
+
+            final current = Set<int>.from(state.typingConversationIds);
+            if (isTyping) {
+              current.add(cid);
+              // Auto-clear after 5 seconds (safety net)
+              _typingTimers[cid]?.cancel();
+              _typingTimers[cid] = Timer(const Duration(seconds: 5), () {
+                final updated = Set<int>.from(state.typingConversationIds)..remove(cid);
+                state = state.copyWith(typingConversationIds: updated);
+              });
+            } else {
+              current.remove(cid);
+              _typingTimers[cid]?.cancel();
+            }
+            state = state.copyWith(typingConversationIds: current);
+          },
+        )
+        .subscribe((status, [error]) {
+      debugPrint('[Messages] typing:participants channel status=$status, error=$error');
+    });
   }
 
   Future<void> loadConversations() async {

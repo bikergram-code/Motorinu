@@ -10,6 +10,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../../data/repositories/message_repository.dart';
 import '../../../data/repositories/profile_repository.dart';
 import '../../../domain/models/post.dart';
+import '../../widgets/online_status_avatar.dart';
 import 'double_tap_like_overlay.dart';
 import 'fullscreen_image_viewer.dart';
 import 'likers_sheet.dart';
@@ -239,34 +240,12 @@ class PostCard extends StatelessWidget {
           // Avatar — tappable
           GestureDetector(
             onTap: () => _showUserActions(context),
-            child: Container(
-              width: 42,
-              height: 42,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                gradient: LinearGradient(
-                  colors: [accentColor, accentColor.withValues(alpha: 0.6)],
-                ),
-              ),
-              padding: const EdgeInsets.all(2.5),
-              child: Container(
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: isDark ? Colors.black : Colors.white,
-                ),
-                padding: const EdgeInsets.all(1.5),
-                child: ClipOval(
-                  child: post.avatarUrl != null && post.avatarUrl!.isNotEmpty
-                      ? CachedNetworkImage(
-                          imageUrl: post.avatarUrl!,
-                          width: 34,
-                          height: 34,
-                          fit: BoxFit.cover,
-                          errorWidget: (_, __, ___) => _buildAvatarFallback(textColor),
-                        )
-                      : _buildAvatarFallback(textColor),
-                ),
-              ),
+            child: OnlineStatusAvatar(
+              userId: post.userId,
+              avatarUrl: post.avatarUrl,
+              size: 42,
+              backgroundColor: isDark ? Colors.black : Colors.white,
+              fallbackIcon: _buildAvatarFallback(textColor),
             ),
           ),
           const SizedBox(width: 12),

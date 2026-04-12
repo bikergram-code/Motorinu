@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:confetti/confetti.dart';
 import 'package:flutter/material.dart';
@@ -9,10 +8,13 @@ import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:record/record.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../services/voice_recorder_helper.dart' as voice;
+import '../../services/vosk_wake_word_service.dart';
+
 import '../../core/community.dart';
+import '../widgets/online_status_avatar.dart';
 import '../../domain/models/direct_message.dart';
 import '../../providers/core/providers.dart';
 import '../../providers/messages/chat_notifier.dart';
@@ -45,11 +47,19 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen>
   /// Track which conversations already showed the match heart rain this session
   static final _shownMatchRain = <int>{};
 
+  bool _voskWasListening = false;
+
   @override
   void initState() {
     super.initState();
     _currentUserId = Supabase.instance.client.auth.currentUser?.id;
     WidgetsBinding.instance.addObserver(this);
+    // Pause Vosk so Gboard voice input can use the microphone
+    if (VoskWakeWordService.instance.isListening) {
+      _voskWasListening = true;
+      VoskWakeWordService.instance.stopListening();
+      debugPrint('[Chat] Vosk paused for chat');
+    }
     // Cancel Android Auto notification for this conversation
     IncomingMessageBus.instance.cancelNotification(widget.conversationId);
     // Check if this chat is from a recent match → heart rain
@@ -849,6 +859,11 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen>
     WidgetsBinding.instance.removeObserver(this);
     _scrollController.dispose();
     _audioRecorder.dispose();
+    // Resume Vosk if it was running before
+    if (_voskWasListening) {
+      VoskWakeWordService.instance.startListening();
+      debugPrint('[Chat] Vosk resumed after chat');
+    }
     super.dispose();
   }
 
@@ -977,33 +992,33 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen>
 
   // ── Voice recording ──
   Future<void> _startRecording() async {
+    debugPrint('[Mic] _startRecording() → calling voice.startRecording');
     try {
-      if (await _audioRecorder.hasPermission()) {
-        final dir = await getTemporaryDirectory();
-        _audioPath =
-            '${dir.path}/voice_${DateTime.now().millisecondsSinceEpoch}.m4a';
-        await _audioRecorder.start(
-          const RecordConfig(encoder: AudioEncoder.aacLc),
-          path: _audioPath!,
-        );
-      }
-    } catch (e) {
-      debugPrint('Error starting recording: $e');
+      await voice.startRecording(_audioRecorder, (p) {
+        _audioPath = p;
+        debugPrint('[Mic] audioPath set: $p');
+      });
+      debugPrint('[Mic] startRecording() completed');
+    } catch (e, st) {
+      debugPrint('[Mic] startRecording ERROR: $e\n$st');
     }
   }
 
   Future<void> _stopRecording(int durationMs) async {
+    debugPrint('[Mic] _stopRecording(${durationMs}ms)');
     try {
       final path = await _audioRecorder.stop();
+      debugPrint('[Mic] recorder.stop() returned: $path');
       if (path != null && durationMs > 500) {
+        debugPrint('[Mic] Sending audio message...');
         ref
             .read(chatNotifierProvider(widget.conversationId).notifier)
             .sendAudioMessage(path, durationMs);
         ref.read(messagesNotifierProvider.notifier).refresh();
         _scrollToBottom();
       }
-    } catch (e) {
-      debugPrint('Error stopping recording: $e');
+    } catch (e, st) {
+      debugPrint('[Mic] stopRecording ERROR: $e\n$st');
     }
   }
 
@@ -1080,59 +1095,29 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen>
                 },
                 child: Row(
                   children: [
-                    // Avatar
-                    Container(
-                      width: 34,
-                      height: 34,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        gradient: chatState.isGroupChat || chatState.otherAvatarUrl == null
-                            ? LinearGradient(
-                                colors: [
-                                  accentColor,
-                                  accentColor.withValues(alpha: 0.6),
-                                ],
-                              )
-                            : null,
+                    // Avatar with online status
+                    if (chatState.isGroupChat)
+                      Container(
+                        width: 34, height: 34,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          gradient: LinearGradient(colors: [accentColor, accentColor.withValues(alpha: 0.6)]),
+                        ),
+                        child: const Center(child: Icon(Icons.groups_rounded, size: 18, color: Colors.white)),
+                      )
+                    else
+                      OnlineStatusAvatar(
+                        userId: chatState.otherUserId ?? '',
+                        avatarUrl: chatState.otherAvatarUrl,
+                        size: 34,
+                        borderWidth: 2.0,
+                        fallbackIcon: Center(
+                          child: Text(
+                            (chatState.otherUsername ?? '?')[0].toUpperCase(),
+                            style: GoogleFonts.inter(fontSize: 14, fontWeight: FontWeight.w700, color: Colors.white),
+                          ),
+                        ),
                       ),
-                      child: ClipOval(
-                        child: chatState.isGroupChat
-                            ? Center(
-                                child: Icon(Icons.groups_rounded,
-                                    size: 18, color: Colors.white),
-                              )
-                            : chatState.otherAvatarUrl != null &&
-                                chatState.otherAvatarUrl!.isNotEmpty
-                            ? Image.network(
-                                chatState.otherAvatarUrl!,
-                                width: 34,
-                                height: 34,
-                                fit: BoxFit.cover,
-                                errorBuilder: (_, __, ___) => Center(
-                                  child: Text(
-                                    (chatState.otherUsername ?? '?')[0]
-                                        .toUpperCase(),
-                                    style: GoogleFonts.inter(
-                                      fontSize: 14,
-                                      fontWeight: FontWeight.w700,
-                                      color: Colors.white,
-                                    ),
-                                  ),
-                                ),
-                              )
-                            : Center(
-                                child: Text(
-                                  (chatState.otherUsername ?? '?')[0]
-                                      .toUpperCase(),
-                                  style: GoogleFonts.inter(
-                                    fontSize: 14,
-                                    fontWeight: FontWeight.w700,
-                                    color: Colors.white,
-                                  ),
-                                ),
-                              ),
-                      ),
-                    ),
                     const SizedBox(width: 10),
                     Expanded(
                       child: Column(

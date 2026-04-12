@@ -3,7 +3,6 @@ import 'dart:io';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter_app_badger/flutter_app_badger.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:go_router/go_router.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -78,12 +77,13 @@ class PushNotificationService {
             showBadge: true,
           ),
         );
+        // badge_v2: Importance.low statt min — min wird von manchen Launchern ignoriert
         await androidPlugin.createNotificationChannel(
           const AndroidNotificationChannel(
-            'badge_channel',
+            'badge_v2',
             'Badge',
             description: 'App badge count',
-            importance: Importance.min,
+            importance: Importance.low,
             showBadge: true,
           ),
         );
@@ -128,10 +128,7 @@ class PushNotificationService {
       // signedIn = frischer Login
       // tokenRefreshed = JWT-Refresh
       // userUpdated = Profile-Update
-      if (event == AuthChangeEvent.initialSession ||
-          event == AuthChangeEvent.signedIn ||
-          event == AuthChangeEvent.tokenRefreshed ||
-          event == AuthChangeEvent.userUpdated) {
+      if (event == AuthChangeEvent.signedIn) {
         debugPrint('[Push] Auth event $event → re-saving FCM token + badge');
         saveFcmToken();
         updateBadge();
@@ -139,9 +136,15 @@ class PushNotificationService {
     });
   }
 
+  bool _savingToken = false;
+  String? _lastSavedToken;
+
   /// Save FCM token to Supabase for this device.
+  /// Debounced — skips if already saving or token unchanged.
   Future<void> saveFcmToken({String? token}) async {
     if (kIsWeb) return; // No FCM on Web
+    if (_savingToken) return; // Prevent race condition
+    _savingToken = true;
     try {
       final fcmToken = token ?? await _messaging.getToken();
       if (fcmToken == null) {
@@ -155,13 +158,15 @@ class PushNotificationService {
         return;
       }
 
+      // Skip if same token already saved this session
+      if (_lastSavedToken == fcmToken) {
+        debugPrint('[Push] FCM token already saved, skipping');
+        return;
+      }
+
       final sb = Supabase.instance.client;
 
-      // Delete + Insert statt upsert — die DB hat keinen UNIQUE constraint
-      // auf fcm_token, daher würde upsert(onConflict:'fcm_token') fehlschlagen
-      // mit "no unique or exclusion constraint" (42P10).
-      // Ein FCM Token gehört immer nur einem Gerät/User, also ist delete-by-token
-      // sicher und erlaubt einem User trotzdem mehrere Geräte (verschiedene Tokens).
+      // Delete ALL rows for this token (prevent duplicates)
       await sb.from('user_devices').delete().eq('fcm_token', fcmToken);
 
       await sb.from('user_devices').insert({
@@ -171,39 +176,20 @@ class PushNotificationService {
         'updated_at': DateTime.now().toIso8601String(),
       });
 
+      _lastSavedToken = fcmToken;
       debugPrint('[Push] FCM token saved OK: ${fcmToken.substring(0, 20)}...');
     } catch (e, st) {
       debugPrint('[Push] Error saving FCM token: $e\n$st');
+    } finally {
+      _savingToken = false;
     }
   }
 
-  /// Show notification when app is in foreground.
+  /// Handle foreground message — don't show local notification because
+  /// some OEMs (Vivo, Xiaomi) show the FCM system notification even in
+  /// foreground, which would cause duplicates. Just update badge count.
   void _showForegroundNotification(RemoteMessage message) {
-    final notification = message.notification;
-    if (notification == null) return;
-
-    // Get badge count from data payload
-    final badgeStr = message.data['badge'];
-    final badge = badgeStr != null ? int.tryParse(badgeStr) ?? 0 : 0;
-
-    _localNotifications.show(
-      message.hashCode,
-      notification.title,
-      notification.body,
-      NotificationDetails(
-        android: AndroidNotificationDetails(
-          'motorinu_default',
-          'Motorinu Benachrichtigungen',
-          icon: '@mipmap/ic_launcher',
-          importance: Importance.high,
-          priority: Priority.high,
-          number: badge > 0 ? badge : null,
-        ),
-      ),
-      payload: jsonEncode(message.data),
-    );
-
-    // Update badge count
+    debugPrint('[Push] Foreground message: ${message.notification?.title}');
     updateBadge();
   }
 
@@ -345,46 +331,70 @@ class PushNotificationService {
       final total = msgCount + notifCount;
       debugPrint('[Push] Badge updated: $total ($msgCount msgs + $notifCount notifs)');
 
-      // Use a silent notification with 'number' to set badge on most launchers
-      if (total > 0) {
-        // ShortcutBadger — works on Vivo, Huawei, Xiaomi, Samsung etc.
-        FlutterAppBadger.updateBadgeCount(total);
-        // Also set via silent notification for launchers that use notification count
-        await _localNotifications.show(
-          99999,
-          null,
-          null,
-          NotificationDetails(
-            android: AndroidNotificationDetails(
-              'badge_channel',
-              'Badge',
-              channelDescription: 'App badge count',
-              importance: Importance.min,
-              priority: Priority.min,
-              number: total,
-              showWhen: false,
-              ongoing: false,
-              silent: true,
-              playSound: false,
-              enableVibration: false,
-              onlyAlertOnce: true,
-            ),
+      // Set badge via silent notification, then immediately cancel it.
+      // The badge count persists on most launchers even after cancellation.
+      // Without cancellation, Vivo/FuntouchOS shows it in the notification drawer.
+      await _localNotifications.show(
+        99999,
+        null,
+        null,
+        NotificationDetails(
+          android: AndroidNotificationDetails(
+            'badge_v2',
+            'Badge',
+            channelDescription: 'App badge count',
+            importance: Importance.min,
+            priority: Priority.min,
+            number: total,
+            showWhen: false,
+            ongoing: false,
+            silent: true,
+            playSound: false,
+            enableVibration: false,
+            onlyAlertOnce: true,
           ),
-        );
-      } else {
-        FlutterAppBadger.removeBadge();
-        await _localNotifications.cancel(99999);
-      }
+          iOS: DarwinNotificationDetails(
+            badgeNumber: total,
+            presentAlert: false,
+            presentSound: false,
+            presentBadge: true,
+          ),
+        ),
+      );
+      // Cancel immediately — badge count stays, notification disappears
+      await Future.delayed(const Duration(milliseconds: 200));
+      await _localNotifications.cancel(99999);
     } catch (e) {
       debugPrint('[Push] Badge update failed: $e');
     }
   }
 
   /// Clear badge when user opens the app.
-  void clearBadge() {
+  Future<void> clearBadge() async {
     if (kIsWeb) return;
-    FlutterAppBadger.removeBadge();
-    _localNotifications.cancel(99999);
+    // iOS: badge auf 0 setzen, dann Notification entfernen
+    await _localNotifications.show(
+      99999, null, null,
+      const NotificationDetails(
+        android: AndroidNotificationDetails(
+          'badge_v2', 'Badge',
+          channelDescription: 'App badge count',
+          importance: Importance.min,
+          priority: Priority.min,
+          number: 0,
+          silent: true,
+          playSound: false,
+          enableVibration: false,
+        ),
+        iOS: DarwinNotificationDetails(
+          badgeNumber: 0,
+          presentAlert: false,
+          presentSound: false,
+          presentBadge: true,
+        ),
+      ),
+    );
+    await _localNotifications.cancel(99999);
   }
 
   /// Remove FCM token on logout.

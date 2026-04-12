@@ -11,6 +11,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../core/community.dart';
 import '../../domain/models/direct_message.dart';
 import '../../providers/core/providers.dart';
+import '../widgets/online_status_avatar.dart';
 import '../../providers/messages/messages_notifier.dart';
 import '../../providers/messages/unread_messages_notifier.dart';
 import '../../theme/app_theme.dart';
@@ -402,6 +403,7 @@ class _MessagesScreenState extends ConsumerState<MessagesScreen> {
                 accentColor: accentColor,
                 isSelected: _selectedIds.contains(activeConversations[i].id),
                 isSelecting: _isSelecting,
+                isTyping: state.typingConversationIds.contains(activeConversations[i].id),
                 onTap: () {
                   if (_isSelecting) {
                     _toggleSelection(activeConversations[i].id);
@@ -582,6 +584,7 @@ class _SelectableConversationTile extends StatelessWidget {
     this.onDelete,
     this.onMarkRead,
     this.onMarkUnread,
+    this.isTyping = false,
   });
 
   final Conversation conversation;
@@ -594,6 +597,7 @@ class _SelectableConversationTile extends StatelessWidget {
   final VoidCallback? onDelete;
   final VoidCallback? onMarkRead;
   final VoidCallback? onMarkUnread;
+  final bool isTyping;
 
   @override
   Widget build(BuildContext context) {
@@ -602,6 +606,7 @@ class _SelectableConversationTile extends StatelessWidget {
       accentColor: accentColor,
       isSelected: isSelected,
       isSelecting: isSelecting,
+      isTyping: isTyping,
       onTap: onTap,
       onLongPress: onLongPress,
       onArchive: isSelecting ? null : onArchive,
@@ -625,9 +630,11 @@ class _ConversationTile extends StatelessWidget {
     this.onMarkUnread,
     this.isSelected = false,
     this.isSelecting = false,
+    this.isTyping = false,
   });
 
   final Conversation conversation;
+  final bool isTyping;
   final Color accentColor;
   final VoidCallback onTap;
   final VoidCallback? onLongPress;
@@ -676,38 +683,35 @@ class _ConversationTile extends StatelessWidget {
               ),
               const SizedBox(width: 10),
             ],
-            // Avatar — group icon or user avatar
-            Container(
-              width: 52,
-              height: 52,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                gradient: (avatarUrl == null || avatarUrl.isEmpty)
-                    ? LinearGradient(
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                        colors: conversation.isGroupChat
-                            ? [Colors.teal, Colors.teal.withValues(alpha: 0.6)]
-                            : [accentColor, accentColor.withValues(alpha: 0.6)],
-                      )
-                    : null,
+            // Avatar — group icon or user avatar with online status
+            if (conversation.isGroupChat)
+              Container(
+                width: 52,
+                height: 52,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  gradient: (avatarUrl == null || avatarUrl.isEmpty)
+                      ? LinearGradient(
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                          colors: [Colors.teal, Colors.teal.withValues(alpha: 0.6)],
+                        )
+                      : null,
+                ),
+                child: ClipOval(
+                  child: avatarUrl != null && avatarUrl.isNotEmpty
+                      ? Image.network(avatarUrl, width: 52, height: 52, fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) => _buildGroupIcon())
+                      : _buildGroupIcon(),
+                ),
+              )
+            else
+              OnlineStatusAvatar(
+                userId: conversation.otherUserId,
+                avatarUrl: avatarUrl,
+                size: 52,
+                fallbackIcon: _buildInitial(displayName, accentColor),
               ),
-              child: ClipOval(
-                child: avatarUrl != null && avatarUrl.isNotEmpty
-                    ? Image.network(
-                        avatarUrl,
-                        width: 52,
-                        height: 52,
-                        fit: BoxFit.cover,
-                        errorBuilder: (_, __, ___) => conversation.isGroupChat
-                            ? _buildGroupIcon()
-                            : _buildInitial(displayName, accentColor),
-                      )
-                    : conversation.isGroupChat
-                        ? _buildGroupIcon()
-                        : _buildInitial(displayName, accentColor),
-              ),
-            ),
 
             const SizedBox(width: 14),
 
@@ -742,14 +746,15 @@ class _ConversationTile extends StatelessWidget {
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    _formatPreview(conversation.lastMessageBody),
+                    isTyping ? 'schreibt...' : _formatPreview(conversation.lastMessageBody),
                     style: GoogleFonts.inter(
                       fontSize: 13,
-                      fontWeight:
-                          hasUnread ? FontWeight.w500 : FontWeight.w400,
-                      color: hasUnread
-                          ? (brightness == Brightness.dark ? Colors.white.withValues(alpha: 0.7) : const Color(0xFF1A1A1A))
-                          : (brightness == Brightness.dark ? Colors.white.withValues(alpha: 0.35) : const Color(0xFF6C757D)),
+                      fontWeight: isTyping ? FontWeight.w600 : (hasUnread ? FontWeight.w500 : FontWeight.w400),
+                      color: isTyping
+                          ? accentColor
+                          : hasUnread
+                              ? (brightness == Brightness.dark ? Colors.white.withValues(alpha: 0.7) : const Color(0xFF1A1A1A))
+                              : (brightness == Brightness.dark ? Colors.white.withValues(alpha: 0.35) : const Color(0xFF6C757D)),
                     ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,

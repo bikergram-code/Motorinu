@@ -7,6 +7,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../core/community.dart';
 import '../../domain/xp_calculator.dart';
+import '../widgets/online_status_avatar.dart';
 import '../../domain/badge_calculator.dart';
 import '../../providers/auth/auth_notifier.dart';
 import '../../providers/auth/auth_state.dart';
@@ -181,8 +182,12 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     } catch (_) {}
 
     try {
-      final rideStats = await RideRepository().getRideStats();
-      debugPrint('[Stats] rideStats for $userId = $rideStats');
+      // RLS: rides only readable by owner → for other profiles, use their userId
+      // but RLS will return empty. For own profile, omit forUserId (uses current user).
+      final rideStats = _isOwnProfile
+          ? await RideRepository().getRideStats()
+          : await RideRepository().getRideStats(forUserId: userId);
+      debugPrint('[Stats] rideStats for $userId (own=$_isOwnProfile) = $rideStats');
       if (mounted) setState(() => _totalKm = (rideStats['totalKm'] as num?)?.toDouble() ?? 0);
     } catch (e) {
       debugPrint('[Stats] getRideStats ERROR: $e');
@@ -760,29 +765,13 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                         Row(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            // Avatar with accent ring
-                            Container(
-                              padding: const EdgeInsets.all(2.5),
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                border: Border.all(color: accentColor, width: 2),
-                              ),
-                              child: Container(
-                                width: 80,
-                                height: 80,
-                                decoration: BoxDecoration(
-                                  shape: BoxShape.circle,
-                                  gradient: avatarUrl == null
-                                      ? LinearGradient(colors: [accentColor, accentColor.withValues(alpha: 0.6)])
-                                      : null,
-                                ),
-                                child: ClipOval(
-                                  child: avatarUrl != null && avatarUrl.isNotEmpty
-                                      ? Image.network(avatarUrl, width: 80, height: 80, fit: BoxFit.cover,
-                                          errorBuilder: (_, __, ___) => _buildInitial(shownName, accentColor))
-                                      : _buildInitial(shownName, accentColor),
-                                ),
-                              ),
+                            // Avatar with online status ring
+                            OnlineStatusAvatar(
+                              userId: _targetUserId,
+                              avatarUrl: avatarUrl,
+                              size: 86,
+                              borderWidth: 3.0,
+                              fallbackIcon: _buildInitial(shownName, accentColor),
                             ),
                             const SizedBox(width: 16),
                             // Name + Level + Garage
@@ -2568,8 +2557,8 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     final scaffoldBg = community?.scaffoldFor(brightness) ?? (isDark ? Colors.black : const Color(0xFFF5F5F5));
     final textColor = isDark ? Colors.white : const Color(0xFF1A1A1A);
     final mutedColor = isDark ? Colors.white.withValues(alpha: 0.5) : const Color(0xFF6C757D);
-    final uid = Supabase.instance.client.auth.currentUser?.id;
-    if (uid == null) return;
+    final uid = _targetUserId;
+    if (uid.isEmpty) return;
 
     Navigator.of(context, rootNavigator: true).push(MaterialPageRoute(
       builder: (_) => _MatchesListScreen(
@@ -2590,8 +2579,8 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
     final scaffoldBg = community?.scaffoldFor(brightness) ?? (isDark ? Colors.black : const Color(0xFFF5F5F5));
     final textColor = isDark ? Colors.white : const Color(0xFF1A1A1A);
     final mutedColor = isDark ? Colors.white.withValues(alpha: 0.5) : const Color(0xFF6C757D);
-    final uid = Supabase.instance.client.auth.currentUser?.id;
-    if (uid == null) return;
+    final uid = _targetUserId;
+    if (uid.isEmpty) return;
 
     Navigator.of(context, rootNavigator: true).push(MaterialPageRoute(
       builder: (_) => _ReceivedLikesScreen(
