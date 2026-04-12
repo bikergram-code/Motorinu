@@ -31,8 +31,21 @@
     <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
 
+    <!-- Alle Hardware-Features als optional markieren, damit Geräte ohne
+         diese Hardware die App trotzdem aus dem Play Store installieren können.
+         Die App prüft zur Laufzeit, ob das Feature verfügbar ist. -->
     <uses-feature android:name="android.hardware.camera" android:required="false"/>
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false"/>
+    <uses-feature android:name="android.hardware.bluetooth" android:required="false"/>
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="false"/>
+    <uses-feature android:name="android.hardware.microphone" android:required="false"/>
+    <uses-feature android:name="android.hardware.location" android:required="false"/>
+    <uses-feature android:name="android.hardware.location.gps" android:required="false"/>
+    <uses-feature android:name="android.hardware.location.network" android:required="false"/>
+    <uses-feature android:name="android.hardware.wifi" android:required="false"/>
+    <uses-feature android:name="android.hardware.telephony" android:required="false"/>
+    <uses-feature android:name="android.hardware.sensor.accelerometer" android:required="false"/>
+    <uses-feature android:name="android.hardware.faketouch" android:required="false"/>
 
     <application
             android:label="Motorinu"
@@ -73,9 +86,10 @@
             android:name="com.google.android.geo.API_KEY"
             android:value="AIzaSyCDfLYfcdMx1MBVmVJswpRB8MzPO5nLN9U" />
 
+        <!-- Mapbox Public Token: wird via manifestPlaceholders aus local.properties gespeist -->
         <meta-data
             android:name="com.mapbox.token"
-            android:value="pk.eyJ1IjoibW90b3JpbnUiLCJhIjoiY21uNTBzNzZwMDZkMzJwczcyemE4OHB4MyJ9.YZ5rJ2FckyWyuFyEN7ZAXw" />
+            android:value="${MAPBOX_PUBLIC_TOKEN}" />
 
         <meta-data
                 android:name="flutterEmbedding"

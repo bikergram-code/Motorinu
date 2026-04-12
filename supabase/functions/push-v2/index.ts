@@ -44,7 +44,10 @@ const FCM = 'https://fcm.googleapis.com/v1/projects/bikergram-2675d/messages:sen
 
 async function sendPush(fcmToken: string, title: string, body: string, data: Record<string, string>, sb: ReturnType<typeof createClient>): Promise<void> {
   const at = await getAccessToken();
-  const r = await fetch(FCM, { method: 'POST', headers: { Authorization: 'Bearer ' + at, 'Content-Type': 'application/json' }, body: JSON.stringify({ message: { token: fcmToken, notification: { title, body }, data, android: { priority: 'high', notification: { channel_id: 'motorinu_default', sound: 'default' } } } }) });
+  // Data-only message — no 'notification' field. This prevents Vivo/Xiaomi
+  // from auto-displaying the notification in foreground. The app handles
+  // display via flutter_local_notifications (background: via onBackgroundMessage).
+  const r = await fetch(FCM, { method: 'POST', headers: { Authorization: 'Bearer ' + at, 'Content-Type': 'application/json' }, body: JSON.stringify({ message: { token: fcmToken, data: { ...data, title, body }, android: { priority: 'high' } } }) });
   if (r.ok) { console.log('[FCM] OK ' + fcmToken.substring(0, 20)); return; }
   const e = await r.json().catch(() => ({}));
   const c = e?.error?.details?.[0]?.errorCode || e?.error?.code || '';

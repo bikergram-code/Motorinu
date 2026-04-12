@@ -42,6 +42,7 @@ class MessagesNotifier extends Notifier<MessagesState> {
   late MessageRepository _repo;
   String? _community;
   RealtimeChannel? _typingChannel;
+  RealtimeChannel? _messagesChannel;
   final Map<int, Timer> _typingTimers = {};
 
   @override
@@ -57,10 +58,12 @@ class MessagesNotifier extends Notifier<MessagesState> {
     Future.microtask(() {
       loadConversations();
       _subscribeToTypingBroadcast();
+      _subscribeToNewMessages();
     });
 
     ref.onDispose(() {
       _typingChannel?.unsubscribe();
+      _messagesChannel?.unsubscribe();
       for (final t in _typingTimers.values) { t.cancel(); }
     });
 
@@ -109,6 +112,25 @@ class MessagesNotifier extends Notifier<MessagesState> {
         )
         .subscribe((status, [error]) {
       debugPrint('[Messages] typing:participants channel status=$status, error=$error');
+    });
+  }
+
+  /// Subscribe to new messages → auto-refresh conversation list preview.
+  void _subscribeToNewMessages() {
+    _messagesChannel?.unsubscribe();
+    _messagesChannel = Supabase.instance.client
+        .channel('messages:list-refresh')
+        .onPostgresChanges(
+          event: PostgresChangeEvent.insert,
+          schema: 'public',
+          table: 'messages',
+          callback: (payload) {
+            debugPrint('[Messages] New message detected → refreshing list');
+            loadConversations();
+          },
+        )
+        .subscribe((status, [error]) {
+      debugPrint('[Messages] messages:list-refresh channel status=$status');
     });
   }
 

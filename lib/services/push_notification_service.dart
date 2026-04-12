@@ -10,10 +10,37 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../routes/app_router.dart';
 
 /// Top-level handler for background messages (must be top-level function).
+/// For data-only FCM messages, we show a local notification here so the
+/// user sees it while the app is in the background.
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await Firebase.initializeApp();
   debugPrint('[Push] Background message: ${message.messageId}');
+  final title = message.data['title'] as String?;
+  final body = message.data['body'] as String?;
+  if (title == null || title.isEmpty) return;
+  try {
+    final localNotif = FlutterLocalNotificationsPlugin();
+    const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
+    await localNotif.initialize(const InitializationSettings(android: androidSettings));
+    await localNotif.show(
+      message.messageId.hashCode,
+      title,
+      body,
+      const NotificationDetails(
+        android: AndroidNotificationDetails(
+          'motorinu_default',
+          'Motorinu Benachrichtigungen',
+          channelDescription: 'Nachrichten, Follower, Gruppen-Einladungen',
+          importance: Importance.high,
+          priority: Priority.high,
+        ),
+      ),
+      payload: jsonEncode(message.data),
+    );
+  } catch (e) {
+    debugPrint('[Push] Background notification error: $e');
+  }
 }
 
 class PushNotificationService {
@@ -185,11 +212,11 @@ class PushNotificationService {
     }
   }
 
-  /// Handle foreground message — don't show local notification because
-  /// some OEMs (Vivo, Xiaomi) show the FCM system notification even in
-  /// foreground, which would cause duplicates. Just update badge count.
+  /// Handle foreground message — data-only, no system notification shown.
+  /// Just update badge + refresh messages list.
   void _showForegroundNotification(RemoteMessage message) {
-    debugPrint('[Push] Foreground message: ${message.notification?.title}');
+    final title = message.data['title'] ?? message.notification?.title;
+    debugPrint('[Push] Foreground message: $title (data-only, no banner)');
     updateBadge();
   }
 
