@@ -1,7 +1,7 @@
 name: bikergram
 description: Motorinu — Community-App für Biker (Navigation, Feed, Dating, Marktplatz)
 publish_to: none
-version: 1.6.0+28
+version: 1.6.3+33
 
 environment:
   sdk: ^3.8.0
@@ -58,6 +58,8 @@ dependencies:
   fl_chart: ^1.1.1
   google_maps_flutter: ^2.12.3
   mapbox_maps_flutter: ^2.18.0
+  flutter_map: ^7.0.2
+  latlong2: ^0.9.1
   geolocator: ^14.0.2
   sensors_plus: ^6.1.1
   flutter_slidable: ^4.0.3
@@ -91,7 +93,6 @@ dependencies:
   file_picker: ^10.3.10
   video_trimmer: ^5.0.0
   confetti: ^0.8.0
-  flutter_app_badger: ^1.5.0
 
 dependency_overrides:
   record_platform_interface: 1.5.0
