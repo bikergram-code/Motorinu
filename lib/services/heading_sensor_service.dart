@@ -69,6 +69,7 @@ class HeadingSensorService {
   void start() {
     _refCount++;
     if (_running) return;
+    if (kIsWeb) return; // Sensors not available on web
     _running = true;
 
     // Gyroscope stream (~50Hz = gameInterval)

@@ -13,6 +13,9 @@
     <meta name="apple-mobile-web-app-title" content="persistent_project" />
     <link rel="apple-touch-icon" href="icons/Icon-192.png" />
 
+    <!-- Google Sign-In client ID (required for google_sign_in on web) -->
+    <meta name="google-signin-client_id" content="611571947292-8ma9r2hcopn38g9un4acgei56gjmtgtc.apps.googleusercontent.com" />
+
     <!-- Favicon -->
     <link rel="icon" type="image/png" href="favicon.png" />
 
@@ -76,7 +79,30 @@
       })();
     </script>
 
+    <!-- Kill stale Service Workers + clear caches, then load Flutter WITHOUT SW -->
+    <script>
+      (async function() {
+        if ('serviceWorker' in navigator) {
+          var regs = await navigator.serviceWorker.getRegistrations();
+          for (var r of regs) { await r.unregister(); }
+        }
+        if ('caches' in window) {
+          var names = await caches.keys();
+          for (var n of names) { await caches.delete(n); }
+        }
+      })();
+    </script>
+
     <script src="flutter_bootstrap.js" async></script>
+
+    <!-- Override: load Flutter WITHOUT Service Worker (prevents stuck loading) -->
+    <script>
+      window.addEventListener('load', function() {
+        if (window._flutter && window._flutter.loader) {
+          // Already loaded by flutter_bootstrap — no action needed
+        }
+      });
+    </script>
 
     <script>
 

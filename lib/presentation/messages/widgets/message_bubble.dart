@@ -10,6 +10,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../../domain/models/direct_message.dart';
 import '../../../services/geocoding_service.dart';
+import '../../navigation/mapbox_ride_screen.dart';
 
 /// Callback for offer actions in vehicle_offer messages.
 /// [action] is 'accept', 'decline', or 'counter'.
@@ -579,85 +580,132 @@ class MessageBubble extends StatelessWidget {
   Widget _buildLocationBubble(BuildContext context) {
     final lat = message.locationLat;
     final lng = message.locationLng;
+    final name = message.locationName ?? message.body;
 
-    return Container(
-      decoration: _bubbleDecoration(context),
-      clipBehavior: Clip.antiAlias,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (replyToMessage != null)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(14, 10, 14, 0),
-              child: _buildReplyQuote(),
-            ),
-          // Map preview placeholder
-          Container(
-            height: 140,
-            color: Colors.white.withValues(alpha: 0.06),
-            child: Stack(
-              children: [
-                Center(
-                  child: Icon(
-                    Icons.location_on_rounded,
-                    size: 48,
-                    color: Colors.red.withValues(alpha: 0.7),
-                  ),
-                ),
-                Positioned(
-                  bottom: 8,
-                  left: 8,
-                  right: 8,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 10, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: Colors.black.withValues(alpha: 0.6),
-                      borderRadius: BorderRadius.circular(8),
+    return GestureDetector(
+      onTap: () {
+        if (lat != null && lng != null) {
+          // POI auf unserer Karte öffnen (FlyTo + blinkender Ring)
+          MapboxRideScreen.pendingPoiFlyTo.value = (
+            lat: lat, lon: lng, name: name, type: '',
+          );
+          context.go('/map');
+        }
+      },
+      child: Container(
+        decoration: _bubbleDecoration(context),
+        clipBehavior: Clip.antiAlias,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (replyToMessage != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 10, 14, 0),
+                child: _buildReplyQuote(),
+              ),
+            // Map preview placeholder
+            Container(
+              height: 140,
+              color: Colors.white.withValues(alpha: 0.06),
+              child: Stack(
+                children: [
+                  Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.location_on_rounded,
+                          size: 48,
+                          color: Colors.red.withValues(alpha: 0.7),
+                        ),
+                        const SizedBox(height: 4),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: Colors.red.withValues(alpha: 0.15),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: Row(mainAxisSize: MainAxisSize.min, children: [
+                            Icon(Icons.map_rounded, size: 14, color: Colors.red.withValues(alpha: 0.8)),
+                            const SizedBox(width: 4),
+                            Text('Auf Karte zeigen',
+                              style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w600,
+                                color: Colors.red.withValues(alpha: 0.9)),
+                            ),
+                          ]),
+                        ),
+                      ],
                     ),
-                    child: Text(
-                      lat != null && lng != null
-                          ? '${lat.toStringAsFixed(4)}, ${lng.toStringAsFixed(4)}'
-                          : 'Standort',
-                      style: GoogleFonts.inter(
-                        fontSize: 11,
-                        color: Colors.white.withValues(alpha: 0.8),
+                  ),
+                  Positioned(
+                    bottom: 8,
+                    left: 8,
+                    right: 8,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.6),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Text(
+                        lat != null && lng != null
+                            ? '${lat.toStringAsFixed(4)}, ${lng.toStringAsFixed(4)}'
+                            : 'Standort',
+                        style: GoogleFonts.inter(
+                          fontSize: 11,
+                          color: Colors.white.withValues(alpha: 0.8),
+                        ),
                       ),
                     ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(14, 8, 14, 4),
-            child: Row(
-              children: [
-                Icon(Icons.location_on_rounded,
-                    size: 16, color: Colors.red.withValues(alpha: 0.7)),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    message.locationName ?? message.body,
-                    style: GoogleFonts.inter(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w500,
-                      color: isMe
-                          ? Colors.white
-                          : _receivedTextColor(context),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 8, 14, 4),
+              child: Row(
+                children: [
+                  Icon(Icons.location_on_rounded,
+                      size: 16, color: Colors.red.withValues(alpha: 0.7)),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      name,
+                      style: GoogleFonts.inter(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                        color: isMe
+                            ? Colors.white
+                            : _receivedTextColor(context),
+                      ),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
                     ),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
-            child: _buildTimestamp(context),
-          ),
-        ],
+            // Body text (Kategorie, Adresse)
+            if (message.body.isNotEmpty && message.body != name)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 0, 14, 4),
+                child: Text(
+                  message.body,
+                  style: GoogleFonts.inter(
+                    fontSize: 12,
+                    color: (isMe ? Colors.white : _receivedTextColor(context)).withValues(alpha: 0.7),
+                  ),
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
+              child: _buildTimestamp(context),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -755,12 +803,14 @@ class MessageBubble extends StatelessWidget {
           const SizedBox(width: 4),
           Icon(
             message.isRead
-                ? Icons.done_all_rounded
-                : Icons.done_rounded,
+                ? Icons.done_all_rounded      // ✓✓ gelesen
+                : Icons.done_rounded,          // ✓  gesendet / zugestellt
             size: 14,
             color: message.isRead
-                ? Colors.white.withValues(alpha: 0.8)
-                : Colors.white.withValues(alpha: 0.5),
+                ? const Color(0xFF4ADE80)      // grün = gelesen
+                : message.isDelivered
+                    ? const Color(0xFF4ADE80)  // grün = zugestellt
+                    : Colors.white.withValues(alpha: 0.5), // grau = gesendet
           ),
         ],
       ],

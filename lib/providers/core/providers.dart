@@ -19,6 +19,7 @@ import '../../data/repositories/events_repository.dart';
 import '../../data/repositories/group_repository.dart';
 import '../../data/repositories/dating_repository.dart';
 import '../../data/repositories/moderation_repository.dart';
+import '../../data/repositories/call_repository.dart';
 
 // ---------------------------------------------------------------------------
 // Theme mode (persisted to SharedPreferences)
@@ -161,4 +162,8 @@ final groupRepositoryProvider = Provider<GroupRepository>((ref) {
 
 final datingRepositoryProvider = Provider<DatingRepository>((ref) {
   return DatingRepository();
+});
+
+final callRepositoryProvider = Provider<CallRepository>((ref) {
+  return CallRepository();
 });

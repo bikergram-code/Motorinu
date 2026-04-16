@@ -19,6 +19,11 @@ class Vehicle {
   final bool isPrimary;
   final bool forSale;
   final double? price;
+  final int? mileage;
+  final String? fuel;
+  final String? transmission;
+  final String? color;
+  final String? tuevDate; // "MM/YYYY" format
   final DateTime? createdAt;
 
   const Vehicle({
@@ -37,6 +42,11 @@ class Vehicle {
     this.isPrimary = false,
     this.forSale = false,
     this.price,
+    this.mileage,
+    this.fuel,
+    this.transmission,
+    this.color,
+    this.tuevDate,
     this.createdAt,
   });
 
@@ -68,6 +78,11 @@ class Vehicle {
       isPrimary: json['is_primary'] == true,
       forSale: json['for_sale'] == true,
       price: json['price'] != null ? (json['price'] as num).toDouble() : null,
+      mileage: json['mileage'] as int?,
+      fuel: json['fuel'] as String?,
+      transmission: json['transmission'] as String?,
+      color: json['color'] as String?,
+      tuevDate: json['tuev_date'] as String?,
       createdAt: json['created_at'] != null
           ? DateTime.tryParse('${json['created_at']}')
           : null,
@@ -172,6 +187,11 @@ class VehicleRepository {
     String? imageUrl,
     List<String>? images,
     String? community,
+    int? mileage,
+    String? fuel,
+    String? transmission,
+    String? color,
+    String? tuevDate,
   }) async {
     final userId = _currentUserId;
     if (userId == null) throw Exception('Nicht eingeloggt');
@@ -193,6 +213,11 @@ class VehicleRepository {
           if (images != null) 'images': images,
           if (community != null) 'community': community,
           if (description != null) 'description': description,
+          if (mileage != null) 'mileage': mileage,
+          if (fuel != null) 'fuel': fuel,
+          if (transmission != null) 'transmission': transmission,
+          if (color != null) 'color': color,
+          if (tuevDate != null) 'tuev_date': tuevDate,
         })
         .select()
         .single();

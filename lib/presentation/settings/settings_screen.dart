@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -12,6 +13,8 @@ import '../../providers/core/providers.dart';
 import '../../theme/app_theme.dart';
 import '../profile/widgets/edit_profile_sheet.dart';
 import '../widgets/bug_report_sheet.dart';
+import '../../providers/map/live_location_provider.dart';
+import '../../providers/map/map_settings_provider.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
@@ -28,6 +31,85 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   bool _followersEnabled = true;
   bool _privateProfile = false;
   bool _liveGoVisible = true;
+  bool _gpsAutoEnable = false; // Default matches liveOnMap=false
+
+  @override
+  void initState() {
+    super.initState();
+    _loadGpsAutoSetting();
+  }
+
+  Future<void> _loadGpsAutoSetting() async {
+    final settings = ref.read(blitzerSettingsProvider).value;
+    if (settings != null && mounted) {
+      setState(() => _gpsAutoEnable = settings.liveOnMap);
+    }
+  }
+
+  /// Bestätigungsdialog wenn GPS auto-aktiviert wird.
+  void _onGpsAutoToggle(bool newValue) {
+    if (newValue) {
+      // Warnung anzeigen — User muss bestätigen
+      final community = ref.read(communityProvider);
+      final brightness = Theme.of(context).brightness;
+      showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: community?.cardFor(brightness) ?? (brightness == Brightness.dark ? const Color(0xFF1A1A1A) : Colors.white),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: Row(
+            children: [
+              const Icon(Icons.warning_amber_rounded, color: Colors.orange, size: 24),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text('GPS automatisch aktivieren?',
+                  style: GoogleFonts.inter(fontSize: 17, fontWeight: FontWeight.w700,
+                    color: brightness == Brightness.dark ? Colors.white : const Color(0xFF1A1A1A)),
+                ),
+              ),
+            ],
+          ),
+          content: Text(
+            'Wenn du diese Option aktivierst, wird dein GPS-Standort automatisch '
+            'gesendet, sobald du die App startest.\n\n'
+            'Das bedeutet:\n'
+            '  \u2022  Du bist sofort für andere Biker sichtbar\n'
+            '  \u2022  Deine Position wird live übertragen\n'
+            '  \u2022  Höherer Akku-Verbrauch\n\n'
+            'Du kannst diese Einstellung jederzeit wieder deaktivieren.',
+            style: GoogleFonts.inter(fontSize: 13, height: 1.5,
+              color: brightness == Brightness.dark ? Colors.white70 : const Color(0xFF555555)),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: Text('Abbrechen',
+                style: GoogleFonts.inter(color: Colors.grey, fontWeight: FontWeight.w600)),
+            ),
+            FilledButton(
+              onPressed: () {
+                Navigator.pop(ctx);
+                setState(() => _gpsAutoEnable = true);
+                ref.read(blitzerSettingsProvider.notifier).updateSetting((s) => s.copyWith(liveOnMap: true));
+              },
+              style: FilledButton.styleFrom(
+                backgroundColor: community?.accentColor ?? Colors.amber,
+              ),
+              child: Text('Aktivieren',
+                style: GoogleFonts.inter(color: Colors.white, fontWeight: FontWeight.w700)),
+            ),
+          ],
+        ),
+      );
+    } else {
+      // Deaktivieren — keine Bestätigung nötig
+      setState(() => _gpsAutoEnable = false);
+      ref.read(blitzerSettingsProvider.notifier).updateSetting((s) => s.copyWith(liveOnMap: false));
+      // Sofort offline gehen
+      ref.read(liveLocationServiceProvider).goOffline();
+      ref.read(isLiveProvider.notifier).set(false);
+    }
+  }
 
   void _showChangeEmailDialog(Color accentColor) {
     final community = ref.read(communityProvider);
@@ -784,6 +866,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 title: 'Live-Go sichtbar',
                 value: _liveGoVisible,
                 onChanged: (v) => setState(() => _liveGoVisible = v),
+              ),
+              _SettingsToggle(
+                icon: Icons.gps_fixed_rounded,
+                iconColor: Colors.orange,
+                title: 'GPS automatisch aktivieren',
+                value: _gpsAutoEnable,
+                onChanged: _onGpsAutoToggle,
                 showDivider: false,
               ),
             ],

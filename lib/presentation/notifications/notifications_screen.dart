@@ -123,19 +123,37 @@ class NotificationsScreen extends ConsumerWidget {
         itemCount: state.notifications.length,
         itemBuilder: (context, index) {
           final notif = state.notifications[index];
-          return _NotificationTile(
-            notification: notif,
-            accentColor: accentColor,
-            onTap: () {
-              // Mark as read on tap
-              if (!notif.isRead) {
-                ref
-                    .read(notificationNotifierProvider.notifier)
-                    .markAsRead(notif.id);
-              }
-              // Navigate based on type
-              _handleNotificationTap(context, notif);
+          return Dismissible(
+            key: Key('notif_${notif.id}'),
+            direction: DismissDirection.startToEnd,
+            background: Container(
+              margin: const EdgeInsets.only(bottom: 8),
+              decoration: BoxDecoration(
+                color: Colors.red.shade600,
+                borderRadius: BorderRadius.circular(16),
+              ),
+              alignment: Alignment.centerLeft,
+              padding: const EdgeInsets.only(left: 20),
+              child: const Icon(Icons.delete_rounded, color: Colors.white, size: 24),
+            ),
+            onDismissed: (_) {
+              HapticFeedback.lightImpact();
+              ref.read(notificationNotifierProvider.notifier).deleteNotification(notif.id);
             },
+            child: _NotificationTile(
+              notification: notif,
+              accentColor: accentColor,
+              onTap: () {
+                // Mark as read on tap
+                if (!notif.isRead) {
+                  ref
+                      .read(notificationNotifierProvider.notifier)
+                      .markAsRead(notif.id);
+                }
+                // Navigate based on type
+                _handleNotificationTap(context, notif);
+              },
+            ),
           );
         },
       ),

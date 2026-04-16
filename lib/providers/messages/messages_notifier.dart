@@ -115,9 +115,11 @@ class MessagesNotifier extends Notifier<MessagesState> {
     });
   }
 
-  /// Subscribe to new messages → auto-refresh conversation list preview.
+  /// Subscribe to new messages → auto-refresh conversation list preview +
+  /// mark as delivered (zugestellt) if from another user.
   void _subscribeToNewMessages() {
     _messagesChannel?.unsubscribe();
+    final currentUserId = Supabase.instance.client.auth.currentUser?.id;
     _messagesChannel = Supabase.instance.client
         .channel('messages:list-refresh')
         .onPostgresChanges(
@@ -126,6 +128,26 @@ class MessagesNotifier extends Notifier<MessagesState> {
           table: 'messages',
           callback: (payload) {
             debugPrint('[Messages] New message detected → refreshing list');
+            // Zustellbestätigung: Wenn Nachricht von anderem User → sofort als delivered markieren
+            final record = payload.newRecord;
+            final senderId = record['user_id']?.toString();
+            final msgId = record['id'];
+            if (senderId != null && senderId != currentUserId && msgId != null) {
+              final id = msgId is int ? msgId : int.tryParse('$msgId');
+              if (id != null) {
+                _repo.markAsDelivered(id);
+                debugPrint('[Messages] Marked msg $id as delivered (zugestellt)');
+              }
+            }
+            loadConversations();
+          },
+        )
+        .onPostgresChanges(
+          event: PostgresChangeEvent.update,
+          schema: 'public',
+          table: 'messages',
+          callback: (payload) {
+            // Refresh list when message status changes (delivered/read)
             loadConversations();
           },
         )
@@ -135,7 +157,11 @@ class MessagesNotifier extends Notifier<MessagesState> {
   }
 
   Future<void> loadConversations() async {
-    state = state.copyWith(isLoading: true, error: null);
+    // Nur beim ersten Laden den Spinner zeigen — danach im Hintergrund aktualisieren
+    final isInitialLoad = state.conversations.isEmpty;
+    if (isInitialLoad) {
+      state = state.copyWith(isLoading: true, error: null);
+    }
 
     try {
       debugPrint('[MsgNotifier] Loading conversations for community=$_community');

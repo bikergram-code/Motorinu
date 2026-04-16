@@ -80,6 +80,8 @@ class _SwipeCardState extends State<SwipeCard> {
             // ── Photos (tap left/right to navigate) ──
             if (photos.isNotEmpty)
               GestureDetector(
+                // translucent: let parent GestureDetector receive drag events
+                behavior: HitTestBehavior.translucent,
                 onTapUp: (details) {
                   if (photos.length <= 1) return;
                   final width = context.size?.width ?? 300;

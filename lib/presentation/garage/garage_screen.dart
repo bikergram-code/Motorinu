@@ -490,7 +490,8 @@ class _VehicleCardState extends ConsumerState<_VehicleCard> {
   }
 
   void _openDetail() {
-    Navigator.of(context).push(
+    // rootNavigator: damit die Route ÜBER die MainShell geht (kein TopBar-Overlap)
+    Navigator.of(context, rootNavigator: true).push(
       MaterialPageRoute(
         builder: (_) => VehicleDetailPage(
           vehicle: widget.vehicle,
@@ -553,11 +554,18 @@ class _VehicleCardState extends ConsumerState<_VehicleCard> {
                           if (v.year != null) '${v.year}',
                           if (v.displacementCc != null) '${v.displacementCc} ccm',
                           if (v.horsepower != null) '${v.horsepower} PS',
+                          if (v.mileage != null)
+                            v.mileage! >= 1000
+                                ? '${(v.mileage! / 1000).toStringAsFixed(v.mileage! % 1000 == 0 ? 0 : 1)} tkm'
+                                : '${v.mileage} km',
+                          if (v.fuel != null) v.fuel,
                           if (v.category != null) v.category,
                         ].join(' \u00b7 '),
                         style: GoogleFonts.inter(
                             fontSize: 13,
                             color: brightness == Brightness.dark ? Colors.white.withValues(alpha: 0.4) : const Color(0xFF6C757D)),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                       ),
                     ],
                   ),
@@ -1453,6 +1461,19 @@ class _VehicleDetailPageState extends ConsumerState<VehicleDetailPage> {
                         _specChip(Icons.speed_rounded, '${vehicle.horsepower} PS'),
                       if (vehicle.displacementCc != null)
                         _specChip(Icons.engineering_rounded, '${vehicle.displacementCc} ccm'),
+                      if (vehicle.mileage != null)
+                        _specChip(Icons.straighten_rounded,
+                          vehicle.mileage! >= 1000
+                              ? '${(vehicle.mileage! / 1000).toStringAsFixed(vehicle.mileage! % 1000 == 0 ? 0 : 1)} tkm'
+                              : '${vehicle.mileage} km'),
+                      if (vehicle.fuel != null)
+                        _specChip(Icons.local_gas_station_rounded, vehicle.fuel!),
+                      if (vehicle.transmission != null)
+                        _specChip(Icons.settings_rounded, vehicle.transmission!),
+                      if (vehicle.color != null)
+                        _specChip(Icons.palette_rounded, vehicle.color!),
+                      if (vehicle.tuevDate != null)
+                        _specChip(Icons.verified_rounded, 'TÜV ${vehicle.tuevDate}'),
                       if (vehicle.category != null)
                         _specChip(Icons.category_rounded, vehicle.category!),
                       if (vehicle.forSale && vehicle.price != null)

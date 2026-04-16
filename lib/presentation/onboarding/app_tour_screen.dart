@@ -5,11 +5,17 @@ import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../../core/community.dart';
+import '../../providers/auth/auth_notifier.dart';
+import '../../providers/auth/auth_state.dart';
 import '../../providers/core/providers.dart';
 
 /// Post-registration app tour — 6 slides showcasing key features.
+/// If [pendingEmail] is set, the user must still confirm their email — the
+/// tour will send them back to /login with a "check your email" banner.
 class AppTourScreen extends ConsumerStatefulWidget {
-  const AppTourScreen({super.key});
+  const AppTourScreen({super.key, this.pendingEmail});
+
+  final String? pendingEmail;
 
   @override
   ConsumerState<AppTourScreen> createState() => _AppTourScreenState();
@@ -84,6 +90,13 @@ class _AppTourScreenState extends ConsumerState<AppTourScreen> {
 
   void _finish() {
     HapticFeedback.mediumImpact();
+    final authState = ref.read(authNotifierProvider);
+    // Email confirmation still pending OR user isn't authenticated yet →
+    // go to login with a friendly "check your email" hint.
+    if (widget.pendingEmail != null || authState is! Authenticated) {
+      context.go('/login', extra: {'pendingEmail': widget.pendingEmail});
+      return;
+    }
     context.go('/feed');
   }
 

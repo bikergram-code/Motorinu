@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:audio_session/audio_session.dart';
 import 'package:flutter/foundation.dart';
@@ -44,9 +43,10 @@ class TtsAlertService {
   /// On Chinese phones: tries to find a Google TTS engine that supports German.
   Future<void> init() async {
     if (_initialized) return;
+    if (kIsWeb) return; // TTS not supported on web
     _initialized = true;
 
-    if (Platform.isAndroid) {
+    if (defaultTargetPlatform == TargetPlatform.android) {
       await _selectBestEngine();
     }
 

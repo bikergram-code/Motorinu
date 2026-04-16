@@ -779,8 +779,19 @@ class _ListingCard extends StatelessWidget {
                     fontSize: 18,
                     fontWeight: FontWeight.w700,
                     color: accentColor)),
+          // Attribute-Kurzinfo (z.B. "Ducati · Monster 821 · 2020 · 12 tkm")
+          if (listing.attributeSummary != null) ...[
+            const SizedBox(height: 6),
+            Text(listing.attributeSummary!,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: GoogleFonts.inter(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w500,
+                    color: accentColor.withValues(alpha: 0.8))),
+          ],
           if (listing.description != null) ...[
-            const SizedBox(height: 8),
+            const SizedBox(height: 6),
             Text(listing.description!,
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,

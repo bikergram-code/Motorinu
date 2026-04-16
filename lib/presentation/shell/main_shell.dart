@@ -17,6 +17,7 @@ import '../../providers/map/map_settings_provider.dart';
 import '../../providers/core/providers.dart';
 import '../../providers/core/speed_dial_provider.dart';
 import '../../providers/map/live_location_provider.dart';
+import '../../providers/call/call_notifier.dart';
 import '../../providers/messages/incoming_message_provider.dart';
 import '../../providers/messages/unread_messages_notifier.dart';
 import '../../providers/notifications/incoming_notification_provider.dart';
@@ -59,6 +60,7 @@ class _MainShellState extends ConsumerState<MainShell>
 
   StreamSubscription<IncomingMessage>? _messageSub;
   StreamSubscription<IncomingNotification>? _notifSub;
+  ProviderSubscription? _callListenSub;
   StreamSubscription<Map<String, LiveUserPosition>>? _globalLiveSub;
   ProviderSubscription? _settingsListenSub;
   ProviderSubscription? _communityListenSub;
@@ -195,6 +197,25 @@ class _MainShellState extends ConsumerState<MainShell>
         },
       );
     });
+
+    // ── Force-initialize call provider + listen for incoming calls ──
+    // ref.read forces the provider to build and start its Realtime subscription
+    ref.read(callNotifierProvider);
+    debugPrint('[MainShell] callNotifierProvider force-initialized');
+    _callListenSub = ref.listenManual<CallState>(callNotifierProvider, (prev, next) {
+      if (!mounted) return;
+      debugPrint('[MainShell] Call state changed: ${prev?.callStatus} → ${next.callStatus} (outgoing=${next.isOutgoing})');
+      // Only trigger on transition TO ringing as callee (incoming)
+      if (next.callStatus == CallStatus.ringing &&
+          !next.isOutgoing &&
+          (prev == null || prev.callStatus != CallStatus.ringing)) {
+        debugPrint('[MainShell] Incoming call → navigating to /incoming-call');
+        final location = GoRouterState.of(context).matchedLocation;
+        if (!location.startsWith('/incoming-call') && !location.startsWith('/call')) {
+          context.push('/incoming-call');
+        }
+      }
+    });
   }
 
   void _playNotifSound() {
@@ -322,6 +343,7 @@ class _MainShellState extends ConsumerState<MainShell>
     WidgetsBinding.instance.removeObserver(this);
     _messageSub?.cancel();
     _notifSub?.cancel();
+    _callListenSub?.close();
     _globalLiveSub?.cancel();
     _settingsListenSub?.close();
     _communityListenSub?.close();

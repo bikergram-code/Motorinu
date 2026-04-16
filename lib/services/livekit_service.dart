@@ -54,8 +54,11 @@ class LiveKitService {
   bool get isCameraEnabled =>
       _room?.localParticipant?.isCameraEnabled() ?? false;
 
-  bool get isMicEnabled =>
-      _room?.localParticipant?.isMicrophoneEnabled() ?? false;
+  bool get isMicEnabled {
+    final pubs = _room?.localParticipant?.audioTrackPublications;
+    if (pubs == null || pubs.isEmpty) return false;
+    return pubs.any((p) => !p.muted && p.track != null);
+  }
 
   // ── Callbacks ─────────────────────────────────────────────────────────
 
@@ -75,6 +78,11 @@ class LiveKitService {
 
   /// Connect as the host (broadcaster). Publishes camera + microphone.
   Future<void> connectAsHost(String sessionId) async {
+    // Clean up any lingering connection — keep callbacks
+    if (_room != null) {
+      await _cleanupRoom();
+    }
+
     // Request permissions
     final granted = await _requestPermissions();
     if (!granted) {
@@ -122,6 +130,12 @@ class LiveKitService {
 
   /// Connect as a viewer. Subscribes to the host's tracks.
   Future<void> connectAsViewer(String sessionId) async {
+    // Clean up any lingering connection — but keep callbacks intact
+    // (the caller already set fresh callbacks before calling us)
+    if (_room != null) {
+      await _cleanupRoom();
+    }
+
     final tokenData = await _requestToken(sessionId, isHost: false);
 
     _room = Room(
@@ -139,13 +153,26 @@ class LiveKitService {
     );
   }
 
-  /// Disconnect and clean up.
-  Future<void> disconnect() async {
+  /// Internal: tear down room + listener WITHOUT clearing callbacks.
+  /// Used before reconnecting so fresh callbacks survive.
+  Future<void> _cleanupRoom() async {
     _listener?.dispose();
     _listener = null;
-    await _room?.disconnect();
-    await _room?.dispose();
+    try {
+      await _room?.disconnect();
+      await _room?.dispose();
+    } catch (_) {}
     _room = null;
+  }
+
+  /// Public disconnect — fully clean up including callbacks.
+  /// Call when the user explicitly leaves the stream.
+  Future<void> disconnect() async {
+    await _cleanupRoom();
+    onRemoteTrackChanged = null;
+    onConnectionStateChanged = null;
+    onDisconnected = null;
+    onParticipantChanged = null;
   }
 
   // ── Controls (for broadcaster) ────────────────────────────────────────
@@ -158,6 +185,16 @@ class LiveKitService {
   Future<void> toggleMic() async {
     final enabled = isMicEnabled;
     await _room?.localParticipant?.setMicrophoneEnabled(!enabled);
+  }
+
+  /// Directly set microphone enabled/disabled.
+  Future<void> setMicEnabled(bool enabled) async {
+    await _room?.localParticipant?.setMicrophoneEnabled(enabled);
+  }
+
+  /// Directly set camera enabled/disabled.
+  Future<void> setCameraEnabled(bool enabled) async {
+    await _room?.localParticipant?.setCameraEnabled(enabled);
   }
 
   Future<void> switchCamera() async {
@@ -180,6 +217,67 @@ class LiveKitService {
         }
         break;
       }
+    }
+  }
+
+  // ── 1-to-1 Call ───────────────────────────────────────────────────────
+
+  /// Connect to a 1-to-1 voice/video call room.
+  Future<void> connectToCall(String roomName, {bool withVideo = false}) async {
+    final granted = await _requestPermissions();
+    if (!granted) {
+      throw Exception('Mikrofon-Berechtigung erforderlich');
+    }
+
+    if (_room != null) await _cleanupRoom();
+
+    _room = Room(
+      roomOptions: const RoomOptions(
+        adaptiveStream: true,
+        dynacast: true,
+        defaultVideoPublishOptions: VideoPublishOptions(
+          videoCodec: 'vp8',
+          simulcast: true,
+        ),
+        defaultAudioPublishOptions: AudioPublishOptions(
+          dtx: true,
+        ),
+      ),
+    );
+
+    _setupListener();
+
+    final tokenData = await _requestToken(roomName, isHost: true);
+
+    await _room!.connect(
+      tokenData['url'] as String,
+      tokenData['token'] as String,
+    );
+
+    // Always enable mic
+    try {
+      await _room!.localParticipant?.setMicrophoneEnabled(true);
+    } catch (e) {
+      debugPrint('[LiveKit] Call mic error: $e');
+    }
+
+    // Optionally enable camera
+    if (withVideo) {
+      try {
+        await _room!.localParticipant?.setCameraEnabled(true);
+      } catch (e) {
+        debugPrint('[LiveKit] Call camera error: $e');
+      }
+    }
+  }
+
+  /// Toggle speakerphone output.
+  Future<void> setSpeakerphone(bool enabled) async {
+    try {
+      await Hardware.instance.setSpeakerphoneOn(enabled);
+      debugPrint('[LiveKit] Speakerphone: $enabled');
+    } catch (e) {
+      debugPrint('[LiveKit] Speaker toggle error: $e');
     }
   }
 

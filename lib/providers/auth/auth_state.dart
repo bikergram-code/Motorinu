@@ -27,3 +27,11 @@ class AuthError extends AuthState {
   const AuthError(this.message);
   final String message;
 }
+
+/// Registration succeeded but email confirmation is required before login.
+/// Used to trigger the App Tour + "check your email" flow instead of showing
+/// a plain error snackbar.
+class EmailConfirmationPending extends AuthState {
+  const EmailConfirmationPending(this.email);
+  final String email;
+}

@@ -255,6 +255,39 @@ class _MarketplaceDetailScreenState extends ConsumerState<MarketplaceDetailScree
                   if (listing.createdAt != null)
                     _chip(_formatDate(listing.createdAt!), Icons.schedule_rounded, accentColor, isDark),
                 ]),
+
+                // Fahrzeug- / Produkt-Attribute
+                if (listing.attributes.isNotEmpty) ...[
+                  const SizedBox(height: 16),
+                  Wrap(spacing: 8, runSpacing: 8, children: [
+                    if (listing.brand != null)
+                      _chip(listing.brand!, Icons.two_wheeler_rounded, accentColor, isDark),
+                    if (listing.model != null)
+                      _chip(listing.model!, Icons.label_rounded, accentColor, isDark),
+                    if (listing.year != null)
+                      _chip('Bj. ${listing.year}', Icons.calendar_month_rounded, accentColor, isDark),
+                    if (listing.mileageFormatted != null)
+                      _chip(listing.mileageFormatted!, Icons.speed_rounded, accentColor, isDark),
+                    if (listing.power != null)
+                      _chip('${listing.power} PS', Icons.bolt_rounded, accentColor, isDark),
+                    if (listing.displacement != null)
+                      _chip('${listing.displacement} ccm', Icons.engineering_rounded, accentColor, isDark),
+                    if (listing.fuel != null)
+                      _chip(listing.fuel!, Icons.local_gas_station_rounded, accentColor, isDark),
+                    if (listing.transmission != null)
+                      _chip(listing.transmission!, Icons.settings_rounded, accentColor, isDark),
+                    if (listing.color != null)
+                      _chip(listing.color!, Icons.palette_rounded, accentColor, isDark),
+                    if (listing.size != null)
+                      _chip('Gr. ${listing.size}', Icons.straighten_rounded, accentColor, isDark),
+                    if (listing.gender != null)
+                      _chip(listing.gender!, Icons.person_rounded, accentColor, isDark),
+                    if (listing.clothingBrand != null)
+                      _chip(listing.clothingBrand!, Icons.sell_rounded, accentColor, isDark),
+                    if (listing.fitsBrand != null)
+                      _chip('Passt: ${listing.fitsBrand!}${listing.fitsModel != null ? ' ${listing.fitsModel}' : ''}', Icons.build_rounded, accentColor, isDark),
+                  ]),
+                ],
                 const SizedBox(height: 20),
 
                 // Description

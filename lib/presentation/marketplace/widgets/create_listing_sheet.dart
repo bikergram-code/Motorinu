@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -100,7 +98,6 @@ class _CreateListingSheetState extends ConsumerState<CreateListingSheet> {
   String? _error;
 
   final List<String> _imageUrls = [];
-  final List<File> _newImages = [];
 
   static const _conditions = [
     ('Neu', 'new'),
@@ -173,13 +170,13 @@ class _CreateListingSheetState extends ConsumerState<CreateListingSheet> {
       final userId = Supabase.instance.client.auth.currentUser?.id ?? 'anon';
       for (final picked in files) {
         if (_imageUrls.length >= 5) break;
-        final file = File(picked.path);
+        final bytes = await picked.readAsBytes();
         final ext = picked.path.split('.').last.toLowerCase();
         final fileName = 'marketplace/${userId}_${DateTime.now().millisecondsSinceEpoch}_${_imageUrls.length}.$ext';
 
         await Supabase.instance.client.storage
             .from('posts')
-            .upload(fileName, file);
+            .uploadBinary(fileName, bytes);
 
         final url = Supabase.instance.client.storage
             .from('posts')
@@ -277,23 +274,6 @@ class _CreateListingSheetState extends ConsumerState<CreateListingSheet> {
 
     try {
       if (widget.isEditing) {
-        final updates = <String, dynamic>{
-          'title': title,
-          'description': _descController.text.trim().isNotEmpty
-              ? _descController.text.trim()
-              : null,
-          'price': double.tryParse(_priceController.text.trim()),
-          'condition': _selectedCondition,
-          'category': _selectedCategory,
-          'subcategory': _selectedSubcategory,
-          'attributes': _attributes.isNotEmpty ? _attributes : {},
-          'images': _imageUrls,
-          'location_text': _locationController.text.trim().isNotEmpty
-              ? _locationController.text.trim()
-              : null,
-          'shipping_type': _shippingType,
-          'is_negotiable': _isNegotiable,
-        };
         await ref.read(marketplaceNotifierProvider.notifier).updateListing(
           widget.listing!.id,
           title: title,
@@ -304,7 +284,7 @@ class _CreateListingSheetState extends ConsumerState<CreateListingSheet> {
           condition: _selectedCondition,
           category: _selectedCategory,
           subcategory: _selectedSubcategory,
-          attributes: _attributes.isNotEmpty ? _attributes : null,
+          attributes: _attributes,
           images: _imageUrls,
           locationText: _locationController.text.trim().isNotEmpty
               ? _locationController.text.trim()

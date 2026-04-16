@@ -17,6 +17,7 @@ import '../../core/community.dart';
 import '../widgets/online_status_avatar.dart';
 import '../../domain/models/direct_message.dart';
 import '../../providers/core/providers.dart';
+import '../../providers/call/call_notifier.dart';
 import '../../providers/messages/chat_notifier.dart';
 import '../../providers/messages/incoming_message_provider.dart';
 import '../../providers/messages/messages_notifier.dart';
@@ -43,6 +44,7 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen>
   final _audioRecorder = AudioRecorder();
   String? _currentUserId;
   String? _audioPath;
+  ChatNotifier? _chatNotifier;
 
   /// Track which conversations already showed the match heart rain this session
   static final _shownMatchRain = <int>{};
@@ -62,6 +64,12 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen>
     }
     // Cancel Android Auto notification for this conversation
     IncomingMessageBus.instance.cancelNotification(widget.conversationId);
+    // Chat-Screen ist jetzt sichtbar → neue Nachrichten als gelesen markieren
+    // Referenz speichern BEVOR microtask — dispose braucht sie ohne ref.read()
+    _chatNotifier = ref.read(chatNotifierProvider(widget.conversationId).notifier);
+    Future.microtask(() {
+      _chatNotifier?.setScreenOpen(true);
+    });
     // Check if this chat is from a recent match → heart rain
     _checkRecentMatch();
   }
@@ -73,6 +81,58 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen>
       ref
           .read(chatNotifierProvider(widget.conversationId).notifier)
           .reconnect();
+    }
+  }
+
+  Future<void> _startCall(String callType) async {
+    final chatState = ref.read(chatNotifierProvider(widget.conversationId));
+
+    // ── Group call ──────────────────────────────────────────────────────
+    if (chatState.isGroupChat) {
+      final groupId = chatState.groupId;
+      final groupName = chatState.groupName ?? 'Gruppe';
+      if (groupId == null) return;
+
+      await ref.read(callNotifierProvider.notifier).initiateGroupCall(
+            groupId: groupId,
+            groupName: groupName,
+            callType: callType,
+          );
+
+      if (!mounted) return;
+      final callState = ref.read(callNotifierProvider);
+      if (callState.isInCall) {
+        context.push('/call');
+      }
+      return;
+    }
+
+    // ── 1-on-1 call ─────────────────────────────────────────────────────
+    final otherUserId = chatState.otherUserId;
+    final otherUsername = chatState.otherUsername;
+    if (otherUserId == null) return;
+
+    // Erst initiieren, dann navigieren
+    await ref.read(callNotifierProvider.notifier).initiateCall(
+      calleeId: otherUserId,
+      calleeName: otherUsername ?? 'Unbekannt',
+      calleeAvatar: chatState.otherAvatarUrl,
+      callType: callType,
+      conversationId: widget.conversationId,
+    );
+
+    if (!mounted) return;
+
+    final callState = ref.read(callNotifierProvider);
+    if (callState.callStatus == CallStatus.busy) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('User ist gerade in einem Anruf'), backgroundColor: Colors.orange),
+      );
+      return;
+    }
+
+    if (callState.callStatus == CallStatus.ringing) {
+      context.push('/call');
     }
   }
 
@@ -856,6 +916,10 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen>
 
   @override
   void dispose() {
+    // Chat-Screen nicht mehr sichtbar → keine Nachrichten mehr als gelesen markieren
+    // Gespeicherte Referenz nutzen — ref.read() kann in dispose() fehlschlagen!
+    _chatNotifier?.setScreenOpen(false);
+    _chatNotifier = null;
     WidgetsBinding.instance.removeObserver(this);
     _scrollController.dispose();
     _audioRecorder.dispose();
@@ -1150,6 +1214,21 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen>
                   ],
                 ),
               ),
+        actions: chatState.isLoading ? null : [
+          // Voice call button
+          IconButton(
+            icon: Icon(Icons.call_rounded, color: accentColor, size: 22),
+            tooltip: 'Sprachanruf',
+            onPressed: () => _startCall('voice'),
+          ),
+          // Video call button
+          IconButton(
+            icon: Icon(Icons.videocam_rounded, color: accentColor, size: 24),
+            tooltip: 'Videoanruf',
+            onPressed: () => _startCall('video'),
+          ),
+          const SizedBox(width: 4),
+        ],
       ),
       body: Column(
         children: [

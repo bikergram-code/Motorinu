@@ -1,0 +1,18 @@
+Version 1.6.4
+
+NEW
+- Group calls (audio + video) with multiple bikers
+- Adaptive video grid: everyone sees all participants
+- WhatsApp-style menu in messages screen
+- Group-chat creation sheet
+- App tour + email confirmation after signup
+
+IMPROVED
+- Chat: typing, mic, online status more stable
+- Navigation: smoother camera + rerouting
+- Push notifications stabilized
+
+FIXED
+- Group calls now ring on every member's device
+- Feed tabs swipeable again
+- Rides reliably saved

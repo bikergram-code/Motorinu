@@ -4,6 +4,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../../../core/community.dart';
+import '../../../core/vehicle_brands.dart';
 import '../../../data/repositories/vehicle_repository.dart';
 import '../../../providers/core/providers.dart';
 import '../../../providers/garage/garage_notifier.dart';
@@ -37,8 +38,13 @@ class _AddVehicleSheetState extends ConsumerState<AddVehicleSheet> {
   final _yearController = TextEditingController();
   final _ccmController = TextEditingController();
   final _psController = TextEditingController();
+  final _kmController = TextEditingController();
   final _descController = TextEditingController();
   String? _selectedCategory;
+  String? _selectedFuel;
+  String? _selectedTransmission;
+  String? _selectedColor;
+  String? _selectedTuev; // "MM/YYYY"
   bool _isSubmitting = false;
   String? _error;
 
@@ -58,8 +64,13 @@ class _AddVehicleSheetState extends ConsumerState<AddVehicleSheet> {
         _ccmController.text = '${v.displacementCc}';
       }
       if (v.horsepower != null) _psController.text = '${v.horsepower}';
+      if (v.mileage != null) _kmController.text = '${v.mileage}';
       if (v.description != null) _descController.text = v.description!;
       _selectedCategory = v.category;
+      _selectedFuel = v.fuel;
+      _selectedTransmission = v.transmission;
+      _selectedColor = v.color;
+      _selectedTuev = v.tuevDate;
       _imageUrls.addAll(v.allImages);
     }
   }
@@ -69,6 +80,7 @@ class _AddVehicleSheetState extends ConsumerState<AddVehicleSheet> {
     _yearController.dispose();
     _ccmController.dispose();
     _psController.dispose();
+    _kmController.dispose();
     _descController.dispose();
     super.dispose();
   }
@@ -195,19 +207,10 @@ class _AddVehicleSheetState extends ConsumerState<AddVehicleSheet> {
 
     try {
       final imageUrl = _imageUrls.isNotEmpty ? _imageUrls.first : null;
+      final km = int.tryParse(_kmController.text.trim());
+      final desc = _descController.text.trim().isEmpty ? null : _descController.text.trim();
 
       if (widget.isEditing) {
-        final updates = <String, dynamic>{
-          'brand': brand,
-          'model': model,
-          'year': int.tryParse(_yearController.text.trim()),
-          'displacement_cc': int.tryParse(_ccmController.text.trim()),
-          'horsepower': int.tryParse(_psController.text.trim()),
-          'category': _selectedCategory,
-          'description': _descController.text.trim().isEmpty ? null : _descController.text.trim(),
-          'image_url': imageUrl,
-          'images': _imageUrls,
-        };
         await ref.read(garageNotifierProvider.notifier).updateVehicle(
               widget.vehicle!.id,
               brand: brand,
@@ -216,9 +219,19 @@ class _AddVehicleSheetState extends ConsumerState<AddVehicleSheet> {
               displacementCc: int.tryParse(_ccmController.text.trim()),
               horsepower: int.tryParse(_psController.text.trim()),
               category: _selectedCategory,
-              description: _descController.text.trim().isEmpty ? null : _descController.text.trim(),
+              description: desc,
               imageUrl: imageUrl,
               images: _imageUrls,
+              mileage: km,
+              fuel: _selectedFuel,
+              transmission: _selectedTransmission,
+              color: _selectedColor,
+              tuevDate: _selectedTuev,
+              clearMileage: km == null && widget.vehicle?.mileage != null,
+              clearFuel: _selectedFuel == null && widget.vehicle?.fuel != null,
+              clearTransmission: _selectedTransmission == null && widget.vehicle?.transmission != null,
+              clearColor: _selectedColor == null && widget.vehicle?.color != null,
+              clearTuev: _selectedTuev == null && widget.vehicle?.tuevDate != null,
             );
       } else {
         final community = ref.read(communityProvider);
@@ -229,10 +242,15 @@ class _AddVehicleSheetState extends ConsumerState<AddVehicleSheet> {
               displacementCc: int.tryParse(_ccmController.text.trim()),
               horsepower: int.tryParse(_psController.text.trim()),
               category: _selectedCategory,
-              description: _descController.text.trim().isEmpty ? null : _descController.text.trim(),
+              description: desc,
               imageUrl: imageUrl,
               images: _imageUrls,
               community: community?.name,
+              mileage: km,
+              fuel: _selectedFuel,
+              transmission: _selectedTransmission,
+              color: _selectedColor,
+              tuevDate: _selectedTuev,
             );
       }
 
@@ -408,6 +426,97 @@ class _AddVehicleSheetState extends ConsumerState<AddVehicleSheet> {
                         ),
                       ),
                     ],
+                  ),
+
+                  // ── Kilometerstand ──
+                  const SizedBox(height: 20),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            _buildLabel('Kilometerstand'),
+                            const SizedBox(height: 8),
+                            _buildInput(
+                                controller: _kmController,
+                                hint: '25000',
+                                accentColor: accentColor,
+                                keyboardType: TextInputType.number,
+                                suffix: 'km'),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            _buildLabel('TÜV bis'),
+                            const SizedBox(height: 8),
+                            _buildTuevPicker(accentColor, textOnCard, faint),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+
+                  // ── Kraftstoff + Getriebe ──
+                  const SizedBox(height: 20),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            _buildLabel('Kraftstoff'),
+                            const SizedBox(height: 8),
+                            _buildDropdown(
+                              value: _selectedFuel,
+                              items: VehicleBrands.fuelTypes,
+                              hint: 'Benzin',
+                              accentColor: accentColor,
+                              textColor: textOnCard,
+                              faint: faint,
+                              onChanged: (v) => setState(() => _selectedFuel = v),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            _buildLabel('Getriebe'),
+                            const SizedBox(height: 8),
+                            _buildDropdown(
+                              value: _selectedTransmission,
+                              items: VehicleBrands.transmissionTypes,
+                              hint: 'Schaltung',
+                              accentColor: accentColor,
+                              textColor: textOnCard,
+                              faint: faint,
+                              onChanged: (v) => setState(() => _selectedTransmission = v),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+
+                  // ── Farbe ──
+                  const SizedBox(height: 20),
+                  _buildLabel('Farbe'),
+                  const SizedBox(height: 8),
+                  _buildDropdown(
+                    value: _selectedColor,
+                    items: VehicleBrands.vehicleColors,
+                    hint: 'Farbe wählen',
+                    accentColor: accentColor,
+                    textColor: textOnCard,
+                    faint: faint,
+                    onChanged: (v) => setState(() => _selectedColor = v),
                   ),
 
                   const SizedBox(height: 20),
@@ -617,6 +726,7 @@ class _AddVehicleSheetState extends ConsumerState<AddVehicleSheet> {
     required Color accentColor,
     TextInputType keyboardType = TextInputType.text,
     int maxLines = 1,
+    String? suffix,
   }) {
     final brightness = Theme.of(context).brightness;
     final community = ref.watch(communityProvider);
@@ -631,6 +741,8 @@ class _AddVehicleSheetState extends ConsumerState<AddVehicleSheet> {
         hintText: hint,
         hintStyle: GoogleFonts.inter(
             fontSize: 15, color: textOnCard.withValues(alpha: 0.2)),
+        suffixText: suffix,
+        suffixStyle: GoogleFonts.inter(fontSize: 14, color: textOnCard.withValues(alpha: 0.4)),
         filled: true,
         fillColor: textOnCard.withValues(alpha: 0.04),
         border: OutlineInputBorder(
@@ -649,5 +761,202 @@ class _AddVehicleSheetState extends ConsumerState<AddVehicleSheet> {
             const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
       ),
     );
+  }
+
+  Widget _buildDropdown({
+    required String? value,
+    required List<String> items,
+    required String hint,
+    required Color accentColor,
+    required Color textColor,
+    required Color faint,
+    required ValueChanged<String?> onChanged,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14),
+      decoration: BoxDecoration(
+        color: textColor.withValues(alpha: 0.04),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: textColor.withValues(alpha: 0.08)),
+      ),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<String>(
+          value: value,
+          isExpanded: true,
+          hint: Text(hint, style: GoogleFonts.inter(fontSize: 15, color: textColor.withValues(alpha: 0.2))),
+          dropdownColor: Theme.of(context).brightness == Brightness.dark ? const Color(0xFF2A2A2A) : Colors.white,
+          icon: Icon(Icons.keyboard_arrow_down_rounded, color: textColor.withValues(alpha: 0.3)),
+          style: GoogleFonts.inter(fontSize: 15, color: textColor),
+          items: [
+            // "Keine Angabe" option to clear
+            DropdownMenuItem<String>(
+              value: null,
+              child: Text('—', style: GoogleFonts.inter(fontSize: 15, color: textColor.withValues(alpha: 0.3))),
+            ),
+            ...items.map((item) => DropdownMenuItem(
+              value: item,
+              child: Text(item, style: GoogleFonts.inter(fontSize: 15, color: textColor)),
+            )),
+          ],
+          onChanged: onChanged,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTuevPicker(Color accentColor, Color textColor, Color faint) {
+    return GestureDetector(
+      onTap: () => _showTuevDialog(accentColor, textColor),
+      child: Container(
+        height: 50,
+        padding: const EdgeInsets.symmetric(horizontal: 14),
+        decoration: BoxDecoration(
+          color: textColor.withValues(alpha: 0.04),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: textColor.withValues(alpha: 0.08)),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                _selectedTuev ?? 'MM/JJJJ',
+                style: GoogleFonts.inter(
+                  fontSize: 15,
+                  color: _selectedTuev != null
+                      ? textColor
+                      : textColor.withValues(alpha: 0.2),
+                ),
+              ),
+            ),
+            Icon(Icons.calendar_month_rounded, size: 18, color: textColor.withValues(alpha: 0.3)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showTuevDialog(Color accentColor, Color textColor) async {
+    final now = DateTime.now();
+    int selectedMonth = now.month;
+    int selectedYear = now.year;
+
+    // Parse existing value
+    if (_selectedTuev != null) {
+      final parts = _selectedTuev!.split('/');
+      if (parts.length == 2) {
+        selectedMonth = int.tryParse(parts[0]) ?? now.month;
+        selectedYear = int.tryParse(parts[1]) ?? now.year;
+      }
+    }
+
+    final brightness = Theme.of(context).brightness;
+    final community = ref.read(communityProvider);
+    final dialogBg = community?.cardFor(brightness) ??
+        (brightness == Brightness.dark ? const Color(0xFF1E1E1E) : Colors.white);
+
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(builder: (ctx, setDialogState) {
+          final months = List.generate(12, (i) => i + 1);
+          final years = List.generate(10, (i) => now.year + i);
+          return AlertDialog(
+            backgroundColor: dialogBg,
+            title: Text('TÜV bis', style: GoogleFonts.inter(fontSize: 18, fontWeight: FontWeight.w600, color: textColor)),
+            content: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Monat', style: GoogleFonts.inter(fontSize: 12, color: textColor.withValues(alpha: 0.5))),
+                      const SizedBox(height: 4),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        decoration: BoxDecoration(
+                          color: textColor.withValues(alpha: 0.04),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: textColor.withValues(alpha: 0.08)),
+                        ),
+                        child: DropdownButtonHideUnderline(
+                          child: DropdownButton<int>(
+                            value: selectedMonth,
+                            isExpanded: true,
+                            dropdownColor: dialogBg,
+                            style: GoogleFonts.inter(fontSize: 15, color: textColor),
+                            items: months.map((m) => DropdownMenuItem(
+                              value: m,
+                              child: Text('${m.toString().padLeft(2, '0')}', style: GoogleFonts.inter(fontSize: 15, color: textColor)),
+                            )).toList(),
+                            onChanged: (v) => setDialogState(() => selectedMonth = v!),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Jahr', style: GoogleFonts.inter(fontSize: 12, color: textColor.withValues(alpha: 0.5))),
+                      const SizedBox(height: 4),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        decoration: BoxDecoration(
+                          color: textColor.withValues(alpha: 0.04),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: textColor.withValues(alpha: 0.08)),
+                        ),
+                        child: DropdownButtonHideUnderline(
+                          child: DropdownButton<int>(
+                            value: selectedYear,
+                            isExpanded: true,
+                            dropdownColor: dialogBg,
+                            style: GoogleFonts.inter(fontSize: 15, color: textColor),
+                            items: years.map((y) => DropdownMenuItem(
+                              value: y,
+                              child: Text('$y', style: GoogleFonts.inter(fontSize: 15, color: textColor)),
+                            )).toList(),
+                            onChanged: (v) => setDialogState(() => selectedYear = v!),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            actions: [
+              if (_selectedTuev != null)
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx, '__clear__'),
+                  child: Text('Entfernen', style: GoogleFonts.inter(color: Colors.red)),
+                ),
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: Text('Abbrechen', style: GoogleFonts.inter(color: textColor.withValues(alpha: 0.5))),
+              ),
+              TextButton(
+                onPressed: () {
+                  final value = '${selectedMonth.toString().padLeft(2, '0')}/$selectedYear';
+                  Navigator.pop(ctx, value);
+                },
+                child: Text('OK', style: GoogleFonts.inter(fontWeight: FontWeight.w600, color: accentColor)),
+              ),
+            ],
+          );
+        });
+      },
+    );
+
+    if (result == '__clear__') {
+      setState(() => _selectedTuev = null);
+    } else if (result != null) {
+      setState(() => _selectedTuev = result);
+    }
   }
 }

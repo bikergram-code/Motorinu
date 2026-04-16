@@ -1,0 +1,18 @@
+Version 1.6.4
+
+NEU
+- Gruppenanrufe (Audio + Video) für mehrere Biker gleichzeitig
+- Adaptives Video-Grid: jeder sieht alle Teilnehmer
+- WhatsApp-Style Menü im Nachrichten-Screen
+- Gruppen-Chat per neuem Bottom-Sheet
+- App-Tour + E-Mail-Bestätigung nach Registrierung
+
+VERBESSERT
+- Chat: Typing, Mic, Online-Status stabiler
+- Navigation: glattere Kamera, bessere Neuberechnung
+- Push-Notifications stabilisiert
+
+GEFIXT
+- Gruppenanrufe klingeln jetzt auf allen Geräten
+- Feed-Tabs wieder wischbar
+- Rides werden zuverlässig gespeichert

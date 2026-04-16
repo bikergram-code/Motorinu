@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../domain/xp_calculator.dart';
 
@@ -113,13 +114,58 @@ class RideRepository {
       XpCalculator.awardXp(userId, xpEarned, 'ride');
     }
 
+    // Update total_km on profile (readable by everyone, unlike rides table)
+    try {
+      await _supabase.rpc('increment_total_km', params: {
+        'uid': userId,
+        'km': distanceKm,
+      }).catchError((_) async {
+        // Fallback: direct increment if RPC doesn't exist
+        final profile = await _supabase
+            .from('profiles')
+            .select('total_km')
+            .eq('id', userId)
+            .maybeSingle();
+        final current = (profile?['total_km'] as num?)?.toDouble() ?? 0;
+        await _supabase
+            .from('profiles')
+            .update({'total_km': current + distanceKm})
+            .eq('id', userId);
+      });
+    } catch (e) {
+      debugPrint('[Ride] Update total_km error (non-fatal): $e');
+    }
+
     return RideRecord.fromJson(data);
   }
 
-  Future<Map<String, dynamic>> getRideStats() async {
-    final userId = _currentUserId;
+  Future<Map<String, dynamic>> getRideStats({String? forUserId}) async {
+    final userId = forUserId ?? _currentUserId;
     if (userId == null) return {'totalRides': 0, 'totalKm': 0.0, 'totalXp': 0};
 
+    // For OTHER users: read total_km from profiles (RLS allows reading profiles).
+    // The rides table itself is blocked by RLS for non-owners.
+    if (forUserId != null && forUserId != _currentUserId) {
+      try {
+        final profile = await _supabase
+            .from('profiles')
+            .select('total_km')
+            .eq('id', forUserId)
+            .maybeSingle();
+        final km = (profile?['total_km'] as num?)?.toDouble() ?? 0;
+        return {
+          'totalRides': 0, // Can't count — RLS blocked
+          'totalKm': km,
+          'totalSeconds': 0,
+          'totalXp': 0,
+        };
+      } catch (e) {
+        debugPrint('[Ride] Read profile total_km error: $e');
+        return {'totalRides': 0, 'totalKm': 0.0, 'totalXp': 0};
+      }
+    }
+
+    // For OWN profile: query rides directly (RLS allows own rides)
     final data = await _supabase
         .from('rides')
         .select('distance_km, duration_seconds, xp_earned')

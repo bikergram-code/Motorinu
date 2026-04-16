@@ -60,11 +60,34 @@ Future<void> main() async {
   }
 
   // Initialize Supabase
+  // Web uses implicit flow (token in URL hash — no PKCE code exchange needed).
+  // Mobile uses PKCE (more secure, default).
   await Supabase.initialize(
     url: ApiConfig.supabaseUrl,
     anonKey: ApiConfig.supabaseAnonKey,
     debug: kDebugMode,
+    authOptions: FlutterAuthClientOptions(
+      authFlowType: kIsWeb ? AuthFlowType.implicit : AuthFlowType.pkce,
+    ),
   );
+
+  // Web: manually recover session from URL if Supabase didn't pick it up
+  if (kIsWeb) {
+    final uri = Uri.base;
+    final session = Supabase.instance.client.auth.currentSession;
+    debugPrint('[Main] URL after init: $uri');
+    debugPrint('[Main] Fragment: ${uri.fragment.length > 20 ? uri.fragment.substring(0, 20) + "..." : uri.fragment}');
+    debugPrint('[Main] Session: ${session != null ? "OK" : "NULL"}');
+    if (session == null && uri.hasFragment && uri.fragment.contains('access_token')) {
+      debugPrint('[Main] Manual session recovery from URL...');
+      try {
+        await Supabase.instance.client.auth.getSessionFromUrl(uri);
+        debugPrint('[Main] Session recovered!');
+      } catch (e) {
+        debugPrint('[Main] Session recovery FAILED: $e');
+      }
+    }
+  }
 
   // Initialize Push Notifications + sync badge from DB on app start (native only)
   if (!kIsWeb) {

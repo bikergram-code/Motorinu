@@ -101,6 +101,10 @@ class LiveLocationService {
   /// Prevent rapid reconnects.
   bool _reconnecting = false;
 
+  /// Track when we last received a presence sync — if too long ago,
+  /// the WebSocket may have silently died and we need to reconnect.
+  DateTime _lastSyncReceived = DateTime.now();
+
   /// All nearby live users (excluding self).
   final Map<String, LiveUserPosition> _nearbyUsers = {};
 
@@ -238,6 +242,7 @@ class LiveLocationService {
     _community = community;
     _isLive = true;
     _heartbeatFailures = 0;
+    _lastSyncReceived = DateTime.now();
 
     debugPrint('[LiveGPS] Going live on channel: live_gps:all (user: $displayName)');
 
@@ -315,8 +320,8 @@ class LiveLocationService {
 
         // Otherwise start a 30s grace period (handles brief network flickers).
         if (_leaveTimers[uid]?.isActive == true) continue; // already waiting
-        debugPrint('[LiveGPS] User $uid left — starting 1s grace period');
-        _leaveTimers[uid] = Timer(const Duration(seconds: 1), () {
+        debugPrint('[LiveGPS] User $uid left — starting 30s grace period');
+        _leaveTimers[uid] = Timer(const Duration(seconds: 30), () {
           _leaveTimers.remove(uid);
           if (_nearbyUsers.containsKey(uid)) {
             _nearbyUsers.remove(uid);
@@ -444,6 +449,30 @@ class LiveLocationService {
     }
   }
 
+  /// Pause GPS stream but keep channel + heartbeat alive.
+  /// Call when app goes to background — user stays "online" on the map.
+  void pauseGps() {
+    _positionSub?.cancel();
+    _positionSub = null;
+    debugPrint('[LiveGPS] GPS paused (heartbeat continues)');
+  }
+
+  /// Resume GPS stream after a pause. No-op if not live.
+  void resumeGps() {
+    if (!_isLive) return;
+    if (_positionSub != null) return; // Already running
+    _positionSub = Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 50,
+      ),
+    ).listen((position) {
+      _lastPosition = position;
+      _broadcastPosition(position);
+    });
+    debugPrint('[LiveGPS] GPS resumed');
+  }
+
   /// Stop broadcasting and disconnect from all channels.
   Future<void> goOffline() async {
     if (!_isLive) return;
@@ -507,6 +536,15 @@ class LiveLocationService {
   Future<void> _sendHeartbeat() async {
     if (!_isLive || _channel == null) return;
 
+    // Stale-channel detection: if no sync received for 60s,
+    // the WebSocket may have silently died — force reconnect.
+    if (DateTime.now().difference(_lastSyncReceived).inSeconds > 60) {
+      debugPrint('[LiveGPS] No sync received for 60s — forcing reconnect');
+      _heartbeatFailures = 0;
+      _scheduleReconnect();
+      return;
+    }
+
     try {
       await _channel!.track(_buildPayload(_lastPosition));
       _heartbeatFailures = 0; // Reset on success
@@ -549,6 +587,7 @@ class LiveLocationService {
   /// (or via [onPresenceLeave]). This prevents the "flicker to 0" problem
   /// caused by Supabase occasionally sending incomplete/empty sync payloads.
   void _handlePresenceSync(RealtimeChannel channel) {
+    _lastSyncReceived = DateTime.now();
     try {
       final presences = channel.presenceState();
       final updatedUsers = <String, LiveUserPosition>{};

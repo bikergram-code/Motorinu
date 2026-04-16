@@ -59,6 +59,11 @@ class GarageNotifier extends Notifier<GarageState> {
     String? imageUrl,
     List<String>? images,
     String? community,
+    int? mileage,
+    String? fuel,
+    String? transmission,
+    String? color,
+    String? tuevDate,
   }) async {
     final vehicle = await _repo.addVehicle(
       brand: brand,
@@ -71,6 +76,11 @@ class GarageNotifier extends Notifier<GarageState> {
       imageUrl: imageUrl,
       images: images,
       community: community,
+      mileage: mileage,
+      fuel: fuel,
+      transmission: transmission,
+      color: color,
+      tuevDate: tuevDate,
     );
     state = state.copyWith(vehicles: [vehicle, ...state.vehicles]);
   }
@@ -85,6 +95,16 @@ class GarageNotifier extends Notifier<GarageState> {
     String? description,
     String? imageUrl,
     List<String>? images,
+    int? mileage,
+    String? fuel,
+    String? transmission,
+    String? color,
+    String? tuevDate,
+    bool clearMileage = false,
+    bool clearFuel = false,
+    bool clearTransmission = false,
+    bool clearColor = false,
+    bool clearTuev = false,
   }) async {
     final updates = <String, dynamic>{};
     if (brand != null) updates['brand'] = brand;
@@ -96,6 +116,17 @@ class GarageNotifier extends Notifier<GarageState> {
     if (description != null) updates['description'] = description;
     if (imageUrl != null) updates['image_url'] = imageUrl;
     if (images != null) updates['images'] = images;
+    if (mileage != null) updates['mileage'] = mileage;
+    if (fuel != null) updates['fuel'] = fuel;
+    if (transmission != null) updates['transmission'] = transmission;
+    if (color != null) updates['color'] = color;
+    if (tuevDate != null) updates['tuev_date'] = tuevDate;
+    // Allow explicit clearing of optional fields
+    if (clearMileage) updates['mileage'] = null;
+    if (clearFuel) updates['fuel'] = null;
+    if (clearTransmission) updates['transmission'] = null;
+    if (clearColor) updates['color'] = null;
+    if (clearTuev) updates['tuev_date'] = null;
 
     if (updates.isEmpty) return;
 

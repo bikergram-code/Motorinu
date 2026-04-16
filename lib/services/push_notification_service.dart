@@ -16,6 +16,43 @@ import '../routes/app_router.dart';
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   await Firebase.initializeApp();
   debugPrint('[Push] Background message: ${message.messageId}');
+  final type = message.data['type'] as String?;
+
+  // Incoming call → high-priority fullscreen notification
+  if (type == 'incoming_call') {
+    try {
+      final localNotif = FlutterLocalNotificationsPlugin();
+      const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
+      await localNotif.initialize(const InitializationSettings(android: androidSettings));
+      final callerName = message.data['caller_name'] as String? ?? 'Eingehender Anruf';
+      final callType = message.data['call_type'] as String? ?? 'voice';
+      await localNotif.show(
+        888888, // Fixed ID — only one incoming call at a time
+        callerName,
+        callType == 'video' ? 'Videoanruf' : 'Sprachanruf',
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            'motorinu_calls',
+            'Anrufe',
+            channelDescription: 'Eingehende Sprach- und Videoanrufe',
+            importance: Importance.max,
+            priority: Priority.max,
+            fullScreenIntent: true,
+            category: AndroidNotificationCategory.call,
+            ongoing: true,
+            autoCancel: false,
+            playSound: true,
+            enableVibration: true,
+          ),
+        ),
+        payload: jsonEncode(message.data),
+      );
+    } catch (e) {
+      debugPrint('[Push] Background call notification error: $e');
+    }
+    return;
+  }
+
   final title = message.data['title'] as String?;
   final body = message.data['body'] as String?;
   if (title == null || title.isEmpty) return;
@@ -102,6 +139,17 @@ class PushNotificationService {
             description: 'Nachrichten, Follower, Gruppen-Einladungen',
             importance: Importance.high,
             showBadge: true,
+          ),
+        );
+        // Calls channel — high priority with full-screen intent
+        await androidPlugin.createNotificationChannel(
+          const AndroidNotificationChannel(
+            'motorinu_calls',
+            'Anrufe',
+            description: 'Eingehende Sprach- und Videoanrufe',
+            importance: Importance.max,
+            showBadge: false,
+            enableVibration: true,
           ),
         );
         // badge_v2: Importance.low statt min — min wird von manchen Launchern ignoriert
@@ -308,6 +356,9 @@ class PushNotificationService {
           return;
         }
         router.push('/notifications');
+      case 'incoming_call':
+        router.push('/incoming-call');
+        return;
       case 'system':
         final groupId = data['group_id']?.toString();
         if (groupId != null) {

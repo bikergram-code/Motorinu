@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -84,6 +85,11 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
   /// Whether the user has accepted the dating TOS (cached after first check).
   bool? _datingTosAccepted;
 
+  /// Swipe hint animation for Reels tab
+  bool _showSwipeHint = false;
+  Timer? _swipeHintTimer;
+  int _swipeHintShownCount = 0; // Max 3x pro Session
+
 
   @override
   void initState() {
@@ -104,6 +110,7 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
   @override
   void dispose() {
     NavigationState.instance.setFeedScrolling(false);
+    _swipeHintTimer?.cancel();
     try { _infoOverlay?.remove(); } catch (_) {}
     _infoOverlay = null;
     _pageController.removeListener(_onPageScroll);
@@ -131,6 +138,22 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
     }
   }
 
+  void _startSwipeHintTimer() {
+    _swipeHintTimer?.cancel();
+    if (_swipeHintShownCount >= 3) return; // Max 3x pro Session
+    _swipeHintTimer = Timer(const Duration(seconds: 5), () {
+      if (!mounted || _currentPage != 2) return;
+      setState(() => _showSwipeHint = true);
+      _swipeHintShownCount++;
+      // Auto-hide nach 4s
+      Future.delayed(const Duration(seconds: 4), () {
+        if (mounted && _showSwipeHint) {
+          setState(() => _showSwipeHint = false);
+        }
+      });
+    });
+  }
+
   /// Called continuously during page swipe — drives the indicator animation.
   void _onPageScroll() {
     if (_pageController.page != null) {
@@ -140,6 +163,26 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
 
   void _onPageChanged(int page) {
     setState(() => _currentPage = page);
+
+    // Reels (page 2) = Fullscreen → Bars verstecken.
+    // Andere Tabs → Bars wieder einblenden.
+    if (page == 2) {
+      if (!NavigationState.instance.feedScrolling) {
+        NavigationState.instance.setFeedScrolling(true);
+      }
+      // FAB bleibt auf Reels sichtbar (Post erstellen)
+      setState(() => _fabVisible = true);
+      // Swipe-Hint starten nach 5s Inaktivität
+      _startSwipeHintTimer();
+    } else {
+      _swipeHintTimer?.cancel();
+      if (_showSwipeHint) setState(() => _showSwipeHint = false);
+      if (NavigationState.instance.feedScrolling) {
+        NavigationState.instance.setFeedScrolling(false);
+        setState(() => _fabVisible = true);
+      }
+    }
+
     // Refresh stories on every tab switch
     ref.invalidate(storyUsersProvider);
     if (page == 0) {
@@ -558,7 +601,7 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
     return Scaffold(
       backgroundColor: scaffoldBg,
       floatingActionButton: (_currentPage == 3 || _currentPage == 4) ? null : Padding(
-        padding: const EdgeInsets.only(bottom: 38),
+        padding: EdgeInsets.only(bottom: _currentPage == 2 ? 8 : 38),
         child: AnimatedScale(
           scale: _fabVisible ? 1.0 : 0.0,
           duration: const Duration(milliseconds: 200),
@@ -578,6 +621,9 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
       ),
       body: NotificationListener<ScrollNotification>(
         onNotification: (notification) {
+          // Reels (page 2) = always fullscreen — ignore scroll events
+          if (_currentPage == 2) return true;
+
           if (notification is ScrollUpdateNotification && notification.depth >= 1) {
             final delta = notification.scrollDelta ?? 0;
             if (delta > 0) {
@@ -598,17 +644,19 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
         },
         child: Column(
         children: [
-          // Top spacer + StoryBar — collapse when scrolling
+          // Fullscreen pages (Reels=2): only top safe-area
+          // Feed pages (0,1,3) + LOVO (4): story bar + spacer + tab indicator
           AnimatedContainer(
             duration: const Duration(milliseconds: 200),
             curve: Curves.easeOutCubic,
-            height: NavigationState.instance.feedScrolling
+            height: (NavigationState.instance.feedScrolling || _currentPage == 2)
                 ? MediaQuery.of(context).padding.top
                 : MediaQuery.of(context).padding.top + 52,
           ),
+          // StoryBar — hidden on Reels (2), LOVO (4) and when scrolling
           AnimatedCrossFade(
             duration: const Duration(milliseconds: 200),
-            crossFadeState: NavigationState.instance.feedScrolling
+            crossFadeState: (NavigationState.instance.feedScrolling || _currentPage == 2 || _currentPage == 4)
                 ? CrossFadeState.showSecond
                 : CrossFadeState.showFirst,
             firstChild: const StoryBar(),
@@ -616,10 +664,10 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
             sizeCurve: Curves.easeOutCubic,
           ),
 
-          // ── Tab indicator + divider — hide when scrolling (fullscreen) ──
+          // ── Tab indicator + divider — hidden on Reels (2) and when scrolling feed ──
           AnimatedCrossFade(
             duration: const Duration(milliseconds: 200),
-            crossFadeState: NavigationState.instance.feedScrolling
+            crossFadeState: (NavigationState.instance.feedScrolling || _currentPage == 2)
                 ? CrossFadeState.showSecond
                 : CrossFadeState.showFirst,
             firstChild: Column(
@@ -667,8 +715,30 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
                           ? _buildEmptyState(accentColor, FeedMode.following)
                           : _buildPostList(followingState, accentColor, isFollowing: true),
                 ),
-                // Page 2: Reels
-                _buildReelsPage(accentColor),
+                // Page 2: Reels — FAB hides on touch, shows on release + swipe hint
+                Listener(
+                  onPointerDown: (_) {
+                    if (_fabVisible) setState(() => _fabVisible = false);
+                    if (_showSwipeHint) setState(() => _showSwipeHint = false);
+                    _swipeHintTimer?.cancel();
+                  },
+                  onPointerUp: (_) {
+                    if (!_fabVisible) setState(() => _fabVisible = true);
+                    _startSwipeHintTimer();
+                  },
+                  onPointerCancel: (_) {
+                    if (!_fabVisible) setState(() => _fabVisible = true);
+                    _startSwipeHintTimer();
+                  },
+                  child: Stack(
+                    children: [
+                      _buildReelsPage(accentColor),
+                      // Swipe hint overlay
+                      if (_showSwipeHint)
+                        _buildSwipeHint(),
+                    ],
+                  ),
+                ),
                 // Page 3: Live
                 const LiveBrowseScreen(),
                 // Page 4: Dating
@@ -1213,6 +1283,52 @@ class _FeedScreenState extends ConsumerState<FeedScreen> {
       context,
       post.id,
       postUserId: post.userId,
+    );
+  }
+
+  Widget _buildSwipeHint() {
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: AnimatedOpacity(
+          opacity: _showSwipeHint ? 1.0 : 0.0,
+          duration: const Duration(milliseconds: 400),
+          child: Center(
+            child: TweenAnimationBuilder<double>(
+              tween: Tween(begin: 0.0, end: 1.0),
+              duration: const Duration(milliseconds: 800),
+              curve: Curves.easeOut,
+              builder: (_, value, child) => Transform.scale(
+                scale: 0.8 + (0.2 * value),
+                child: Opacity(opacity: value, child: child),
+              ),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 16),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.65),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.arrow_back_ios_rounded, color: Colors.white54, size: 18),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Wischen zum Wechseln',
+                      style: GoogleFonts.inter(
+                        color: Colors.white,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    const Icon(Icons.arrow_forward_ios_rounded, color: Colors.white54, size: 18),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 

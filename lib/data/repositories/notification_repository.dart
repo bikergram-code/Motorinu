@@ -88,6 +88,18 @@ class NotificationRepository {
     }
   }
 
+  /// Delete a single notification (hard delete).
+  Future<void> deleteNotification(int notificationId) async {
+    final userId = _currentUserId;
+    if (userId == null) return;
+
+    await _supabase
+        .from('notifications')
+        .delete()
+        .eq('id', notificationId)
+        .eq('user_id', userId);
+  }
+
   /// Create a notification for another user.
   /// Tries RPC first (bypasses RLS), falls back to direct insert.
   /// [community] scopes the notification to a specific community.

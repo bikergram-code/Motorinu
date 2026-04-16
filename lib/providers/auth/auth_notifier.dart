@@ -141,9 +141,9 @@ class AuthNotifier extends Notifier<AuthState> {
       if (response.session == null && response.user != null) {
         debugPrint('[Auth] SignUp OK but no session — email confirmation required');
         _isRegistering = false;
-        state = const AuthError(
-          'Fast geschafft! Bitte bestätige deine E-Mail und melde dich dann an.',
-        );
+        // Use dedicated state so the UI can show the App Tour + a proper
+        // "check your email" banner instead of a bare error snackbar.
+        state = EmailConfirmationPending(email);
         return;
       }
 

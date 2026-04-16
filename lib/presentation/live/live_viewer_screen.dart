@@ -1,4 +1,5 @@
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -82,9 +83,7 @@ class _LiveViewerScreenState extends ConsumerState<LiveViewerScreen> {
       }
     });
 
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: Stack(
+    final viewerBody = Stack(
         children: [
           // ── Video Surface (placeholder for IVS player) ──
           _buildVideoSurface(viewerState, accentColor),
@@ -130,7 +129,19 @@ class _LiveViewerScreenState extends ConsumerState<LiveViewerScreen> {
               ),
             ),
         ],
-      ),
+    );
+
+    return Scaffold(
+      backgroundColor: Colors.black,
+      resizeToAvoidBottomInset: false,
+      body: kIsWeb
+          ? Center(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 500),
+                child: viewerBody,
+              ),
+            )
+          : viewerBody,
     );
   }
 
@@ -417,7 +428,11 @@ class _LiveViewerScreenState extends ConsumerState<LiveViewerScreen> {
       right: 0,
       bottom: 0,
       child: SafeArea(
-        child: Column(
+        child: Align(
+          alignment: Alignment.bottomLeft,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: Column(
           children: [
             // Chat messages (semi-transparent overlay)
             Container(
@@ -455,17 +470,17 @@ class _LiveViewerScreenState extends ConsumerState<LiveViewerScreen> {
                       height: 40,
                       padding: const EdgeInsets.symmetric(horizontal: 14),
                       decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.1),
+                        color: Colors.black.withValues(alpha: 0.6),
                         borderRadius: BorderRadius.circular(20),
                         border: Border.all(
-                          color: Colors.white.withValues(alpha: 0.1),
+                          color: Colors.white.withValues(alpha: 0.2),
                         ),
                       ),
                       child: TextField(
                         controller: _chatController,
                         style: GoogleFonts.inter(
                           fontSize: 14,
-                          color: Colors.white,
+                          color: Colors.white.withValues(alpha: 0.9),
                         ),
                         decoration: InputDecoration(
                           hintText: 'Nachricht...',
@@ -501,18 +516,22 @@ class _LiveViewerScreenState extends ConsumerState<LiveViewerScreen> {
             ),
           ],
         ),
+          ), // ConstrainedBox
+        ), // Align
       ),
     );
   }
 
   Widget _buildChatBubble(LiveChatMessage msg, Color accentColor) {
     final name = msg.displayName ?? msg.username ?? 'User';
-    return Padding(
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Padding(
       padding: const EdgeInsets.only(bottom: 4),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         decoration: BoxDecoration(
-          color: Colors.black.withValues(alpha: 0.4),
+          color: Colors.black.withValues(alpha: 0.5),
           borderRadius: BorderRadius.circular(12),
         ),
         child: Text.rich(
@@ -536,6 +555,7 @@ class _LiveViewerScreenState extends ConsumerState<LiveViewerScreen> {
             ],
           ),
         ),
+      ),
       ),
     );
   }

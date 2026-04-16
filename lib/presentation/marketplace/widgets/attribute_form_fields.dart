@@ -36,21 +36,40 @@ class AttributeFormFields extends StatefulWidget {
 
 class _AttributeFormFieldsState extends State<AttributeFormFields> {
   final Map<String, TextEditingController> _controllers = {};
+  // Lokale Kopie — wird sofort aktualisiert (kein Warten auf setState-Rebuild).
+  // Behebt Race-Condition bei Brand+Model-Reset (zwei _update in Folge).
+  late Map<String, dynamic> _local;
+
+  @override
+  void initState() {
+    super.initState();
+    _local = Map<String, dynamic>.from(widget.attributes);
+  }
+
+  @override
+  void didUpdateWidget(covariant AttributeFormFields oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Sync wenn Parent die Attributes extern ändert (z.B. Kategorie-Wechsel)
+    if (!identical(oldWidget.attributes, widget.attributes)) {
+      _local = Map<String, dynamic>.from(widget.attributes);
+    }
+  }
 
   String get category => widget.category;
   String? get subcategory => widget.subcategory;
-  Map<String, dynamic> get attributes => widget.attributes;
+  Map<String, dynamic> get attributes => _local;
   Color get accentColor => widget.accentColor;
   Color get cardColor => widget.cardColor;
   Color get textColor => widget.textColor;
 
   void _update(String key, dynamic value) {
-    final updated = Map<String, dynamic>.from(attributes);
+    final updated = Map<String, dynamic>.from(_local);
     if (value == null || (value is String && value.isEmpty)) {
       updated.remove(key);
     } else {
       updated[key] = value;
     }
+    _local = updated; // Sofort lokal aktualisieren (kein Frame-Delay)
     widget.onAttributesChanged(updated);
   }
 
@@ -153,7 +172,7 @@ class _AttributeFormFieldsState extends State<AttributeFormFields> {
       padding: const EdgeInsets.only(bottom: 14),
       child: VehicleBrandPicker(
         selectedBrand: attributes[field.key] as String?,
-        selectedModel: attributes[field.dependsOn != null ? 'model' : field.key] as String?,
+        selectedModel: attributes[field.key == 'fits_brand' ? 'fits_model' : 'model'] as String?,
         isMotorcycle: field.vehicleType == VehicleType.motorcycle || isMoto,
         accentColor: accentColor,
         cardColor: cardColor,

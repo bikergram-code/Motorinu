@@ -77,6 +77,11 @@ class _RegisterScreenState extends ConsumerState<RegisterScreen> {
       if (prev is AuthLoading && state is Authenticated) {
         context.go('/app-tour');
       }
+      // Email confirmation required → still show the app tour,
+      // then land on login with a "check your email" banner.
+      if (prev is AuthLoading && state is EmailConfirmationPending) {
+        context.go('/app-tour', extra: {'pendingEmail': state.email});
+      }
     });
 
     return Scaffold(

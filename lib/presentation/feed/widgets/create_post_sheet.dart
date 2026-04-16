@@ -1,9 +1,6 @@
-import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
-import 'package:http/http.dart' as http;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -12,13 +9,13 @@ import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:video_compress/video_compress.dart';
 
-import '../../../core/api_config.dart';
 import '../../../core/community.dart';
 import '../../../providers/auth/auth_notifier.dart';
 import '../../../providers/auth/auth_state.dart';
 import '../../../providers/core/providers.dart';
 import '../../../providers/feed/feed_notifier.dart';
 import '../../../theme/app_theme.dart';
+import '../utils/video_upload_helper.dart' as video_upload;
 import 'topic_picker.dart';
 import 'video_trim_screen.dart';
 
@@ -33,17 +30,18 @@ const _allowedVideoTypes = ['mp4', 'mov', 'avi', 'mkv', 'webm'];
 enum PostMediaSource { none, photo, video, camera, textOnly }
 
 class CreatePostScreen extends ConsumerStatefulWidget {
-  const CreatePostScreen({super.key, this.initialSource = PostMediaSource.none});
+  const CreatePostScreen({super.key, this.initialSource = PostMediaSource.none, this.initialText});
 
   final PostMediaSource initialSource;
+  final String? initialText;
 
   /// Opens the fullscreen post creator.
   /// Uses rootNavigator so it opens ABOVE the MainShell (no Global Top Bar overlap).
-  static void show(BuildContext context, {PostMediaSource source = PostMediaSource.none}) {
+  static void show(BuildContext context, {PostMediaSource source = PostMediaSource.none, String? initialText}) {
     Navigator.of(context, rootNavigator: true).push(
       PageRouteBuilder(
         opaque: true,
-        pageBuilder: (_, __, ___) => CreatePostScreen(initialSource: source),
+        pageBuilder: (_, __, ___) => CreatePostScreen(initialSource: source, initialText: initialText),
         transitionsBuilder: (_, animation, __, child) {
           return SlideTransition(
             position: Tween<Offset>(
@@ -100,6 +98,11 @@ class _CreatePostScreenState extends ConsumerState<CreatePostScreen> {
   @override
   void initState() {
     super.initState();
+    // Pre-fill text (e.g. from POI share)
+    if (widget.initialText != null && widget.initialText!.isNotEmpty) {
+      _textController.text = widget.initialText!;
+      _currentStep = 1;
+    }
     // Skip to text step immediately for textOnly
     if (widget.initialSource == PostMediaSource.textOnly) {
       _currentStep = 1;
@@ -226,6 +229,10 @@ class _CreatePostScreenState extends ConsumerState<CreatePostScreen> {
   // ── Video Picker (FilePicker — sieht ALLE Dateien inkl. Downloads) ──
 
   Future<void> _pickVideo() async {
+    if (kIsWeb) {
+      setState(() => _error = 'Video-Upload ist in der Web-Version nicht verf\u00fcgbar. Bitte die App verwenden.');
+      return;
+    }
     try {
       final result = await FilePicker.platform.pickFiles(
         type: FileType.video,
@@ -237,7 +244,6 @@ class _CreatePostScreenState extends ConsumerState<CreatePostScreen> {
       final filePath = pickedFile.path;
       if (filePath == null) return;
 
-      final file = File(filePath);
       final fileName = pickedFile.name;
       final ext = fileName.split('.').last.toLowerCase();
 
@@ -254,7 +260,7 @@ class _CreatePostScreenState extends ConsumerState<CreatePostScreen> {
 
       final trimmedFile = await VideoTrimScreen.show(
         context,
-        videoFile: file,
+        videoFile: filePath,
         accentColor: accentColor,
       );
       // User cancelled trim screen
@@ -598,90 +604,7 @@ class _CreatePostScreenState extends ConsumerState<CreatePostScreen> {
     return types[ext.toLowerCase()] ?? 'video/mp4';
   }
 
-  Future<void> _tusUploadFile({
-    required String bucketName,
-    required String objectPath,
-    required File file,
-    required String contentType,
-    void Function(double progress)? onProgress,
-  }) async {
-    final supabase = Supabase.instance.client;
-    final accessToken = supabase.auth.currentSession?.accessToken;
-    if (accessToken == null) throw Exception('Nicht eingeloggt');
-
-    final baseUrl = ApiConfig.supabaseUrl;
-    final fileSize = await file.length();
-
-    // Step 1: Create the resumable upload
-    final createUri = Uri.parse('$baseUrl/storage/v1/upload/resumable');
-    // Base64 encode metadata values (TUS spec: no padding issues with standard base64)
-    final metaBucket = base64.encode(utf8.encode(bucketName));
-    final metaObject = base64.encode(utf8.encode(objectPath));
-    final metaType = base64.encode(utf8.encode(contentType));
-    final metaCache = base64.encode(utf8.encode('3600'));
-
-    // TUS spec: key value pairs separated by comma, NO spaces after commas
-    final metadata =
-        'bucketName $metaBucket,objectName $metaObject,contentType $metaType,cacheControl $metaCache';
-
-    final createRes = await http.post(
-      createUri,
-      headers: {
-        'Authorization': 'Bearer $accessToken',
-        'x-upsert': 'false',
-        'Upload-Length': '$fileSize',
-        'Upload-Metadata': metadata,
-        'Tus-Resumable': '1.0.0',
-      },
-    );
-
-    if (createRes.statusCode != 201) {
-      throw Exception(
-          'Upload-Erstellung fehlgeschlagen (${createRes.statusCode}): ${createRes.body}');
-    }
-
-    final uploadUrl = createRes.headers['location'];
-    if (uploadUrl == null) {
-      throw Exception('Kein Upload-URL vom Server erhalten');
-    }
-
-    // Step 2: Upload in 6MB chunks
-    const chunkSize = 6 * 1024 * 1024; // 6MB per Supabase spec
-    int offset = 0;
-    final raf = file.openSync(mode: FileMode.read);
-
-    try {
-      while (offset < fileSize) {
-        final remaining = fileSize - offset;
-        final currentSize = remaining < chunkSize ? remaining : chunkSize;
-
-        raf.setPositionSync(offset);
-        final chunk = raf.readSync(currentSize);
-
-        final patchRes = await http.patch(
-          Uri.parse(uploadUrl),
-          headers: {
-            'Authorization': 'Bearer $accessToken',
-            'Upload-Offset': '$offset',
-            'Content-Type': 'application/offset+octet-stream',
-            'Tus-Resumable': '1.0.0',
-          },
-          body: chunk,
-        );
-
-        if (patchRes.statusCode != 204) {
-          throw Exception(
-              'Chunk-Upload fehlgeschlagen bei ${(offset / 1024 / 1024).toStringAsFixed(1)}MB '
-              '(${patchRes.statusCode}): ${patchRes.body}');
-        }
-
-        offset += currentSize;
-        onProgress?.call(offset / fileSize);
-      }
-    } finally {
-      raf.closeSync();
-    }
-  }
+  // _tusUploadFile moved to video_upload_helper.dart (conditional import)
 
   // ── Submit Post ──
 
@@ -742,26 +665,22 @@ class _CreatePostScreenState extends ConsumerState<CreatePostScreen> {
 
         try {
           if (_pickedVideoFilePath != null) {
-            await _tusUploadFile(
+            await video_upload.tusUploadFile(
               bucketName: 'posts',
               objectPath: path,
-              file: File(_pickedVideoFilePath!),
+              filePath: _pickedVideoFilePath!,
               contentType: contentType,
               onProgress: (p) => uploadProgress.value = p,
             );
           } else {
-            // Fallback: write bytes to temp file, then TUS upload
-            final tempDir = Directory.systemTemp;
-            final tempFile = File('${tempDir.path}/upload_${timestamp}_vid.$ext');
-            await tempFile.writeAsBytes(_pickedVideoBytes!);
-            await _tusUploadFile(
+            await video_upload.tusUploadBytes(
               bucketName: 'posts',
               objectPath: path,
-              file: tempFile,
+              bytes: _pickedVideoBytes!,
+              ext: ext,
               contentType: contentType,
               onProgress: (p) => uploadProgress.value = p,
             );
-            await tempFile.delete().catchError((_) {});
           }
         } finally {
           uploadOverlay.remove();

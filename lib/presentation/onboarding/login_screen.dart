@@ -11,7 +11,11 @@ import '../../theme/app_theme.dart';
 import 'widgets/social_sign_in_buttons.dart';
 
 class LoginScreen extends ConsumerStatefulWidget {
-  const LoginScreen({super.key});
+  const LoginScreen({super.key, this.pendingEmail});
+
+  /// If set, shows a "check your email" banner and pre-fills the email field.
+  /// Passed in after registration when email confirmation is required.
+  final String? pendingEmail;
 
   @override
   ConsumerState<LoginScreen> createState() => _LoginScreenState();
@@ -21,6 +25,14 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
   bool _obscurePassword = true;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.pendingEmail != null) {
+      _emailController.text = widget.pendingEmail!;
+    }
+  }
 
   @override
   void dispose() {
@@ -39,10 +51,17 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
 
     ref.listen<AuthState>(authNotifierProvider, (_, state) {
       if (state is AuthError) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(state.message),
-            backgroundColor: AppTheme.errorDark,
+        showDialog(
+          context: context,
+          builder: (_) => AlertDialog(
+            title: const Text('Fehler'),
+            content: SelectableText(state.message),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('OK'),
+              ),
+            ],
           ),
         );
       }
@@ -149,6 +168,57 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
               ),
 
               const SizedBox(height: 20),
+
+              // "Check your email" banner — shown after registration if email
+              // confirmation is required.
+              if (widget.pendingEmail != null) ...[
+                Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: accentColor.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(
+                      color: accentColor.withValues(alpha: 0.35),
+                    ),
+                  ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(
+                        Icons.mark_email_unread_rounded,
+                        color: accentColor,
+                        size: 22,
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Fast geschafft!',
+                              style: GoogleFonts.inter(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w700,
+                                color: Colors.white,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              'Wir haben dir eine Bestätigungsmail an ${widget.pendingEmail} geschickt. Klicke auf den Link in der Mail und melde dich dann an.',
+                              style: GoogleFonts.inter(
+                                fontSize: 12,
+                                color: Colors.white.withValues(alpha: 0.75),
+                                height: 1.4,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 16),
+              ],
 
               // Email field
               _buildLabel('E-Mail'),

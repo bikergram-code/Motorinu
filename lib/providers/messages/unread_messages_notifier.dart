@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -135,8 +136,12 @@ class UnreadMessagesNotifier extends Notifier<int> {
     state = state + 1;
     _lastRealtimeIncrement = DateTime.now();
     debugPrint('[UnreadMsg] Incremented to $state');
-    IncomingMessageBus.instance.emit(newMessage);
-    _showLocalNotification(newMessage);
+    IncomingMessageBus.instance.emit(newMessage); // In-App-Toast
+    // System-Push nur wenn App im Hintergrund — kein Doppel-Ding wenn User schon in der App ist
+    final lifecycle = WidgetsBinding.instance.lifecycleState;
+    if (lifecycle != AppLifecycleState.resumed) {
+      _showLocalNotification(newMessage);
+    }
   }
 
   /// Show a local notification for the new message — creates app icon badge
@@ -179,7 +184,13 @@ class UnreadMessagesNotifier extends Notifier<int> {
         showWhen: true,
         groupKey: groupKey,
       );
-      final details = NotificationDetails(android: androidDetails);
+      final details = NotificationDetails(
+        android: androidDetails,
+        iOS: DarwinNotificationDetails(
+          badgeNumber: state,
+          presentBadge: true,
+        ),
+      );
 
       await flnp.show(
         DateTime.now().millisecondsSinceEpoch ~/ 1000, // unique ID per message

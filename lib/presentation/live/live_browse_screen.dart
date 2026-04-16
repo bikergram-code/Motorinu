@@ -12,6 +12,7 @@ import '../../domain/models/live_stream.dart';
 import '../../providers/core/providers.dart';
 import '../../providers/live/live_notifier.dart';
 import '../../theme/app_theme.dart';
+import '../widgets/immersive_scroll_wrapper.dart';
 
 /// Browse active live streams — embedded in FeedScreen PageView.
 class LiveBrowseScreen extends ConsumerStatefulWidget {
@@ -173,14 +174,19 @@ class _LiveBrowseScreenState extends ConsumerState<LiveBrowseScreen>
     // No Scaffold — this is embedded in the FeedScreen PageView
     return Stack(
       children: [
-        RefreshIndicator(
-          color: accentColor,
-          onRefresh: () async {
-            await ref.read(liveDiscoveryProvider.notifier).refresh();
-            await _loadRecentStreams();
-          },
-          child: CustomScrollView(
-            slivers: [
+        // ImmersiveScrollWrapper: Scroll hoch → Bars wieder einblenden,
+        // Scroll runter → Bars ausblenden (wie im Feed)
+        ImmersiveScrollWrapper(
+          child: RefreshIndicator(
+            color: accentColor,
+            onRefresh: () async {
+              await ref.read(liveDiscoveryProvider.notifier).refresh();
+              await _loadRecentStreams();
+            },
+            child: CustomScrollView(
+              // Physics immer scrollbar, damit kurze Listen trotzdem UserScrollNotification triggern
+              physics: const AlwaysScrollableScrollPhysics(),
+              slivers: [
               // ── Active Live Streams (TikTok/LOVO-Swipe) ──
               if (liveState.isLoading && liveState.streams.isEmpty)
                 const SliverFillRemaining(
@@ -402,9 +408,10 @@ class _LiveBrowseScreenState extends ConsumerState<LiveBrowseScreen>
                   ),
                 ),
 
-              // Bottom spacing
-              SliverToBoxAdapter(child: SizedBox(height: bp + 100)),
-            ],
+                // Bottom spacing
+                SliverToBoxAdapter(child: SizedBox(height: bp + 100)),
+              ],
+            ),
           ),
         ),
 
@@ -700,8 +707,8 @@ class _LiveSwipeStack extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final screenWidth = MediaQuery.of(context).size.width;
-    // Karte: ~70% Bildschirmbreite, Aspect Ratio 3:4 (hochformat wie TikTok/LOVO)
-    final cardWidth = screenWidth * 0.82;
+    // Karte: ~82% Bildschirmbreite, max 400px auf Web/Desktop
+    final cardWidth = (screenWidth * 0.82).clamp(0.0, 400.0);
     final cardHeight = cardWidth * 1.35;
     final visibleCount = min(3, streams.length);
 

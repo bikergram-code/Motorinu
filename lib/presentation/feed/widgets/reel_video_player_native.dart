@@ -129,50 +129,32 @@ class _ReelVideoPlayerState extends State<ReelVideoPlayer>
 
       _player = Player(
         configuration: PlayerConfiguration(
-          bufferSize: isTablet ? 4 * 1024 * 1024 : 8 * 1024 * 1024,
+          bufferSize: 8 * 1024 * 1024, // 8 MB für alle Geräte
         ),
       );
 
       // ── mpv decode optimizations ──
-      // Aggressively tuned for budget tablets (Tab A9 etc.) that struggle
-      // with 4K content. Phones get lighter optimizations.
       if (_player!.platform is NativePlayer) {
         final mpv = _player!.platform as NativePlayer;
 
-        // Skip deblocking filter — biggest single CPU saver
-        await mpv.setProperty('vd-lavc-skiploopfilter',
-            isTablet ? 'all' : 'nonref');
-        // Skip non-reference frames when decoder falls behind (tablets only)
-        if (isTablet) {
-          await mpv.setProperty('vd-lavc-skipframe', 'nonref');
-        }
+        // Skip deblocking filter — CPU saver
+        await mpv.setProperty('vd-lavc-skiploopfilter', 'nonref');
         // Fast decode flags in libavcodec
         await mpv.setProperty('vd-lavc-fast', 'yes');
         // Use all CPU cores for software decode
         await mpv.setProperty('vd-lavc-threads', '0');
-        // Drop frames if decoder can't keep up (smoother than stuttering)
-        await mpv.setProperty('framedrop', isTablet ? 'decoder+vo' : 'vo');
-        // Faster startup: less buffering before first frame
-        await mpv.setProperty('demuxer-readahead-secs',
-            isTablet ? '0.5' : '1');
-        // Tablets: use simple audio sync (forgiving when decoder lags)
-        // Phones: display-resample for smooth playback
-        await mpv.setProperty('video-sync',
-            isTablet ? 'audio' : 'display-resample');
+        // Drop frames if decoder can't keep up
+        await mpv.setProperty('framedrop', 'vo');
+        // Buffering before first frame
+        await mpv.setProperty('demuxer-readahead-secs', '1');
+        // Smooth playback sync
+        await mpv.setProperty('video-sync', 'display-resample');
         // Low-latency hacks
         await mpv.setProperty('video-latency-hacks', 'yes');
-        // Cap framerate for tablets — 30fps max saves decoder load
-        if (isTablet) {
-          try {
-            await mpv.setProperty('vf', 'lavfi=[fps=30]');
-          } catch (_) {
-            // vf filter not available in this build — skip silently
-          }
-        }
       }
 
-      // Reels are fullscreen — slightly higher scale than feed posts
-      final scale = isTablet ? 0.35 : 0.75;
+      // Reels are fullscreen — same scale for all devices
+      final scale = isTablet ? 0.5 : 0.75;
 
       final config = _hwAccel
           ? VideoControllerConfiguration(scale: scale)

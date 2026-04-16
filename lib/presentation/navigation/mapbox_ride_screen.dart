@@ -20,6 +20,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
+import '../feed/widgets/create_post_sheet.dart';
 import '../../core/community.dart';
 import '../../providers/auth/auth_notifier.dart';
 import '../../providers/auth/auth_state.dart';
@@ -43,6 +44,7 @@ import '../../data/repositories/ride_repository.dart';
 import '../../providers/map/map_settings_provider.dart';
 import '../../core/api_config.dart';
 import '../widgets/bug_report_sheet.dart';
+import '../widgets/online_status_avatar.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 
 // Token moved to ApiConfig to avoid secret-scanning blocks.
@@ -54,11 +56,16 @@ class MapboxRideScreen extends ConsumerStatefulWidget {
   final int? groupId; // null = Freie Fahrt (Solo), set = Gruppen-Modus
   const MapboxRideScreen({super.key, this.groupId});
 
+  /// Globaler Notifier: Wenn gesetzt, fliegt die Karte beim nächsten Frame zum POI.
+  /// Wird von message_bubble.dart (Location-Tap) gesetzt.
+  static ValueNotifier<({double lat, double lon, String name, String type})?> pendingPoiFlyTo = ValueNotifier(null);
+
   @override
   ConsumerState<MapboxRideScreen> createState() => _MapboxRideScreenState();
 }
 
-class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
+class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen>
+    with TickerProviderStateMixin {
   // ── Theme helpers ──
   bool _lastIsDark = true; // cached to survive deactivation
   bool get _isDark {
@@ -87,19 +94,26 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
   Timer? _followTimer;
   Timer? _speedLimitTimer;
 
+  // ── Map Tutorial ──
+  bool _tutorialActive = false;
+  int _tutorialStep = 0; // 0 = Home-Puck, 1 = GPS Toggle, 2 = POIs
+  Timer? _tutorialAutoTimer;
+  late final AnimationController _tutorialAnimCtrl;
+
   // ── GPS ──
   double _lat = 51.0, _lng = 7.0, _speed = 0, _heading = 0;
   double _displaySpeed = 0; // EMA-smoothed speed for display
   bool _gpsReady = false;
   double? _plzLat, _plzLng; // PLZ fallback position
 
+  // ── Zuhause-Button Pulse (neue User) ──
+  bool _homeSaved = true; // assume saved, flip in _checkHomeSaved()
+
   // ── Search ──
   bool _searchOpen = false;
   bool _recentScrolling = false;
   bool _searchDropdownOpen = false;
-  bool _searchPanelHidden = false; // Auto-hide when user touches map
-  bool _searchPanelAutoHideReady = false; // Delay auto-hide after map init
-  Timer? _searchPanelTimer;
+  bool _searchPanelHidden = true; // Default: eingeklappt, nur schmale Bar
   Timer? _resumeFollowTimer;
   int _activePointers = 0; // Track multi-touch for zoom gestures
   final _searchController = TextEditingController();
@@ -150,7 +164,7 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
 
   // ── GPS signal ──
   DateTime _lastGpsTime = DateTime.now();
-  bool get _gpsLost => DateTime.now().difference(_lastGpsTime).inSeconds > 5;
+  bool get _gpsLost => DateTime.now().difference(_lastGpsTime).inSeconds > 15;
 
   // ── Speed limit ──
   int? _speedLimit;
@@ -182,6 +196,11 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
   Map<String, List<PoiResult>> _poiResults = {};
   String? _activePoiCategory; // currently shown POI layer
   bool _poiLoading = false;
+  String? _poiError;          // shown as overlay pill (auto-dismiss)
+  Timer? _poiErrorTimer;
+  PoiResult? _highlightedPoi; // pulsing ring on map
+  Timer? _highlightTimer;
+  DateTime? _lastPoiNetworkError; // cooldown after network failure
 
   // ── Ride Distance Tracking (for KM stats) ──
   double _totalDrivenMeters = 0;
@@ -208,27 +227,40 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
     super.initState();
     MapboxOptions.setAccessToken(_mapboxToken);
     WakelockPlus.enable();
+    // POI FlyTo Listener (aus Chat Location-Nachrichten)
+    MapboxRideScreen.pendingPoiFlyTo.addListener(_onPendingPoiFlyTo);
+    // Tutorial animation controller (bouncing arrow)
+    _tutorialAnimCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 800),
+    )..repeat(reverse: true);
+    _checkMapTutorial();
     // Sync route mode from global state (set by community switch)
     _routeMode = NavigationState.instance.routeMode;
     NavigationState.instance.addListener(_onGlobalModeChanged);
     _initHiMoto();
     _loadSearchHistory();
-    // GPS toggle always starts OFF — user must opt-in to broadcast
-    _gpsLive = false;
-    // Stop any leftover broadcast from a previous session
+    _checkHomeSaved();
+    // ★ Respect global service state (MainShell may have started goLive)
     final liveSvc = ref.read(liveLocationServiceProvider);
-    if (liveSvc.isLive) {
-      liveSvc.goOffline();
-    }
-    // Start listen-only mode to see other online users even with GPS OFF
-    final authState = ref.read(authNotifierProvider);
-    if (authState is Authenticated && !liveSvc.isListening) {
-      liveSvc.startListening(userId: authState.user.id);
+    _gpsLive = liveSvc.isLive;
+    if (_gpsLive) {
+      // Already live (started by MainShell or previous toggle) — keep it
+      Future(() => ref.read(isLiveProvider.notifier).set(true));
+      debugPrint('[Map] GPS already live from global service — keeping');
+    } else {
+      // Start listen-only mode to see other online users even with GPS OFF
+      final authState = ref.read(authNotifierProvider);
+      if (authState is Authenticated && !liveSvc.isListening) {
+        liveSvc.startListening(userId: authState.user.id);
+      }
     }
     // GPS stream always runs (needed for navigation, speed, etc.)
     _initGps();
-    // Map starts at PLZ position (GPS toggle OFF)
-    _initPlzPosition();
+    // Map starts at PLZ (GPS OFF) or at real position (GPS ON)
+    if (!_gpsLive) {
+      _initPlzPosition();
+    }
   }
 
   void _onGlobalModeChanged() {
@@ -257,14 +289,249 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
   }
 
   @override
+  // ── Map Tutorial (Onboarding) ──
+
+  Future<void> _checkMapTutorial() async {
+    final prefs = await SharedPreferences.getInstance();
+    final seen = prefs.getBool('map_tutorial_v2_seen') ?? false;
+    debugPrint('[Tutorial] check: seen=$seen, gpsLive=$_gpsLive, mounted=$mounted');
+    if (!seen && !_gpsLive && mounted) {
+      // Wait for map to load before showing tutorial
+      Future.delayed(const Duration(seconds: 2), () {
+        debugPrint('[Tutorial] delayed: mounted=$mounted, isNav=$_isNavigating, gpsLive=$_gpsLive');
+        if (mounted && !_isNavigating && !_gpsLive) {
+          debugPrint('[Tutorial] ✓ Activating tutorial!');
+          setState(() {
+            _tutorialActive = true;
+            _tutorialStep = 0;
+          });
+        }
+      });
+    }
+  }
+
+  void _startTutorialAutoAdvance() {
+    // No auto-advance — user must tap "Weiter" or "Nicht mehr anzeigen"
+  }
+
+  void _nextTutorialStep() {
+    if (_tutorialStep < 2) {
+      setState(() => _tutorialStep++);
+    } else {
+      // User completed all steps → mark as seen permanently
+      _dismissTutorial(neverShow: true);
+    }
+  }
+
+  void _dismissTutorial({required bool neverShow}) async {
+    _tutorialAutoTimer?.cancel();
+    if (mounted) setState(() => _tutorialActive = false);
+    if (neverShow) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('map_tutorial_v2_seen', true);
+    }
+  }
+
+  Widget _buildTutorialOverlay() {
+    final screenW = MediaQuery.of(context).size.width;
+    final screenH = MediaQuery.of(context).size.height;
+    final bp = MediaQuery.of(context).padding.bottom;
+    final tp = MediaQuery.of(context).padding.top;
+
+    // GPS toggle position: right column at right:12, bottom:(50+bp)
+    // GPS is last in column (bottom element) → its center Y from screen bottom:
+    // column bottom: 50 + bp, GPS height: 72, center = 50 + bp + 36
+    final gpsBottomCenter = 50.0 + bp + 36;
+
+    // Tutorial content per step
+    final titles = [
+      'Das ist dein Zuhause',
+      'GPS Live-Position',
+      'POIs in der Nähe',
+    ];
+    final subtitles = [
+      'Deine Position basierend auf deiner PLZ.',
+      'Damit wird deine tatsächliche Position\ngezeigt. Alle User können dich sehen!',
+      'Aktiviere zuerst GPS, damit POIs\nan deinem Standort angezeigt werden!',
+    ];
+    final buttonLabel = _tutorialStep < 2 ? 'Weiter' : 'Verstanden';
+    // Steps 0+1: text top, arrow bottom. Step 2: arrow top, text bottom.
+    final textOnTop = _tutorialStep <= 1;
+
+    return Positioned.fill(
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () {}, // Block taps on background, only buttons work
+        child: Container(
+          color: Colors.black.withValues(alpha: 0.55),
+          child: Stack(children: [
+            // ── Text bubble + Controls (TOP for steps 0-1, BOTTOM for step 2) ──
+            Positioned(
+              left: 24, right: 24,
+              top: textOnTop ? tp + 70 : null,
+              bottom: textOnTop ? null : bp + 90,
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                _tutorialBubble(titles[_tutorialStep], subtitles[_tutorialStep]),
+                const SizedBox(height: 14),
+                Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  _tutorialDot(0),
+                  const SizedBox(width: 8),
+                  _tutorialDot(1),
+                  const SizedBox(width: 8),
+                  _tutorialDot(2),
+                ]),
+                const SizedBox(height: 10),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: _modeColor,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                    ),
+                    onPressed: _nextTutorialStep,
+                    child: Text(buttonLabel,
+                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                GestureDetector(
+                  onTap: () => _dismissTutorial(neverShow: true),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Text('Nicht mehr anzeigen',
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.5), fontSize: 13,
+                        decoration: TextDecoration.underline,
+                        decorationColor: Colors.white.withValues(alpha: 0.5),
+                      )),
+                  ),
+                ),
+              ]),
+            ),
+
+            // ── Step 0: Bouncing arrow ↓ → PLZ home marker ──
+            if (_tutorialStep == 0)
+              Positioned(
+                left: screenW / 2 - 24,
+                bottom: bp + 120,
+                child: AnimatedBuilder(
+                  animation: _tutorialAnimCtrl,
+                  builder: (_, child) => Transform.translate(
+                    offset: Offset(0, _tutorialAnimCtrl.value * 18),
+                    child: child,
+                  ),
+                  child: Icon(Icons.keyboard_double_arrow_down_rounded,
+                    color: _modeColor, size: 48,
+                    shadows: const [Shadow(color: Colors.black87, blurRadius: 16)]),
+                ),
+              ),
+
+            // ── Step 1: Bouncing arrow → → GPS toggle ──
+            if (_tutorialStep == 1)
+              Positioned(
+                right: 70,
+                bottom: gpsBottomCenter - 30,
+                child: AnimatedBuilder(
+                  animation: _tutorialAnimCtrl,
+                  builder: (_, child) => Transform.translate(
+                    offset: Offset(_tutorialAnimCtrl.value * 14, 0),
+                    child: child,
+                  ),
+                  child: const Icon(Icons.keyboard_double_arrow_right_rounded,
+                    color: Colors.greenAccent, size: 48,
+                    shadows: [Shadow(color: Colors.black87, blurRadius: 16)]),
+                ),
+              ),
+
+            // ── Step 2: Bouncing arrow ↑ → POIs button (search panel, 3rd button) ──
+            // POIs button: in quick-nav row, 3rd of 4 items, ~55% from left
+            if (_tutorialStep == 2)
+              Positioned(
+                left: screenW * 0.52,
+                top: tp + 155,
+                child: AnimatedBuilder(
+                  animation: _tutorialAnimCtrl,
+                  builder: (_, child) => Transform.translate(
+                    offset: Offset(0, -_tutorialAnimCtrl.value * 16),
+                    child: child,
+                  ),
+                  child: Icon(Icons.keyboard_double_arrow_up_rounded,
+                    color: Colors.orangeAccent, size: 48,
+                    shadows: const [Shadow(color: Colors.black87, blurRadius: 16)]),
+                ),
+              ),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Widget _tutorialBubble(String title, String subtitle) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+      decoration: BoxDecoration(
+        color: const Color(0xF0111111),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: _modeColor.withValues(alpha: 0.4)),
+        boxShadow: [
+          BoxShadow(color: Colors.black.withValues(alpha: 0.4), blurRadius: 20),
+        ],
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+        Text(title, style: const TextStyle(
+          color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold,
+        )),
+        const SizedBox(height: 6),
+        Text(subtitle, style: const TextStyle(
+          color: Colors.white70, fontSize: 14, height: 1.4,
+        )),
+      ]),
+    );
+  }
+
+  String _poiCategoryLabel(String? id) => switch (id) {
+    'fuel' => 'Tankstellen',
+    'workshop' => 'Werkstätten',
+    'biker_shop' => 'Biker Shops',
+    'auto_shop' => 'Auto Shops',
+    'restaurant' => 'Restaurants',
+    'cafe' => 'Cafés',
+    'bank' => 'Banken',
+    'hospital' => 'Krankenhäuser',
+    'grocery' => 'Lebensmittel',
+    'pharmacy' => 'Apotheken',
+    _ => 'POIs',
+  };
+
+  Widget _tutorialDot(int step) {
+    final active = _tutorialStep == step;
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 300),
+      width: active ? 24 : 8,
+      height: 8,
+      decoration: BoxDecoration(
+        color: active ? _modeColor : Colors.white30,
+        borderRadius: BorderRadius.circular(4),
+      ),
+    );
+  }
+
   void dispose() {
+    MapboxRideScreen.pendingPoiFlyTo.removeListener(_onPendingPoiFlyTo);
+    _tutorialAutoTimer?.cancel();
+    _poiErrorTimer?.cancel();
+    _highlightTimer?.cancel();
+    _pulseTimer?.cancel();
+    _removeHighlightLayer();
+    _tutorialAnimCtrl.dispose();
     _saveRideIfMeaningful(); // Persist driven KM for stats
     NavigationState.instance.removeListener(_onGlobalModeChanged);
     _positionSub?.cancel();
     _followTimer?.cancel();
     _speedLimitTimer?.cancel();
     _searchDebounce?.cancel();
-    _searchPanelTimer?.cancel();
     _searchController.dispose();
     _restoreVosk();
     _liveUsersSub?.cancel();
@@ -307,16 +574,16 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
       if (!mounted) return;
       ref.read(isLiveProvider.notifier).set(false);
       setState(() => _gpsLive = false);
-      // Fly back to PLZ position (Userkarte) + show home marker
+      // Fly back to PLZ position (Userkarte) + show home marker + follower markers
       if (_mapboxMap != null && _plzLat != null && _plzLng != null) {
         final authState = ref.read(authNotifierProvider);
         final plz = (authState is Authenticated) ? authState.user.postalCode ?? '' : '';
         _addPlzHomeMarker(_plzLat!, _plzLng!, plz);
+        _loadFollowedUserPlzMarkers(); // Follower-Marker wieder laden
         _mapboxMap!.flyTo(
           CameraOptions(
-            center: Point(coordinates: Position(_plzLng!, _plzLat!)),
-            zoom: 13, bearing: 0, pitch: 0,
-            padding: MbxEdgeInsets(top: 500, left: 0, bottom: 0, right: 0),
+            center: Point(coordinates: Position(10.4, 50.3)),
+            zoom: 5.3, bearing: 0, pitch: 0,
           ),
           MapAnimationOptions(duration: 1000),
         );
@@ -356,9 +623,12 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
       ref.read(isLiveProvider.notifier).set(true);
       setState(() => _gpsLive = true);
       _removePlzHomeMarker(); // Hide home when GPS ON
-      // Fly to live GPS position
-      if (_mapboxMap != null && _gpsReady) {
-        _mapboxMap!.flyTo(
+
+      // Fly to actual GPS position
+      if (_gpsReady) {
+        // GPS stream already delivered a fix — fly immediately
+        debugPrint('[Map] GPS toggle ON — flying to ${_lat.toStringAsFixed(5)}, ${_lng.toStringAsFixed(5)}');
+        _mapboxMap?.flyTo(
           CameraOptions(
             center: Point(coordinates: Position(_lng, _lat)),
             zoom: 16, bearing: 0, pitch: 0,
@@ -366,6 +636,36 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
           ),
           MapAnimationOptions(duration: 1000),
         );
+      } else {
+        // GPS stream hasn't delivered yet — try getCurrentPosition, else wait
+        debugPrint('[Map] GPS not ready yet — trying getCurrentPosition...');
+        try {
+          final freshPos = await geo.Geolocator.getCurrentPosition(
+            locationSettings: const geo.LocationSettings(
+              accuracy: geo.LocationAccuracy.high,
+              timeLimit: Duration(seconds: 10),
+            ),
+          );
+          _lat = freshPos.latitude;
+          _lng = freshPos.longitude;
+          _gpsReady = true;
+          debugPrint('[Map] GPS toggle fresh: ${_lat.toStringAsFixed(5)}, ${_lng.toStringAsFixed(5)}');
+          if (_mapboxMap != null && mounted) {
+            _mapboxMap!.flyTo(
+              CameraOptions(
+                center: Point(coordinates: Position(_lng, _lat)),
+                zoom: 16, bearing: 0, pitch: 0,
+                padding: MbxEdgeInsets(top: _cachedPuckPad, left: 0, bottom: 0, right: 0),
+              ),
+              MapAnimationOptions(duration: 1000),
+            );
+          }
+        } catch (e) {
+          debugPrint('[Map] GPS getCurrentPosition failed: $e — waiting for stream...');
+          // Don't fly to PLZ coords! Wait for GPS stream to deliver a real fix.
+          // The _startGpsStream listener will flyTo when first fix arrives.
+          _waitAndFlyToGps();
+        }
       }
       // Show visibility banner
       if (mounted) {
@@ -382,43 +682,85 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
     }
   }
 
+  /// Wait up to 10s for GPS to become ready, then fly to position.
+  Future<void> _waitAndFlyToGps() async {
+    for (int i = 0; i < 20; i++) {
+      await Future.delayed(const Duration(milliseconds: 500));
+      if (!mounted || !_gpsLive) return; // User toggled off or left screen
+      if (_gpsReady) {
+        _mapboxMap?.flyTo(
+          CameraOptions(
+            center: Point(coordinates: Position(_lng, _lat)),
+            zoom: 16, bearing: 0, pitch: 0,
+            padding: MbxEdgeInsets(top: _cachedPuckPad, left: 0, bottom: 0, right: 0),
+          ),
+          MapAnimationOptions(duration: 1000),
+        );
+        return;
+      }
+    }
+    debugPrint('[Map] GPS not ready after 10s — skipping fly');
+  }
+
   // ═══════════════════════════════════════════════════════════════════════════
   //  PLZ POSITION (Userkarte — Toggle OFF)
   // ═══════════════════════════════════════════════════════════════════════════
 
   void _initPlzPosition() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (!mounted) return;
       final authState = ref.read(authNotifierProvider);
       if (authState is! Authenticated) return;
       final plz = authState.user.postalCode;
       if (plz == null || plz.isEmpty) return;
 
-      final coords = _plzToCoordsSync(plz);
-      if (coords != null) {
-        _plzLat = coords.latitude;
-        _plzLng = coords.longitude;
-        _lat = coords.latitude;
-        _lng = coords.longitude;
-        debugPrint('[Map] PLZ position: $plz → ${coords.latitude}, ${coords.longitude}');
-        // Fly to PLZ if map is ready
-        if (_mapboxMap != null) {
-          _mapboxMap!.flyTo(
-            CameraOptions(
-              center: Point(coordinates: Position(coords.longitude, coords.latitude)),
-              zoom: 13, bearing: 0, pitch: 0,
-              padding: MbxEdgeInsets(top: 500, left: 0, bottom: 0, right: 0),
-            ),
-            MapAnimationOptions(duration: 800),
-          );
-          // Add house marker at PLZ position
-          _addPlzHomeMarker(coords.latitude, coords.longitude, plz);
-          // Load followed users PLZ markers
-          _loadFollowedUserPlzMarkers();
-        }
-        if (mounted) setState(() => _gpsReady = true);
+      // 1. Quick sync approximation for instant display
+      final syncCoords = _plzToCoordsSync(plz);
+      if (syncCoords != null) {
+        _plzLat = syncCoords.latitude;
+        _plzLng = syncCoords.longitude;
+        _lat = syncCoords.latitude;
+        _lng = syncCoords.longitude;
+        debugPrint('[Map] PLZ sync: $plz → ${syncCoords.latitude}, ${syncCoords.longitude}');
+        _flyToPlzAndShowMarker(plz);
+      }
+
+      // 2. Async Photon for exact coordinates (overrides sync if successful)
+      final exactCoords = await _plzToCoordsByPhoton(plz);
+      if (exactCoords != null && mounted) {
+        _plzLat = exactCoords.latitude;
+        _plzLng = exactCoords.longitude;
+        _lat = exactCoords.latitude;
+        _lng = exactCoords.longitude;
+        debugPrint('[Map] PLZ Photon (exakt): $plz → ${exactCoords.latitude}, ${exactCoords.longitude}');
+        // Nur Marker-Position aktualisieren, kein erneuter Fly/Reload
+        _addPlzHomeMarker(_plzLat!, _plzLng!, plz);
       }
     });
+  }
+
+  void _flyToPlzAndShowMarker(String plz) {
+    if (_mapboxMap == null || _plzLat == null || _plzLng == null) return;
+    // DACH-Übersicht: ganz Deutschland + Schweiz + ein wenig Italien
+    _mapboxMap!.flyTo(
+      CameraOptions(
+        center: Point(coordinates: Position(10.4, 50.3)),
+        zoom: 5.3, bearing: 0, pitch: 0,
+      ),
+      MapAnimationOptions(duration: 800),
+    );
+    _addPlzHomeMarker(_plzLat!, _plzLng!, plz);
+    _loadFollowedUserPlzMarkers();
+    if (mounted) setState(() {});
+  }
+
+  /// Check if user has saved a Zuhause address (for pulse hint on button)
+  Future<void> _checkHomeSaved() async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getString('nav_home');
+    if (mounted && saved == null) {
+      setState(() => _homeSaved = false);
+    }
   }
 
   /// Sync PLZ → LatLng for German postal codes (offline, instant).
@@ -427,6 +769,8 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
     final trimmed = plz.trim();
     final code = int.tryParse(trimmed.replaceAll(RegExp(r'[^0-9]'), ''));
     if (code == null) return null;
+
+    // Deutsche PLZ (5-stellig)
     if (trimmed.length == 5 && code >= 1000 && code <= 99999) {
       final region = code ~/ 10000;
       return switch (region) {
@@ -442,6 +786,82 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
         9 => LatLng(49.45 + (code % 10000) * 0.00004, 11.08 + (code % 1000) * 0.0002),
         _ => const LatLng(51.16, 10.45),
       };
+    }
+
+    // Schweizer PLZ (4-stellig, 1000-9999)
+    if (trimmed.length == 4 && code >= 1000 && code <= 9999) {
+      final region = code ~/ 1000;
+      return switch (region) {
+        1 => LatLng(46.52 + (code % 1000) * 0.0005, 6.63 + (code % 1000) * 0.0005),  // Westschweiz
+        2 => LatLng(47.05 + (code % 1000) * 0.0004, 6.95 + (code % 1000) * 0.0004),  // Jura/Biel
+        3 => LatLng(46.85 + (code % 1000) * 0.0005, 7.30 + (code % 1000) * 0.0004),  // Bern
+        4 => LatLng(47.45 + (code % 1000) * 0.0003, 7.55 + (code % 1000) * 0.0003),  // Basel
+        5 => LatLng(47.35 + (code % 1000) * 0.0003, 7.90 + (code % 1000) * 0.0004),  // Aargau
+        6 => LatLng(46.95 + (code % 1000) * 0.0004, 8.20 + (code % 1000) * 0.0005),  // Zentralschweiz
+        7 => LatLng(46.70 + (code % 1000) * 0.0004, 9.50 + (code % 1000) * 0.0005),  // Graubünden
+        8 => LatLng(47.30 + (code % 1000) * 0.0003, 8.40 + (code % 1000) * 0.0004),  // Zürich
+        9 => LatLng(47.35 + (code % 1000) * 0.0003, 9.20 + (code % 1000) * 0.0004),  // Ostschweiz
+        _ => const LatLng(46.95, 7.45),  // Bern Default
+      };
+    }
+
+    // Österreichische PLZ (4-stellig, 1000-9999) — gleiche Struktur wie CH
+    // aber andere Regionen → Photon-Fallback nutzen
+    return null;
+  }
+
+  /// Exakte PLZ-Geocodierung via Photon API (für CH/AT/DE — alle Länder)
+  /// Nutzt Location-Bias aus Sync-Koordinaten, um DACH-Region zu priorisieren.
+  Future<LatLng?> _plzToCoordsByPhoton(String plz) async {
+    try {
+      final trimmed = plz.trim();
+      // Country suffix für eindeutigen Treffer
+      String country = '';
+      if (trimmed.length == 5) {
+        country = ' Deutschland';
+      } else if (trimmed.length == 4) {
+        final code = int.tryParse(trimmed) ?? 0;
+        // Schweiz: 1000-9999, Österreich: 1010-9992
+        // Bias via sync-Koordinaten entscheidet
+        country = (_plzLat != null && _plzLat! > 47.0 && _plzLng != null && _plzLng! < 10.5)
+            ? ' Schweiz' : ' Österreich';
+      }
+
+      // Location-Bias: Sync-Koordinaten oder Mitte DACH
+      final biasLat = _plzLat ?? 47.5;
+      final biasLon = _plzLng ?? 9.0;
+
+      final query = Uri.encodeComponent('$trimmed$country');
+      final url = Uri.parse(
+        'https://photon.komoot.io/api/?q=$query&limit=3&lang=de&lat=$biasLat&lon=$biasLon',
+      );
+      final resp = await http.get(url, headers: {
+        'User-Agent': 'Motorinu-App/1.6 (Android; contact@bikergram.com)',
+      }).timeout(const Duration(seconds: 5));
+      if (resp.statusCode == 200) {
+        final data = jsonDecode(resp.body) as Map<String, dynamic>;
+        final features = data['features'] as List? ?? [];
+        // Find best match: prefer results in DACH region (lat 45-55, lon 5-17)
+        for (final f in features) {
+          final coords = f['geometry']['coordinates'] as List;
+          final lat = (coords[1] as num).toDouble();
+          final lon = (coords[0] as num).toDouble();
+          if (lat >= 45.0 && lat <= 55.0 && lon >= 5.0 && lon <= 17.0) {
+            debugPrint('[PLZ] Photon: $trimmed$country → $lat, $lon');
+            return LatLng(lat, lon);
+          }
+        }
+        // Fallback: first result if any
+        if (features.isNotEmpty) {
+          final coords = features[0]['geometry']['coordinates'] as List;
+          final lat = (coords[1] as num).toDouble();
+          final lon = (coords[0] as num).toDouble();
+          debugPrint('[PLZ] Photon fallback: $trimmed → $lat, $lon');
+          return LatLng(lat, lon);
+        }
+      }
+    } catch (e) {
+      debugPrint('[PLZ] Photon error: $e');
     }
     return null;
   }
@@ -565,12 +985,12 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
 
   void _removePlzHomeMarker() {
     _plzAnnotationManager?.deleteAll();
-    _followedPlzManager?.deleteAll();
+    _removeFollowedPlzLayers();
   }
 
-  // ── FOLLOWED USERS PLZ MARKERS ──
-  PointAnnotationManager? _followedPlzManager;
-  final Map<String, String> _followedPlzMarkerMap = {};
+  // ── FOLLOWED USERS PLZ MARKERS (GeoJsonSource + Clustering) ──
+  bool _followedPlzLayerInitialized = false;
+  final Map<String, Map<String, dynamic>> _followedUserProfiles = {};
 
   Future<void> _loadFollowedUserPlzMarkers() async {
     if (_mapboxMap == null) return;
@@ -599,53 +1019,312 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
       final profiles = profilesRes as List;
       debugPrint('[FollowedPLZ] ${profiles.length} followed profiles loaded');
 
-      _followedPlzManager ??= await _mapboxMap!.annotations
-          .createPointAnnotationManager(id: 'followed-plz');
-      await _followedPlzManager!.deleteAll();
-      _followedPlzMarkerMap.clear();
+      // Clean up old layers
+      await _removeFollowedPlzLayers();
+      _followedUserProfiles.clear();
 
-      // Tap → open profile
-      _followedPlzManager!.addOnPointAnnotationClickListener(
-        _UserMarkerClickListener(
-          markerUserIdMap: _followedPlzMarkerMap,
-          onUserTapped: (userId) {
-            if (mounted) context.push('/profile/$userId');
-          },
-        ),
-      );
+      final style = _mapboxMap!.style;
+      final features = <String>[];
+      // Cache für Photon-Ergebnisse pro PLZ (um nicht mehrfach gleiche PLZ abzufragen)
+      final plzCache = <String, LatLng?>{};
 
       for (final p in profiles) {
         final plz = p['postal_code'] as String?;
         if (plz == null || plz.isEmpty) continue;
 
-        final coords = _plzToCoordsSync(plz);
-        if (coords == null) continue;
+        final userId = p['id'] as String;
+        final username = p['username'] as String? ?? '?';
+        final avatarUrl = p['avatar_url'] as String?;
 
-        // Build marker icon with avatar
-        final iconBytes = await _buildFollowedMarkerIcon(
-          p['avatar_url'] as String?,
-          p['username'] as String? ?? '?',
-        );
+        // Exakte Koordinaten via Photon (gecacht pro PLZ)
+        LatLng? coords;
+        if (plzCache.containsKey(plz)) {
+          coords = plzCache[plz];
+        } else {
+          coords = await _plzToCoordsByPhoton(plz);
+          coords ??= _plzToCoordsSync(plz);
+          plzCache[plz] = coords;
+          // Kurze Pause um Photon nicht zu überlasten
+          await Future.delayed(const Duration(milliseconds: 80));
+        }
+        if (coords == null || !mounted) continue;
+
+        // Same-PLZ Offset: Wenn mehrere User gleiche PLZ haben → kleiner Kreis
+        final sameCount = features.where((f) => f.contains('"plz":"$plz"')).length;
+        double lat = coords.latitude;
+        double lng = coords.longitude;
+        if (sameCount > 0) {
+          final angle = sameCount * (2 * math.pi / 8);
+          lat += 0.045 * math.cos(angle);  // ~5km Spreizung
+          lng += 0.055 * math.sin(angle);
+        }
+
+        _followedUserProfiles[userId] = Map<String, dynamic>.from(p);
+
+        // Build and register custom icon image
+        final iconBytes = await _buildFollowedMarkerIcon(avatarUrl, username);
         if (!mounted) return;
 
-        final annotation = await _followedPlzManager!.create(PointAnnotationOptions(
-          geometry: Point(coordinates: Position(coords.longitude, coords.latitude)),
-          image: iconBytes,
-          iconSize: 1.0,
-          iconAnchor: IconAnchor.CENTER,
-          textField: p['username'] as String? ?? '',
-          textSize: 10,
-          textColor: Colors.white.value.toInt(),
-          textHaloColor: Colors.black.value.toInt(),
-          textHaloWidth: 1.2,
-          textOffset: [0.0, 3.5],
-        ));
-        _followedPlzMarkerMap[annotation.id] = p['id'] as String;
+        final imageId = 'followed-avatar-$userId';
+        try {
+          await style.addStyleImage(
+            imageId, 2.0,
+            MbxImage(width: 100, height: 100, data: iconBytes),
+            false, [], [], null,
+          );
+        } catch (_) {}
+
+        // GeoJSON Feature
+        final escapedUsername = username.replaceAll('"', '\\"').replaceAll('\n', ' ');
+        features.add(
+          '{"type":"Feature",'
+          '"properties":{"userId":"$userId","username":"$escapedUsername","icon":"$imageId","plz":"$plz"},'
+          '"geometry":{"type":"Point","coordinates":[$lng,$lat]}}'
+        );
       }
-      debugPrint('[FollowedPLZ] Drew ${_followedPlzMarkerMap.length} markers');
+
+      if (features.isEmpty) return;
+      if (!mounted) return;
+
+      // GeoJSON Source mit Clustering
+      final geoJson = '{"type":"FeatureCollection","features":[${features.join(',')}]}';
+      await style.addSource(GeoJsonSource(
+        id: 'followed-plz-source',
+        data: geoJson,
+        cluster: true,
+        clusterRadius: 50,
+        clusterMaxZoom: 16,
+        clusterMinPoints: 2,
+      ));
+
+      final modeColorInt = _modeColor.value.toInt();
+
+      // Layer 1: Cluster circles
+      await style.addLayer(CircleLayer(
+        id: 'followed-plz-cluster-circles',
+        sourceId: 'followed-plz-source',
+        circleColor: modeColorInt,
+        circleRadius: 22.0,
+        circleStrokeColor: 0xFFFFFFFF,
+        circleStrokeWidth: 3.0,
+        circleOpacity: 0.85,
+      ));
+      await style.setStyleLayerProperty(
+        'followed-plz-cluster-circles', 'filter', '["has", "point_count"]',
+      );
+
+      // Layer 2: Cluster count text
+      await style.addLayer(SymbolLayer(
+        id: 'followed-plz-cluster-count',
+        sourceId: 'followed-plz-source',
+        textColor: 0xFFFFFFFF,
+        textSize: 14.0,
+        textAllowOverlap: true,
+      ));
+      await style.setStyleLayerProperty(
+        'followed-plz-cluster-count', 'filter', '["has", "point_count"]',
+      );
+      await style.setStyleLayerProperty(
+        'followed-plz-cluster-count', 'text-field', '["get", "point_count_abbreviated"]',
+      );
+
+      // Layer 3: Individual user icons
+      await style.addLayer(SymbolLayer(
+        id: 'followed-plz-user-icons',
+        sourceId: 'followed-plz-source',
+        iconSize: 0.5,
+        iconAllowOverlap: true,
+        iconAnchor: IconAnchor.CENTER,
+      ));
+      await style.setStyleLayerProperty(
+        'followed-plz-user-icons', 'filter', '["!", ["has", "point_count"]]',
+      );
+      await style.setStyleLayerProperty(
+        'followed-plz-user-icons', 'icon-image', '["get", "icon"]',
+      );
+
+      // Layer 4: Username labels
+      await style.addLayer(SymbolLayer(
+        id: 'followed-plz-user-labels',
+        sourceId: 'followed-plz-source',
+        textSize: 10.0,
+        textColor: 0xFFFFFFFF,
+        textHaloColor: 0xFF000000,
+        textHaloWidth: 1.2,
+        textAnchor: TextAnchor.TOP,
+        textAllowOverlap: true,
+      ));
+      await style.setStyleLayerProperty(
+        'followed-plz-user-labels', 'filter', '["!", ["has", "point_count"]]',
+      );
+      await style.setStyleLayerProperty(
+        'followed-plz-user-labels', 'text-field', '["get", "username"]',
+      );
+      await style.setStyleLayerProperty(
+        'followed-plz-user-labels', 'text-offset', '[0, 3.5]',
+      );
+
+      _followedPlzLayerInitialized = true;
+      debugPrint('[FollowedPLZ] Drew ${features.length} markers with clustering');
+
+      // Kein automatischer Camera-Fit — DACH-Übersicht bleibt bestehen
     } catch (e) {
       debugPrint('[FollowedPLZ] Error: $e');
     }
+  }
+
+  /// Berechnet Bounding Box aller Follower + eigene Position → Camera fitten
+  void _fitCameraToAllMarkers(List<String> geoFeatures) {
+    double minLat = 90, maxLat = -90, minLng = 180, maxLng = -180;
+
+    // Eigene Position einbeziehen
+    if (_plzLat != null && _plzLng != null) {
+      minLat = math.min(minLat, _plzLat!);
+      maxLat = math.max(maxLat, _plzLat!);
+      minLng = math.min(minLng, _plzLng!);
+      maxLng = math.max(maxLng, _plzLng!);
+    }
+
+    // Alle Follower-Positionen aus den GeoJSON-Features extrahieren
+    final coordsRegex = RegExp(r'"coordinates":\[([-\d.]+),([-\d.]+)\]');
+    for (final f in geoFeatures) {
+      final match = coordsRegex.firstMatch(f);
+      if (match != null) {
+        final lng = double.tryParse(match.group(1)!) ?? 0;
+        final lat = double.tryParse(match.group(2)!) ?? 0;
+        minLat = math.min(minLat, lat);
+        maxLat = math.max(maxLat, lat);
+        minLng = math.min(minLng, lng);
+        maxLng = math.max(maxLng, lng);
+      }
+    }
+
+    if (minLat >= maxLat || minLng >= maxLng) return;
+
+    // Padding: oben mehr (für Suchleiste), unten mehr (für Buttons)
+    _mapboxMap!.flyTo(
+      CameraOptions(
+        center: Point(coordinates: Position(
+          (minLng + maxLng) / 2,
+          (minLat + maxLat) / 2,
+        )),
+        // Zoom berechnen basierend auf Spread
+        zoom: _zoomForBounds(maxLat - minLat, maxLng - minLng),
+        bearing: 0, pitch: 0,
+        padding: MbxEdgeInsets(top: 120, left: 30, bottom: 180, right: 30),
+      ),
+      MapAnimationOptions(duration: 1200),
+    );
+  }
+
+  /// Berechnet Zoom-Level für gegebenen Lat/Lng-Spread
+  double _zoomForBounds(double latSpread, double lngSpread) {
+    final spread = math.max(latSpread, lngSpread);
+    if (spread > 15) return 3.0;
+    if (spread > 10) return 4.0;
+    if (spread > 5) return 5.0;
+    if (spread > 2) return 6.0;
+    if (spread > 1) return 7.0;
+    if (spread > 0.5) return 8.0;
+    if (spread > 0.2) return 10.0;
+    if (spread > 0.05) return 12.0;
+    return 13.0;
+  }
+
+  /// Zeigt Bottom Sheet mit den Usern eines Clusters
+  void _showClusterUsersSheet(List<String> userIds) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: _isDark ? const Color(0xFF1A1A2E) : Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) {
+        final bp = MediaQuery.of(ctx).padding.bottom;
+        return Padding(
+          padding: EdgeInsets.only(left: 16, right: 16, top: 16, bottom: bp + 16),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            // Handle
+            Container(
+              width: 40, height: 4,
+              decoration: BoxDecoration(
+                color: _textMuted.withValues(alpha: 0.3),
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(height: 12),
+            // Title
+            Row(children: [
+              Icon(Icons.group_rounded, color: _modeColor, size: 22),
+              const SizedBox(width: 8),
+              Text('${userIds.length} Biker in der Nähe', style: TextStyle(
+                color: _textPrimary, fontSize: 17, fontWeight: FontWeight.bold,
+              )),
+            ]),
+            const SizedBox(height: 12),
+            // User list
+            ...userIds.map((uid) {
+              final profile = _followedUserProfiles[uid];
+              if (profile == null) return const SizedBox.shrink();
+              final username = profile['username'] as String? ?? '?';
+              final avatarUrl = profile['avatar_url'] as String?;
+              final plz = profile['postal_code'] as String? ?? '';
+              return InkWell(
+                borderRadius: BorderRadius.circular(12),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  context.push('/profile/$uid');
+                },
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+                  child: Row(children: [
+                    // Avatar mit Online-Status Ring (grün/rot)
+                    OnlineStatusAvatar(
+                      userId: uid,
+                      avatarUrl: avatarUrl,
+                      size: 48,
+                      fallbackIcon: Text(username[0].toUpperCase(), style: TextStyle(
+                        color: _modeColor, fontSize: 18, fontWeight: FontWeight.bold)),
+                    ),
+                    const SizedBox(width: 12),
+                    // Name + PLZ
+                    Expanded(child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(username, style: TextStyle(
+                          color: _textPrimary, fontSize: 15, fontWeight: FontWeight.w600,
+                        )),
+                        if (plz.isNotEmpty)
+                          Text('PLZ $plz', style: TextStyle(
+                            color: _textMuted, fontSize: 12,
+                          )),
+                      ],
+                    )),
+                    // Arrow
+                    Icon(Icons.chevron_right_rounded, color: _iconMuted, size: 22),
+                  ]),
+                ),
+              );
+            }),
+          ]),
+        );
+      },
+    );
+  }
+
+  Future<void> _removeFollowedPlzLayers() async {
+    if (_mapboxMap == null) return;
+    final style = _mapboxMap!.style;
+    for (final id in [
+      'followed-plz-user-labels',
+      'followed-plz-user-icons',
+      'followed-plz-cluster-count',
+      'followed-plz-cluster-circles',
+    ]) {
+      try { await style.removeStyleLayer(id); } catch (_) {}
+    }
+    try { await style.removeStyleSource('followed-plz-source'); } catch (_) {}
+    _followedPlzLayerInitialized = false;
   }
 
   Future<Uint8List> _buildFollowedMarkerIcon(String? avatarUrl, String username) async {
@@ -717,14 +1396,28 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
 
   Future<void> _initGps() async {
     try {
+      // Ensure GPS permission before trying position
+      var perm = await geo.Geolocator.checkPermission();
+      if (perm == geo.LocationPermission.denied) {
+        perm = await geo.Geolocator.requestPermission();
+      }
+      if (perm == geo.LocationPermission.deniedForever ||
+          perm == geo.LocationPermission.denied) {
+        debugPrint('[GPS] Permission denied: $perm — starting stream anyway');
+        _startGpsStream(); // Stream will deliver once permission is granted
+        return;
+      }
+
       final pos = await geo.Geolocator.getCurrentPosition(
         locationSettings: const geo.LocationSettings(
           accuracy: geo.LocationAccuracy.bestForNavigation,
+          timeLimit: Duration(seconds: 15),
         ),
       );
       _lat = pos.latitude;
       _lng = pos.longitude;
       _gpsReady = true;
+      debugPrint('[GPS] Init success: ${_lat.toStringAsFixed(5)}, ${_lng.toStringAsFixed(5)}');
       _startGpsStream();
       _loadBlitzers();
       _startSpeedLimitPolling();
@@ -739,11 +1432,12 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
           ),
           MapAnimationOptions(duration: 800),
         );
-        _loadAllPoisOnMap();
       }
       if (mounted) setState(() {});
     } catch (e) {
-      debugPrint('[GPS] Init error: $e');
+      debugPrint('[GPS] Init error: $e — starting stream anyway');
+      // Always start stream even if initial position fails
+      _startGpsStream();
     }
   }
 
@@ -755,6 +1449,26 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
       ),
     ).listen((geo.Position pos) {
       _lastGpsTime = DateTime.now();
+
+      // ── First GPS fix: mark gpsReady and fly if GPS toggle is ON ──
+      if (!_gpsReady) {
+        _lat = pos.latitude;
+        _lng = pos.longitude;
+        _gpsReady = true;
+        debugPrint('[GPS] Stream: first fix ${pos.latitude.toStringAsFixed(5)}, ${pos.longitude.toStringAsFixed(5)}');
+        if (_gpsLive && _mapboxMap != null && mounted) {
+          _mapboxMap!.flyTo(
+            CameraOptions(
+              center: Point(coordinates: Position(_lng, _lat)),
+              zoom: 16, bearing: 0, pitch: 0,
+              padding: MbxEdgeInsets(top: _cachedPuckPad, left: 0, bottom: 0, right: 0),
+            ),
+            MapAnimationOptions(duration: 1000),
+          );
+        }
+        if (mounted) setState(() {});
+      }
+
       // ── Position drift filter: lock position when standing still ──
       // GPS drifts 50-200m in urban areas when stationary (multipath)
       final rawKmh = (pos.speed >= 0 && pos.accuracy < 30)
@@ -2154,9 +2868,7 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
     _setNavPuckMode(false); // Restore native puck
     NavigationState.instance.stopNavigation(); // Show TopBar + BottomNav again
     _ttsSpeak('Navigation beendet.');
-    // Panel nach Navigationsende sofort wieder einblenden
-    _searchPanelTimer?.cancel();
-    _searchPanelHidden = false;
+    _removeBlitzerFromMap(); // Blitzer-Punkte nur während Navigation sichtbar
     setState(() {});
   }
 
@@ -2170,9 +2882,6 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
     _setNavPuckMode(false); // Restore native puck
     _followTimer?.cancel();
     NavigationState.instance.stopNavigation(); // Show TopBar + BottomNav again
-    // Panel nach Route-Abbruch sofort wieder einblenden
-    _searchPanelTimer?.cancel();
-    _searchPanelHidden = false;
     // Remove route layers + destination marker
     if (_mapboxMap != null) {
       for (int i = 0; i < 5; i++) {
@@ -2565,12 +3274,100 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
   void _addUserBlitzerMarker(String label) => _addUserReportMarker('mobile', label);
 
   // ── Map Tap → check if user tapped on a marker (own report OR OSM blitzer) ──
-  void _onMapTap(MapContentGestureContext ctx) {
+  /// Tap auf Cluster → Zoom erweitern, Tap auf User → Profil öffnen
+  Future<bool> _handleFollowedPlzTap(MapContentGestureContext ctx) async {
+    if (_mapboxMap == null) return false;
+    final touchPos = ctx.touchPosition;
+    final geometry = RenderedQueryGeometry.fromScreenBox(
+      ScreenBox(
+        min: ScreenCoordinate(x: touchPos.x - 30, y: touchPos.y - 30),
+        max: ScreenCoordinate(x: touchPos.x + 30, y: touchPos.y + 30),
+      ),
+    );
+
+    // 1. Check cluster circles → Zoom in
+    try {
+      final clusterFeatures = await _mapboxMap!.queryRenderedFeatures(
+        geometry,
+        RenderedQueryOptions(layerIds: ['followed-plz-cluster-circles']),
+      );
+      if (clusterFeatures.isNotEmpty && clusterFeatures.first != null) {
+        final feature = clusterFeatures.first!.queriedFeature.feature;
+        final props = feature['properties'] as Map?;
+        if (props != null && props.containsKey('point_count')) {
+          // Ganzes Feature an Mapbox übergeben (nicht nur properties!)
+          final featureMap = feature.cast<String?, Object?>();
+          final geom = feature['geometry'] as Map?;
+          if (geom == null) return true;
+          final coords = geom['coordinates'] as List;
+          final clusterLng = (coords[0] as num).toDouble();
+          final clusterLat = (coords[1] as num).toDouble();
+
+          try {
+            final expansionResult = await _mapboxMap!.getGeoJsonClusterExpansionZoom(
+              'followed-plz-source', featureMap,
+            );
+            final targetZoom = (expansionResult.value as num?)?.toDouble() ?? 14.0;
+            debugPrint('[FollowedPLZ] Cluster tap → zoom to $targetZoom');
+            _mapboxMap!.flyTo(
+              CameraOptions(
+                center: Point(coordinates: Position(clusterLng, clusterLat)),
+                zoom: targetZoom + 0.5,
+              ),
+              MapAnimationOptions(duration: 500),
+            );
+          } catch (e) {
+            debugPrint('[FollowedPLZ] Expansion zoom error: $e, zooming +2');
+            // Fallback: einfach +2 Zoom-Stufen
+            final cam = await _mapboxMap!.getCameraState();
+            _mapboxMap!.flyTo(
+              CameraOptions(
+                center: Point(coordinates: Position(clusterLng, clusterLat)),
+                zoom: cam.zoom + 2,
+              ),
+              MapAnimationOptions(duration: 500),
+            );
+          }
+          return true;
+        }
+      }
+    } catch (e) {
+      debugPrint('[FollowedPLZ] Cluster query error: $e');
+    }
+
+    // 2. Check individual user icons
+    try {
+      final userFeatures = await _mapboxMap!.queryRenderedFeatures(
+        geometry,
+        RenderedQueryOptions(layerIds: ['followed-plz-user-icons']),
+      );
+      if (userFeatures.isNotEmpty && userFeatures.first != null) {
+        final props = userFeatures.first!.queriedFeature.feature['properties'] as Map?;
+        final userId = props?['userId'] as String?;
+        if (userId != null && mounted) {
+          context.push('/profile/$userId');
+          return true;
+        }
+      }
+    } catch (e) {
+      debugPrint('[FollowedPLZ] User query error: $e');
+    }
+
+    return false;
+  }
+
+  void _onMapTap(MapContentGestureContext ctx) async {
     final coord = ctx.point.coordinates;
     final tapLat = coord.lat.toDouble();
     final tapLng = coord.lng.toDouble();
 
-    // 0. Check if tap is on/near the puck → open profile
+    // 0. Check followed-user PLZ markers (cluster or individual)
+    if (_followedPlzLayerInitialized) {
+      final handled = await _handleFollowedPlzTap(ctx);
+      if (handled) return;
+    }
+
+    // 0b. Check if tap is on/near the puck → open profile
     final puckLat = _isNavigating ? _snapLat : _lat;
     final puckLng = _isNavigating ? _snapLng : _lng;
     final puckDist = geo.Geolocator.distanceBetween(tapLat, tapLng, puckLat, puckLng);
@@ -2614,6 +3411,40 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
 
     if (closestBlitzer != null) {
       _showBlitzerInfoSheet(closestBlitzer, blitzerDist);
+      return;
+    }
+
+    // 3. Check POI markers
+    PoiResult? closestPoi;
+    double poiDist = 150; // tap radius in meters
+    for (final entry in _poiResults.entries) {
+      for (final poi in entry.value) {
+        final d = geo.Geolocator.distanceBetween(tapLat, tapLng, poi.lat, poi.lon);
+        if (d < poiDist) {
+          poiDist = d;
+          closestPoi = poi;
+        }
+      }
+    }
+    if (closestPoi != null) {
+      final catColor = switch (closestPoi.type) {
+        'fuel' => const Color(0xFFFF9800),
+        'workshop' => const Color(0xFF9C27B0),
+        'biker_shop' => const Color(0xFFE53935),
+        'auto_shop' => const Color(0xFF2196F3),
+        'restaurant' => const Color(0xFF4CAF50),
+        'cafe' => const Color(0xFF795548),
+        'bank' => const Color(0xFF607D8B),
+        'hospital' => const Color(0xFFE91E63),
+        'grocery' => const Color(0xFF8BC34A),
+        'pharmacy' => const Color(0xFF00BCD4),
+        _ => _modeColor,
+      };
+      // Suchleiste ausblenden, damit POI sichtbar wird
+      setState(() => _searchPanelHidden = true);
+      _flyToPoiAndHighlight(closestPoi, catColor, withSheet: true);
+      _showPoiDetailSheet(closestPoi);
+      return;
     }
   }
 
@@ -2751,6 +3582,608 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
           ]),
         ),
       ),
+    );
+  }
+
+  /// Show detail bottom sheet when user taps a POI marker on the map.
+  void _showPoiDetailSheet(PoiResult poi) async {
+    // Recalculate distance from current position
+    final distToMe = geo.Geolocator.distanceBetween(_lat, _lng, poi.lat, poi.lon);
+    final distText = distToMe < 1000
+        ? '${distToMe.round()} m'
+        : '${(distToMe / 1000).toStringAsFixed(1)} km';
+
+    // Category icon + color
+    final catIcon = switch (poi.type) {
+      'fuel' => Icons.local_gas_station_rounded,
+      'workshop' => Icons.build_rounded,
+      'biker_shop' => Icons.two_wheeler_rounded,
+      'auto_shop' => Icons.directions_car_rounded,
+      'restaurant' => Icons.restaurant_rounded,
+      'cafe' => Icons.coffee_rounded,
+      'bank' => Icons.account_balance_rounded,
+      'hospital' => Icons.local_hospital_rounded,
+      'grocery' => Icons.shopping_cart_rounded,
+      'pharmacy' => Icons.local_pharmacy_rounded,
+      _ => Icons.place_rounded,
+    };
+    final catColor = switch (poi.type) {
+      'fuel' => const Color(0xFFFF9800),
+      'workshop' => const Color(0xFF9C27B0),
+      'biker_shop' => const Color(0xFFE53935),
+      'auto_shop' => const Color(0xFF2196F3),
+      'restaurant' => const Color(0xFF4CAF50),
+      'cafe' => const Color(0xFF795548),
+      'bank' => const Color(0xFF607D8B),
+      'hospital' => const Color(0xFFE91E63),
+      'grocery' => const Color(0xFF8BC34A),
+      'pharmacy' => const Color(0xFF00BCD4),
+      _ => _modeColor,
+    };
+    final catLabel = switch (poi.type) {
+      'fuel' => 'Tankstelle',
+      'workshop' => 'Werkstatt',
+      'biker_shop' => 'Biker Shop',
+      'auto_shop' => 'Auto Shop',
+      'restaurant' => 'Restaurant',
+      'cafe' => 'Café',
+      'bank' => 'Bank',
+      'hospital' => 'Krankenhaus',
+      'grocery' => 'Lebensmittel',
+      'pharmacy' => 'Apotheke',
+      _ => 'POI',
+    };
+
+    // Load rating from Supabase
+    double? avgRating;
+    int ratingCount = 0;
+    try {
+      final ratings = await Supabase.instance.client
+          .from('poi_ratings')
+          .select('rating')
+          .eq('poi_name', poi.name)
+          .eq('poi_type', poi.type);
+      if (ratings is List && ratings.isNotEmpty) {
+        ratingCount = ratings.length;
+        final sum = ratings.fold<double>(0, (s, r) => s + ((r['rating'] as num?)?.toDouble() ?? 0));
+        avgRating = sum / ratingCount;
+      }
+    } catch (_) {}
+
+    if (!mounted) return;
+
+    // Suchleiste ausblenden damit POI mittig sichtbar ist
+    setState(() => _searchPanelHidden = true);
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: _isDark ? const Color(0xF0111111) : Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) {
+        // Format brand: replace semicolons with comma+space
+        final brandText = poi.brand?.replaceAll(';', ', ');
+        final bp = MediaQuery.of(ctx).padding.bottom;
+        return Padding(
+          padding: EdgeInsets.only(left: 20, right: 20, top: 16, bottom: bp + 70),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+              // Handle
+              Container(
+                width: 40, height: 4,
+                margin: const EdgeInsets.only(bottom: 16),
+                decoration: BoxDecoration(
+                  color: _textPrimary.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              // Header: Icon + Name + Category
+              Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Container(
+                  width: 48, height: 48,
+                  decoration: BoxDecoration(
+                    color: _modeColor.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Icon(catIcon, color: _modeColor, size: 26),
+                ),
+                const SizedBox(width: 14),
+                Expanded(child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(poi.name, style: TextStyle(
+                      color: _textPrimary,
+                      fontSize: 18, fontWeight: FontWeight.bold,
+                    )),
+                    const SizedBox(height: 2),
+                    Row(children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: _modeColor.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(catLabel, style: TextStyle(
+                          color: _modeColor, fontSize: 12, fontWeight: FontWeight.w600,
+                        )),
+                      ),
+                      const SizedBox(width: 8),
+                      Icon(Icons.near_me_rounded, size: 14, color: _modeColor),
+                      const SizedBox(width: 3),
+                      Text(distText, style: TextStyle(
+                        color: _modeColor, fontSize: 14, fontWeight: FontWeight.w600,
+                      )),
+                    ]),
+                  ],
+                )),
+              ]),
+
+              const SizedBox(height: 16),
+
+              // Scrollable info rows
+              Flexible(child: SingleChildScrollView(child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (poi.address != null && poi.address!.isNotEmpty)
+                    _poiInfoRow(Icons.location_on_rounded, poi.address!, _isDark),
+                  if (poi.openingHours != null && poi.openingHours!.isNotEmpty)
+                    _poiInfoRow(Icons.access_time_rounded, poi.openingHours!, _isDark),
+                  if (poi.phone != null && poi.phone!.isNotEmpty)
+                    _poiInfoRow(Icons.phone_rounded, poi.phone!, _isDark, isTappable: true),
+                  if (brandText != null && brandText.isNotEmpty)
+                    _poiInfoRow(Icons.business_rounded, brandText, _isDark),
+                  if (avgRating != null)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: Row(children: [
+                        const Icon(Icons.star_rounded, size: 18, color: Colors.amber),
+                        const SizedBox(width: 8),
+                        Text(
+                          '${avgRating.toStringAsFixed(1)} ($ratingCount ${ratingCount == 1 ? 'Bewertung' : 'Bewertungen'})',
+                          style: TextStyle(
+                            color: _textSecondary,
+                            fontSize: 14,
+                          ),
+                        ),
+                      ]),
+                    ),
+                ],
+              ))),
+
+              const SizedBox(height: 14),
+
+              // Buttons: Karte + Navi + Rate + Teilen
+              Row(children: [
+                // Auf Karte zeigen
+                Expanded(child: ElevatedButton.icon(
+                  icon: const Icon(Icons.map_rounded, size: 18),
+                  label: const Text('Karte', style: TextStyle(fontSize: 12)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _cardBg,
+                    foregroundColor: _textPrimary,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      side: BorderSide(color: _cardBorder),
+                    ),
+                    elevation: 0,
+                  ),
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    _flyToPoiAndHighlight(poi, catColor);
+                  },
+                )),
+                const SizedBox(width: 6),
+                // Navigieren
+                Expanded(child: ElevatedButton.icon(
+                  icon: const Icon(Icons.navigation_rounded, size: 18),
+                  label: const Text('Navi', style: TextStyle(fontSize: 12)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _modeColor,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    _selectDestination(poi.lat, poi.lon, poi.name);
+                  },
+                )),
+                const SizedBox(width: 6),
+                // Bewerten
+                Expanded(child: ElevatedButton.icon(
+                  icon: const Icon(Icons.star_rounded, size: 18),
+                  label: const Text('Rate', style: TextStyle(fontSize: 12)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _cardBg,
+                    foregroundColor: _textPrimary,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      side: BorderSide(color: _cardBorder),
+                    ),
+                    elevation: 0,
+                  ),
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    _showPoiRatingSheet(poi);
+                  },
+                )),
+                const SizedBox(width: 6),
+                // Teilen → WhatsApp, Facebook, Feed, etc.
+                Expanded(child: ElevatedButton.icon(
+                  icon: const Icon(Icons.share_rounded, size: 18),
+                  label: const Text('Teilen', style: TextStyle(fontSize: 12)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _cardBg,
+                    foregroundColor: _textPrimary,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      side: BorderSide(color: _cardBorder),
+                    ),
+                    elevation: 0,
+                  ),
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    _sharePoiDetails(poi, catLabel, distText, avgRating, ratingCount);
+                  },
+                )),
+              ]),
+              ]),
+          );
+      },
+    ).then((_) {});
+  }
+
+  /// POI teilen: Feed / Story / User / Extern
+  void _sharePoiDetails(PoiResult poi, String catLabel, String distText, double? avgRating, int ratingCount) {
+    // Share-Text aufbauen
+    final mapsUrl = 'https://www.google.com/maps/search/?api=1&query=${poi.lat},${poi.lon}';
+    final buf = StringBuffer();
+    buf.writeln('${poi.name}');
+    buf.writeln('$catLabel · $distText');
+    if (poi.address != null && poi.address!.isNotEmpty) {
+      buf.writeln(poi.address!);
+    }
+    if (avgRating != null) {
+      buf.writeln('${avgRating.toStringAsFixed(1)} ($ratingCount ${ratingCount == 1 ? 'Bewertung' : 'Bewertungen'})');
+    }
+    buf.writeln();
+    buf.writeln(mapsUrl);
+    buf.writeln();
+    buf.writeln('Gefunden mit Motorinu');
+    final shareText = buf.toString();
+
+    // Suchleiste ausblenden
+    setState(() => _searchPanelHidden = true);
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: _isDark ? const Color(0xF0111111) : Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) {
+        final bp = MediaQuery.of(ctx).padding.bottom;
+        return Padding(
+          padding: EdgeInsets.only(left: 20, right: 20, top: 16, bottom: bp + 20),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            // Handle
+            Container(
+              width: 40, height: 4,
+              margin: const EdgeInsets.only(bottom: 18),
+              decoration: BoxDecoration(
+                color: _textPrimary.withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            // Titel
+            Text('POI teilen', style: TextStyle(
+              color: _textPrimary, fontSize: 20, fontWeight: FontWeight.bold,
+            )),
+            const SizedBox(height: 10),
+            // POI-Vorschau
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: _modeColor.withValues(alpha: 0.08),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: _modeColor.withValues(alpha: 0.2)),
+              ),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(poi.name, style: TextStyle(
+                  color: _textPrimary, fontSize: 16, fontWeight: FontWeight.w600,
+                )),
+                const SizedBox(height: 4),
+                Text('$catLabel · $distText',
+                  style: TextStyle(color: _textSecondary, fontSize: 13),
+                ),
+                if (poi.address != null && poi.address!.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Text(poi.address!,
+                    style: TextStyle(color: _textSecondary, fontSize: 13),
+                    maxLines: 2, overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ]),
+            ),
+            const SizedBox(height: 20),
+            // Share-Optionen: 2x2 Grid
+            Row(children: [
+              _shareOption(ctx, Icons.dynamic_feed_rounded, 'Feed', 'Im Feed posten', _modeColor, () {
+                Navigator.pop(ctx);
+                CreatePostScreen.show(context,
+                  source: PostMediaSource.textOnly,
+                  initialText: shareText,
+                );
+              }),
+              const SizedBox(width: 10),
+              _shareOption(ctx, Icons.auto_stories_rounded, 'Story', 'Als Story teilen', Colors.purple, () {
+                Navigator.pop(ctx);
+                Clipboard.setData(ClipboardData(text: shareText));
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('POI-Text kopiert — erstelle eine Story und füge ihn ein!'), duration: Duration(seconds: 3)),
+                );
+              }),
+            ]),
+            const SizedBox(height: 10),
+            Row(children: [
+              _shareOption(ctx, Icons.send_rounded, 'An User', 'Im Chat senden', Colors.blue, () {
+                Navigator.pop(ctx);
+                _showPoiUserPicker(poi, catLabel);
+              }),
+              const SizedBox(width: 10),
+              _shareOption(ctx, Icons.share_rounded, 'Extern', 'WhatsApp, Facebook...', Colors.green, () {
+                Navigator.pop(ctx);
+                Share.share(shareText);
+              }),
+            ]),
+          ]),
+        );
+      },
+    ).then((_) {});
+  }
+
+  Widget _shareOption(BuildContext ctx, IconData icon, String title, String subtitle, Color color, VoidCallback onTap) {
+    return Expanded(
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(14),
+          onTap: onTap,
+          child: Container(
+            padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 12),
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: 0.08),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: color.withValues(alpha: 0.2)),
+            ),
+            child: Row(children: [
+              Container(
+                width: 44, height: 44,
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(icon, color: color, size: 24),
+              ),
+              const SizedBox(width: 12),
+              Expanded(child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(title, style: TextStyle(
+                    color: _textPrimary, fontSize: 14, fontWeight: FontWeight.w600,
+                  )),
+                  Text(subtitle, style: TextStyle(
+                    color: _textSecondary, fontSize: 11,
+                  ), maxLines: 1, overflow: TextOverflow.ellipsis),
+                ],
+              )),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Follower-Picker: Mehrere User auswählen → POI als Location-Nachricht senden
+  void _showPoiUserPicker(PoiResult poi, String catLabel) async {
+    // 1. Follower-IDs laden
+    final profileRepo = ref.read(profileRepositoryProvider);
+    final followingIds = await profileRepo.getFollowingIds();
+    if (followingIds.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Du folgst noch niemandem — folge Usern um POIs zu teilen!')),
+        );
+      }
+      return;
+    }
+
+    // 2. Profile für alle Follower laden
+    final profiles = await Supabase.instance.client
+        .from('profiles')
+        .select('id, username, display_name, avatar_url')
+        .inFilter('id', followingIds.toList())
+        .order('username');
+
+    if (!mounted || profiles is! List || profiles.isEmpty) return;
+
+    final selected = <String>{};
+    var isSending = false;
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: _isDark ? const Color(0xF0111111) : Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.of(context).size.height * 0.7,
+      ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setPickerState) => Padding(
+          padding: EdgeInsets.only(
+            left: 16, right: 16, top: 16,
+            bottom: MediaQuery.of(ctx).padding.bottom + 16,
+          ),
+          child: Column(children: [
+            // Handle
+            Container(
+              width: 40, height: 4,
+              margin: const EdgeInsets.only(bottom: 16),
+              decoration: BoxDecoration(
+                color: _textPrimary.withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            // Header
+            Text('POI an User senden', style: TextStyle(
+              color: _textPrimary, fontSize: 18, fontWeight: FontWeight.bold,
+            )),
+            const SizedBox(height: 4),
+            Text('${poi.name} · $catLabel', style: TextStyle(
+              color: _modeColor, fontSize: 13, fontWeight: FontWeight.w500,
+            )),
+            const SizedBox(height: 14),
+            // User-Liste
+            Expanded(child: ListView.builder(
+              itemCount: profiles.length,
+              itemBuilder: (_, i) {
+                final p = profiles[i] as Map<String, dynamic>;
+                final uid = p['id'] as String;
+                final uname = p['username'] as String? ?? '?';
+                final dname = p['display_name'] as String?;
+                final avatar = p['avatar_url'] as String?;
+                final isChecked = selected.contains(uid);
+
+                return ListTile(
+                  dense: true,
+                  leading: CircleAvatar(
+                    radius: 20,
+                    backgroundColor: _modeColor.withValues(alpha: 0.2),
+                    backgroundImage: avatar != null && avatar.isNotEmpty
+                        ? NetworkImage(avatar)
+                        : null,
+                    child: avatar == null || avatar.isEmpty
+                        ? Text(uname[0].toUpperCase(), style: TextStyle(color: _modeColor, fontWeight: FontWeight.bold))
+                        : null,
+                  ),
+                  title: Text(dname ?? uname, style: TextStyle(
+                    color: _textPrimary, fontSize: 14, fontWeight: FontWeight.w600,
+                  )),
+                  subtitle: dname != null
+                      ? Text('@$uname', style: TextStyle(color: _textSecondary, fontSize: 12))
+                      : null,
+                  trailing: Checkbox(
+                    value: isChecked,
+                    activeColor: _modeColor,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+                    onChanged: (_) {
+                      setPickerState(() {
+                        if (isChecked) { selected.remove(uid); }
+                        else { selected.add(uid); }
+                      });
+                    },
+                  ),
+                  onTap: () {
+                    setPickerState(() {
+                      if (isChecked) { selected.remove(uid); }
+                      else { selected.add(uid); }
+                    });
+                  },
+                );
+              },
+            )),
+            const SizedBox(height: 12),
+            // Senden-Button
+            SizedBox(
+              width: double.infinity,
+              height: 48,
+              child: ElevatedButton.icon(
+                icon: isSending
+                    ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                    : const Icon(Icons.send_rounded, size: 20),
+                label: Text(
+                  selected.isEmpty
+                      ? 'User auswählen'
+                      : 'An ${selected.length} User senden',
+                  style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                ),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: selected.isEmpty ? Colors.grey : _modeColor,
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                ),
+                onPressed: selected.isEmpty || isSending ? null : () async {
+                  setPickerState(() => isSending = true);
+                  final msgRepo = ref.read(messageRepositoryProvider);
+                  final body = '${poi.name}\n$catLabel${poi.address != null ? '\n${poi.address}' : ''}';
+                  int sent = 0;
+                  for (final uid in selected) {
+                    try {
+                      final convId = await msgRepo.getOrCreateConversation(uid);
+                      await msgRepo.sendMessage(
+                        convId,
+                        body,
+                        messageType: 'location',
+                        locationLat: poi.lat,
+                        locationLng: poi.lon,
+                        locationName: poi.name,
+                      );
+                      sent++;
+                    } catch (e) {
+                      debugPrint('[POI Share] Fehler bei $uid: $e');
+                    }
+                  }
+                  if (mounted) {
+                    Navigator.pop(ctx);
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('POI an $sent User gesendet!'), duration: const Duration(seconds: 2)),
+                    );
+                  }
+                },
+              ),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Widget _poiInfoRow(IconData icon, String text, bool isDark, {bool isTappable = false}) {
+    final row = Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 18, color: isTappable
+              ? const Color(0xFF4FC3F7)
+              : (isDark ? Colors.white38 : Colors.black38)),
+          const SizedBox(width: 8),
+          Expanded(child: Text(text, style: TextStyle(
+            color: isTappable
+                ? const Color(0xFF4FC3F7)
+                : (isDark ? Colors.white70 : Colors.black54),
+            fontSize: 14,
+            decoration: isTappable ? TextDecoration.underline : null,
+            decorationColor: isTappable ? const Color(0xFF4FC3F7) : null,
+          ))),
+        ],
+      ),
+    );
+    if (!isTappable) return row;
+    return GestureDetector(
+      onTap: () {
+        final cleaned = text.replaceAll(RegExp(r'[^\d+]'), '');
+        launchUrl(Uri.parse('tel:$cleaned'));
+      },
+      child: row,
     );
   }
 
@@ -2923,8 +4356,24 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
     }
   }
 
+  Future<void> _removeBlitzerFromMap() async {
+    if (_mapboxMap == null) return;
+    final style = _mapboxMap!.style;
+    try { await style.removeStyleLayer('blitzer-circles'); } catch (_) {}
+    try { await style.removeStyleLayer('blitzer-labels'); } catch (_) {}
+    try { await style.removeStyleSource('blitzer-source'); } catch (_) {}
+  }
+
   Future<void> _drawBlitzerOnMap() async {
     if (_mapboxMap == null || _blitzerReports.isEmpty) return;
+
+    // Blitzer-Punkte nur während Navigation auf der Karte anzeigen.
+    // Daten bleiben geladen (für Warnungen), aber visuell stören sie nicht.
+    if (!_isNavigating) {
+      _removeBlitzerFromMap();
+      return;
+    }
+
     final style = _mapboxMap!.style;
 
     try { await style.removeStyleLayer('blitzer-circles'); } catch (_) {}
@@ -3364,12 +4813,16 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
   static final _voicePoiCategoryMap = <String, PoiCategory>{
     'Tankstelle': PoiCategory.fuel,
     'Motorrad Werkstatt': PoiCategory.workshop,
-    'Supermarkt': PoiCategory.fuel, // fallback
+    'Supermarkt': PoiCategory.grocery,
     'Restaurant': PoiCategory.restaurant,
-    'Bar': PoiCategory.restaurant, // bars are in restaurant category
+    'Bar': PoiCategory.restaurant,
     'Café': PoiCategory.cafe,
     'Biker Shop': PoiCategory.bikerShop,
     'Auto Shop': PoiCategory.autoShop,
+    'Apotheke': PoiCategory.pharmacy,
+    'Lebensmittel': PoiCategory.grocery,
+    'Krankenhaus': PoiCategory.hospital,
+    'Bank': PoiCategory.bank,
   };
 
   // ── Voice POI Search: find nearest, announce, ask nav ──
@@ -3578,6 +5031,16 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
       marginTop: 800,
     ));
 
+    // Globe projection — shows earth as 3D sphere when zoomed out
+    try {
+      await map.style.setProjection(
+        StyleProjection(name: StyleProjectionName.globe),
+      );
+      debugPrint('[Map] Globe projection enabled');
+    } catch (e) {
+      debugPrint('[Map] Globe projection error: $e');
+    }
+
     // Remove any built-in traffic layers from the Mapbox style
     try {
       final style = map.style;
@@ -3607,20 +5070,19 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
         ),
         MapAnimationOptions(duration: 800),
       );
-      _loadAllPoisOnMap();
     } else if (_plzLat != null && _plzLng != null) {
-      // GPS Toggle OFF → fly to PLZ position (Userkarte) + show home marker
+      // GPS Toggle OFF → DACH-Übersicht: ganz Deutschland + Schweiz + ein wenig Italien
       final authState = ref.read(authNotifierProvider);
       final plz = (authState is Authenticated) ? authState.user.postalCode ?? '' : '';
       _addPlzHomeMarker(_plzLat!, _plzLng!, plz);
       await map.flyTo(
         CameraOptions(
-          center: Point(coordinates: Position(_plzLng!, _plzLat!)),
-          zoom: 13, bearing: 0, pitch: 0,
-          padding: MbxEdgeInsets(top: 500, left: 0, bottom: 0, right: 0),
+          center: Point(coordinates: Position(10.4, 50.3)),
+          zoom: 5.3, bearing: 0, pitch: 0,
         ),
         MapAnimationOptions(duration: 800),
       );
+      _loadFollowedUserPlzMarkers();
     } else if (_gpsReady) {
       // Fallback: no PLZ → use GPS position
       await map.flyTo(
@@ -3635,10 +5097,7 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
     // Initialize live user annotation manager
     _initLiveUserLayer();
 
-    // Enable auto-hide after 5s — prevents false triggers during map init
-    Future.delayed(const Duration(seconds: 5), () {
-      if (mounted) _searchPanelAutoHideReady = true;
-    });
+    // Search panel is collapsed by default — user opens it via compact bar
   }
 
   void _updatePuckColor() {
@@ -3914,18 +5373,51 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
   //  POI SEARCH + MAP MARKERS
   // ═══════════════════════════════════════════════════════════════════════════
 
+  /// Gibt die beste Suchposition zurück:
+  /// GPS ON → aktuelle GPS-Position (_lat, _lng)
+  /// GPS OFF → PLZ aus dem Profil (_plzLat, _plzLng)
+  Future<(double, double)> _getSearchPosition() async {
+    // GPS an und echte Position vorhanden
+    if (_gpsLive && _lat.abs() > 1 && _lng.abs() > 1) {
+      return (_lat, _lng);
+    }
+    // GPS aus → PLZ-Position aus dem Profil
+    if (_plzLat != null && _plzLng != null) {
+      debugPrint('[POI] GPS off → nutze PLZ-Position: $_plzLat, $_plzLng');
+      return (_plzLat!, _plzLng!);
+    }
+    // Letzter Fallback: aktuelle _lat/_lng (Default oder letzte bekannte)
+    return (_lat, _lng);
+  }
+
   Future<void> _searchPoiAndShowOnMap(PoiCategory category) async {
+    // ── Cooldown: prevent hammering servers after network failure ──
+    if (_lastPoiNetworkError != null) {
+      final elapsed = DateTime.now().difference(_lastPoiNetworkError!).inSeconds;
+      if (elapsed < 5) {
+        final remaining = 5 - elapsed;
+        _showPoiError('Bitte $remaining Sek. warten...');
+        return;
+      }
+      _lastPoiNetworkError = null;
+    }
+
     setState(() {
       _poiLoading = true;
+      _poiError = null;
       _activePoiCategory = category.id;
     });
+    _poiErrorTimer?.cancel();
 
     try {
+      // Suchposition: GPS oder Kartenzentrum
+      final (searchLat, searchLon) = await _getSearchPosition();
+
       // If we already have results from auto-load, use them
       var results = _poiResults[category.id];
       if (results == null || results.isEmpty) {
         results = await PoiSearchService.instance.search(
-          lat: _lat, lon: _lng,
+          lat: searchLat, lon: searchLon,
           category: category,
           limit: 15,
         );
@@ -3933,39 +5425,75 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
       }
 
       if (results.isEmpty) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Keine ${category.labelPlural} in der Nähe gefunden.'),
-              behavior: SnackBarBehavior.floating,
-            ),
-          );
-        }
+        _showPoiError('Keine ${category.labelPlural} in der Nähe gefunden');
       } else {
+        // Draw markers on map for this category
+        await _drawPoiMarkers(results, category);
         // Show bottom sheet with POI list (no TTS — manual tap, not voice)
         if (mounted) _showPoiListSheet(results, category);
       }
+    } on PoiNetworkException {
+      debugPrint('[POI] Network error for ${category.id}');
+      _lastPoiNetworkError = DateTime.now();
+      _showPoiError('Kein Internet — erneut in 5 Sek.');
     } catch (e) {
       debugPrint('[POI] Search error: $e');
+      _showPoiError('Suche fehlgeschlagen — bitte erneut versuchen');
     }
 
     if (mounted) setState(() => _poiLoading = false);
   }
 
+  /// Show a styled error pill at the top of the screen, auto-dismiss after 5s.
+  void _showPoiError(String msg) {
+    if (!mounted) return;
+    _poiErrorTimer?.cancel();
+    setState(() => _poiError = msg);
+    _poiErrorTimer = Timer(const Duration(seconds: 5), () {
+      if (mounted) setState(() => _poiError = null);
+    });
+  }
+
   void _showPoiCategorySheet() {
     if (!mounted) return;
     setState(() => _searchDropdownOpen = false);
-    final categories = [
-      (PoiCategory.fuel, Icons.local_gas_station, 'Tankstellen', const Color(0xFFFF9800)),
-      (PoiCategory.restaurant, Icons.restaurant, 'Restaurants', const Color(0xFF4CAF50)),
-      (PoiCategory.cafe, Icons.coffee, 'Cafés', const Color(0xFF795548)),
-      (PoiCategory.workshop, Icons.build_rounded, 'Werkstätten', const Color(0xFF9C27B0)),
-      (PoiCategory.bikerShop, Icons.two_wheeler, 'Biker Shops', const Color(0xFFE53935)),
-      (PoiCategory.autoShop, Icons.directions_car, 'Auto Shops', const Color(0xFF2196F3)),
-      (PoiCategory.hospital, Icons.local_hospital_rounded, 'Krankenhäuser', const Color(0xFFE91E63)),
-      (PoiCategory.bank, Icons.account_balance_rounded, 'Banken', const Color(0xFF607D8B)),
+
+    final isBiker = _routeMode == RouteMode.biker;
+
+    // Row 1: vehicle-specific
+    final row1 = isBiker
+        ? [(PoiCategory.bikerShop, Icons.two_wheeler, 'Biker Shops', const Color(0xFFE53935)),
+           (PoiCategory.autoShop, Icons.directions_car, 'Auto Shops', const Color(0xFF2196F3)),
+           (PoiCategory.workshop, Icons.build_rounded, 'Werkstätten', const Color(0xFF9C27B0))]
+        : [(PoiCategory.autoShop, Icons.directions_car, 'Auto Shops', const Color(0xFF2196F3)),
+           (PoiCategory.bikerShop, Icons.two_wheeler, 'Biker Shops', const Color(0xFFE53935)),
+           (PoiCategory.workshop, Icons.build_rounded, 'Werkstätten', const Color(0xFF9C27B0))];
+
+    // Row 2: fuel + food
+    const row2 = [
+      (PoiCategory.fuel, Icons.local_gas_station, 'Tankstellen', Color(0xFFFF9800)),
+      (PoiCategory.restaurant, Icons.restaurant, 'Restaurants', Color(0xFF4CAF50)),
+      (PoiCategory.grocery, Icons.shopping_cart_rounded, 'Lebensmittel', Color(0xFF8BC34A)),
     ];
 
+    // Row 3: social + health
+    const row3Special = [
+      // Treffen + Gruppen are navigation links, not POI categories
+      ('treffen', Icons.event_rounded, 'Treffen', Color(0xFFFF5722)),
+      ('gruppen', Icons.groups_rounded, 'Gruppen', Color(0xFFFFCC00)),
+      ('hospital', Icons.local_hospital_rounded, 'Krankenhäuser', Color(0xFFE91E63)),
+    ];
+
+    // Row 4: more services
+    const row4 = [
+      (PoiCategory.pharmacy, Icons.local_pharmacy_rounded, 'Apotheken', Color(0xFF00BCD4)),
+      (PoiCategory.bank, Icons.account_balance_rounded, 'Banken', Color(0xFF607D8B)),
+      (PoiCategory.cafe, Icons.coffee_rounded, 'Cafés', Color(0xFF795548)),
+    ];
+
+    final allPoiCategories = [...row1, ...row2, ...row4];
+
+    final outerContext = context;
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -3973,74 +5501,300 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      builder: (_) => Padding(
-        padding: EdgeInsets.only(
-          left: 16, right: 16, top: 20,
-          bottom: MediaQuery.of(context).padding.bottom + 16,
-        ),
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          // Handle
-          Container(
-            width: 40, height: 4,
-            margin: const EdgeInsets.only(bottom: 14),
-            decoration: BoxDecoration(
-              color: _textPrimary.withValues(alpha: 0.15),
-              borderRadius: BorderRadius.circular(2),
-            ),
-          ),
-          Text('POIs in der Nähe', style: TextStyle(color: _textPrimary, fontSize: 16, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 14),
-          GridView.count(
-            crossAxisCount: 3,
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            mainAxisSpacing: 10,
-            crossAxisSpacing: 10,
-            childAspectRatio: 1.05,
-              children: [
-                ...categories.map((c) => GestureDetector(
-                  onTap: () {
-                    Navigator.pop(context);
-                    _searchPoiAndShowOnMap(c.$1);
-                  },
-                  child: Container(
-                    decoration: BoxDecoration(
-                      color: _isDark ? const Color(0xFF1E1E2A) : const Color(0xFFF5F5F5),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: c.$4.withValues(alpha: 0.3)),
-                    ),
-                    child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-                      Icon(c.$2, color: c.$4, size: 24),
-                      const SizedBox(height: 4),
-                      Text(c.$3, style: TextStyle(color: c.$4, fontSize: 10, fontWeight: FontWeight.w600),
-                        textAlign: TextAlign.center),
-                    ]),
-                  ),
-                )),
-                // Treffen — navigiert zur Events-Seite
-                GestureDetector(
-                  onTap: () {
-                    Navigator.pop(context);
-                    context.push('/events');
-                  },
-                  child: Container(
-                    decoration: BoxDecoration(
-                      color: _isDark ? const Color(0xFF1E1E2A) : const Color(0xFFF5F5F5),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: const Color(0xFFFF5722).withValues(alpha: 0.3)),
-                    ),
-                    child: const Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-                      Icon(Icons.groups_rounded, color: Color(0xFFFF5722), size: 24),
-                      SizedBox(height: 4),
-                      Text('Treffen', style: TextStyle(color: Color(0xFFFF5722), fontSize: 10, fontWeight: FontWeight.w600),
-                        textAlign: TextAlign.center),
-                    ]),
-                  ),
+      builder: (_) {
+        final bp = MediaQuery.of(context).padding.bottom;
+        return ConstrainedBox(
+          constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.7),
+          child: Padding(
+            padding: EdgeInsets.only(left: 16, right: 16, top: 16, bottom: bp + 60),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              // Handle
+              Container(
+                width: 40, height: 4,
+                margin: const EdgeInsets.only(bottom: 14),
+                decoration: BoxDecoration(
+                  color: _textPrimary.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(2),
                 ),
-              ],
-            ),
+              ),
+              Text('POIs in der Nähe', style: TextStyle(color: _textPrimary, fontSize: 16, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 14),
+              Flexible(child: SingleChildScrollView(child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // Row 1
+                  _poiGridRow(row1.map((c) => _poiTile(c.$1, c.$2, c.$3, c.$4)).toList()),
+                  const SizedBox(height: 10),
+                  // Row 2
+                  _poiGridRow(row2.map((c) => _poiTile(c.$1, c.$2, c.$3, c.$4)).toList()),
+                  const SizedBox(height: 10),
+                  // Row 3 (special: Treffen, Gruppen, Krankenhäuser)
+                  _poiGridRow([
+                    _poiSpecialTile(Icons.event_rounded, 'Treffen', const Color(0xFFFF5722),
+                      () { Navigator.pop(context); outerContext.push('/events'); }),
+                    _poiSpecialTile(Icons.groups_rounded, 'Gruppen', const Color(0xFFFFCC00),
+                      () { Navigator.pop(context); outerContext.push('/groups'); }),
+                    _poiTile(PoiCategory.hospital, Icons.local_hospital_rounded, 'Krankenhäuser', const Color(0xFFE91E63)),
+                  ]),
+                  const SizedBox(height: 10),
+                  // Row 4
+                  _poiGridRow(row4.map((c) => _poiTile(c.$1, c.$2, c.$3, c.$4)).toList()),
+                ],
+              ))),
+            ]),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _poiGridRow(List<Widget> tiles) => Row(
+    children: <Widget>[
+      Expanded(child: tiles[0]),
+      const SizedBox(width: 10),
+      Expanded(child: tiles[1]),
+      const SizedBox(width: 10),
+      Expanded(child: tiles[2]),
+    ],
+  );
+
+  Widget _poiTile(PoiCategory cat, IconData icon, String label, Color color) =>
+    GestureDetector(
+      onTap: () { Navigator.pop(context); _searchPoiAndShowOnMap(cat); },
+      child: AspectRatio(
+        aspectRatio: 1.05,
+        child: Container(
+          decoration: BoxDecoration(
+            color: _isDark ? const Color(0xFF1E1E2A) : const Color(0xFFF5F5F5),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: color.withValues(alpha: 0.3)),
+          ),
+          child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+            Icon(icon, color: color, size: 24),
+            const SizedBox(height: 4),
+            Text(label, style: TextStyle(color: color, fontSize: 10, fontWeight: FontWeight.w600),
+              textAlign: TextAlign.center, maxLines: 1, overflow: TextOverflow.ellipsis),
           ]),
         ),
+      ),
+    );
+
+  Widget _poiSpecialTile(IconData icon, String label, Color color, VoidCallback onTap) =>
+    GestureDetector(
+      onTap: onTap,
+      child: AspectRatio(
+        aspectRatio: 1.05,
+        child: Container(
+          decoration: BoxDecoration(
+            color: _isDark ? const Color(0xFF1E1E2A) : const Color(0xFFF5F5F5),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: color.withValues(alpha: 0.3)),
+          ),
+          child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+            Icon(icon, color: color, size: 24),
+            const SizedBox(height: 4),
+            Text(label, style: TextStyle(color: color, fontSize: 10, fontWeight: FontWeight.w600),
+              textAlign: TextAlign.center),
+          ]),
+        ),
+      ),
+    );
+
+  /// Fly camera to a POI and add a pulsing highlight ring on the map itself.
+  /// Highlight stays until another POI is selected or user taps empty map.
+  /// Wird aufgerufen wenn jemand im Chat auf eine Location-Nachricht tippt
+  void _onPendingPoiFlyTo() {
+    final pending = MapboxRideScreen.pendingPoiFlyTo.value;
+    if (pending == null || _mapboxMap == null) return;
+    MapboxRideScreen.pendingPoiFlyTo.value = null; // einmalig konsumieren
+
+    // PoiResult aus den Daten erstellen
+    final poi = PoiResult(
+      name: pending.name,
+      lat: pending.lat,
+      lon: pending.lon,
+      distanceM: geo.Geolocator.distanceBetween(_lat, _lng, pending.lat, pending.lon),
+      type: pending.type.isNotEmpty ? pending.type : 'restaurant',
+    );
+
+    // Suchleiste weg, zum POI fliegen, Detail-Sheet öffnen
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      setState(() => _searchPanelHidden = true);
+      _flyToPoiAndHighlight(poi, _modeColor, withSheet: true);
+      _showPoiDetailSheet(poi);
+    });
+  }
+
+  void _flyToPoiAndHighlight(PoiResult poi, Color color, {bool withSheet = false}) {
+    _mapboxMap?.flyTo(
+      CameraOptions(
+        center: Point(coordinates: Position(poi.lon, poi.lat)),
+        // POI mittig zwischen App-Bar (oben ~100px) und Sheet (unten ~420px)
+        padding: withSheet
+            ? MbxEdgeInsets(top: 100, left: 0, bottom: 420, right: 0)
+            : null,
+        zoom: 16, bearing: 0, pitch: 0,
+      ),
+      MapAnimationOptions(duration: 800),
+    );
+    _highlightTimer?.cancel();
+    setState(() => _highlightedPoi = poi);
+    _addHighlightLayer(poi);
+  }
+
+  Timer? _pulseTimer;
+  bool _pulseOn = true;
+
+  /// Highlight-Ring direkt auf der Mapbox-Karte am POI — blinkt sanft.
+  Future<void> _addHighlightLayer(PoiResult poi) async {
+    if (_mapboxMap == null) return;
+    final style = _mapboxMap!.style;
+    await _removeHighlightLayer();
+
+    final geoJson = '{"type":"FeatureCollection","features":[{"type":"Feature",'
+        '"properties":{},'
+        '"geometry":{"type":"Point","coordinates":[${poi.lon},${poi.lat}]}}]}';
+
+    try {
+      await style.addSource(GeoJsonSource(id: 'poi-highlight-src', data: geoJson));
+
+      // Blinkender Ring um den POI-Marker
+      await style.addLayer(CircleLayer(
+        id: 'poi-highlight-ring',
+        sourceId: 'poi-highlight-src',
+        circleRadius: 28.0,
+        circleColor: 0x00000000, // transparent fill
+        circleStrokeWidth: 3.5,
+        circleStrokeColor: _modeColor.value,
+        circleOpacity: 0.9,
+      ));
+
+      debugPrint('[POI] Highlight ring added for ${poi.name}');
+    } catch (e) {
+      debugPrint('[POI] Highlight layer error: $e');
+      return;
+    }
+
+    // Blink: toggle ring visibility alle 700ms
+    _pulseOn = true;
+    _pulseTimer?.cancel();
+    _pulseTimer = Timer.periodic(const Duration(milliseconds: 700), (_) async {
+      if (_mapboxMap == null || _highlightedPoi == null) {
+        _pulseTimer?.cancel();
+        return;
+      }
+      _pulseOn = !_pulseOn;
+      try {
+        await _mapboxMap!.style.setStyleLayerProperty(
+          'poi-highlight-ring', 'visibility', _pulseOn ? 'visible' : 'none',
+        );
+      } catch (_) {}
+    });
+  }
+
+  Future<void> _removeHighlightLayer() async {
+    _pulseTimer?.cancel();
+    if (_mapboxMap == null) return;
+    final style = _mapboxMap!.style;
+    try { await style.removeStyleLayer('poi-highlight-label'); } catch (_) {}
+    try { await style.removeStyleLayer('poi-highlight-dot'); } catch (_) {}
+    try { await style.removeStyleLayer('poi-highlight-ring'); } catch (_) {}
+    try { await style.removeStyleSource('poi-highlight-src'); } catch (_) {}
+  }
+
+  /// Pulsing ring overlay — centered on screen (camera already flew to POI).
+  /// Uses the existing _tutorialAnimCtrl for the pulse animation.
+  Widget _buildPoiHighlightRing() {
+    final poi = _highlightedPoi!;
+    final catColor = switch (poi.type) {
+      'fuel' => const Color(0xFFFF9800),
+      'workshop' => const Color(0xFF9C27B0),
+      'biker_shop' => const Color(0xFFE53935),
+      'auto_shop' => const Color(0xFF2196F3),
+      'restaurant' => const Color(0xFF4CAF50),
+      'cafe' => const Color(0xFF795548),
+      'bank' => const Color(0xFF607D8B),
+      'hospital' => const Color(0xFFE91E63),
+      'grocery' => const Color(0xFF8BC34A),
+      'pharmacy' => const Color(0xFF00BCD4),
+      _ => _modeColor,
+    };
+
+    return Positioned.fill(
+      child: IgnorePointer(
+        ignoring: false,
+        child: Stack(
+          children: [
+            // Transparent background — taps pass through to map
+            const Positioned.fill(child: SizedBox.shrink()),
+            // Ring + label — centered, tappable
+            Center(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () {
+                  final p = _highlightedPoi;
+                  _highlightTimer?.cancel();
+                  _removeHighlightLayer();
+                  setState(() => _highlightedPoi = null);
+                  if (p != null) _showPoiDetailSheet(p);
+                },
+                child: AnimatedBuilder(
+                  animation: _tutorialAnimCtrl,
+                  builder: (_, __) {
+                    final t = _tutorialAnimCtrl.value;
+                    final scale = 0.7 + (t * 0.6);
+                    final opacity = 1.0 - (t * 0.5);
+                    return Padding(
+                      padding: const EdgeInsets.all(20), // bigger tap area
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          // POI name label
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                            margin: const EdgeInsets.only(bottom: 8),
+                            decoration: BoxDecoration(
+                              color: catColor,
+                              borderRadius: BorderRadius.circular(16),
+                              boxShadow: [BoxShadow(color: catColor.withValues(alpha: 0.4), blurRadius: 12)],
+                            ),
+                            child: Text(poi.name, style: const TextStyle(
+                              color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold,
+                            )),
+                          ),
+                          // Pulsing ring
+                          Transform.scale(
+                            scale: scale,
+                            child: Container(
+                              width: 60, height: 60,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                border: Border.all(color: catColor.withValues(alpha: opacity), width: 3),
+                                boxShadow: [BoxShadow(color: catColor.withValues(alpha: 0.3 * opacity), blurRadius: 20, spreadRadius: 5)],
+                              ),
+                              child: Center(
+                                child: Container(
+                                  width: 14, height: 14,
+                                  decoration: BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    color: catColor,
+                                    boxShadow: [BoxShadow(color: catColor.withValues(alpha: 0.6), blurRadius: 8)],
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -4055,6 +5809,8 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
       'cafe' => const Color(0xFF795548),
       'hospital' => const Color(0xFFE91E63),
       'bank' => const Color(0xFF607D8B),
+      'grocery' => const Color(0xFF8BC34A),
+      'pharmacy' => const Color(0xFF00BCD4),
       _ => Colors.white,
     };
 
@@ -4081,17 +5837,24 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
 
     if (!mounted) return;
 
+    // Mutable copies für StatefulBuilder (Pull-to-Refresh)
+    var currentResults = List<PoiResult>.from(results);
+    var currentRatings = Map<String, ({double avg, int count})>.from(ratingMap);
+    var isRefreshing = false;
+
+    final bp = MediaQuery.of(context).padding.bottom;
     showModalBottomSheet(
       context: context,
+      isScrollControlled: true,
       backgroundColor: _isDark ? const Color(0xF0111111) : Colors.white,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.5),
-      builder: (ctx) => Padding(
-        padding: const EdgeInsets.all(16),
+      constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height - MediaQuery.of(context).padding.top - 50),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheetState) => Padding(
+        padding: EdgeInsets.only(left: 16, right: 16, top: 16, bottom: bp + 60),
         child: Column(
-          mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Center(child: Container(
@@ -4099,15 +5862,69 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
               decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2)),
             )),
             const SizedBox(height: 12),
-            Text('${category.labelPlural} in der Nähe',
-              style: TextStyle(color: color, fontSize: 18, fontWeight: FontWeight.bold)),
+            Row(children: [
+              Expanded(child: Text('${category.labelPlural} in der Nähe',
+                style: TextStyle(color: color, fontSize: 18, fontWeight: FontWeight.bold))),
+              if (isRefreshing)
+                SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: color))
+              else
+                Text('↓ Ziehen = Aktualisieren', style: TextStyle(color: _textSecondary, fontSize: 10)),
+            ]),
             const SizedBox(height: 12),
-            Flexible(child: ListView.builder(
-              shrinkWrap: true,
-              itemCount: results.length.clamp(0, 10),
-              itemBuilder: (_, i) {
-                final r = results[i];
-                final rating = ratingMap[r.name];
+            Flexible(child: RefreshIndicator(
+              color: color,
+              onRefresh: () async {
+                setSheetState(() => isRefreshing = true);
+                // Cache für diese Kategorie löschen → frische Suche
+                PoiSearchService.instance.clearCache();
+                try {
+                  final (sLat, sLon) = await _getSearchPosition();
+                  final newResults = await PoiSearchService.instance.search(
+                    lat: sLat, lon: sLon, category: category, limit: 10,
+                  );
+                  if (newResults.isNotEmpty) {
+                    // Ratings nachladen
+                    final newRatings = <String, ({double avg, int count})>{};
+                    try {
+                      final names = newResults.map((r) => r.name).toList();
+                      final ratings = await Supabase.instance.client
+                          .from('poi_ratings')
+                          .select('poi_name, rating')
+                          .inFilter('poi_name', names);
+                      if (ratings is List) {
+                        final grouped = <String, List<int>>{};
+                        for (final r in ratings) {
+                          final name = r['poi_name'] as String;
+                          grouped.putIfAbsent(name, () => []).add(r['rating'] as int);
+                        }
+                        for (final entry in grouped.entries) {
+                          final sum = entry.value.fold<int>(0, (s, v) => s + v);
+                          newRatings[entry.key] = (avg: sum / entry.value.length, count: entry.value.length);
+                        }
+                      }
+                    } catch (_) {}
+
+                    setSheetState(() {
+                      currentResults = newResults;
+                      currentRatings = newRatings;
+                      isRefreshing = false;
+                    });
+                    // POI-Marker auf Karte aktualisieren
+                    _poiResults[category.id] = newResults;
+                    _drawPoiMarkers(newResults, category);
+                  } else {
+                    setSheetState(() => isRefreshing = false);
+                  }
+                } catch (_) {
+                  setSheetState(() => isRefreshing = false);
+                }
+              },
+              child: ListView.builder(
+                physics: const AlwaysScrollableScrollPhysics(),
+                itemCount: currentResults.length.clamp(0, 10),
+                itemBuilder: (_, i) {
+                final r = currentResults[i];
+                final rating = currentRatings[r.name];
                 return Padding(
                   padding: const EdgeInsets.only(bottom: 4),
                   child: ListTile(
@@ -4143,12 +5960,20 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
                             maxLines: 1, overflow: TextOverflow.ellipsis),
                       ],
                     ),
-                    trailing: SizedBox(width: 68, child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    trailing: Row(mainAxisSize: MainAxisSize.min, children: [
                       GestureDetector(
                         onTap: () { Navigator.pop(ctx); _showPoiRatingSheet(r); },
-                        child: Icon(Icons.star_rounded, color: Colors.amber, size: 20),
+                        child: const Icon(Icons.star_rounded, color: Colors.amber, size: 20),
                       ),
-                      const SizedBox(width: 12),
+                      const SizedBox(width: 8),
+                      GestureDetector(
+                        onTap: () {
+                          Navigator.pop(ctx);
+                          _flyToPoiAndHighlight(r, color);
+                        },
+                        child: Icon(Icons.map_rounded, color: color, size: 20),
+                      ),
+                      const SizedBox(width: 8),
                       GestureDetector(
                         onTap: () {
                           Navigator.pop(ctx);
@@ -4157,14 +5982,14 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
                         },
                         child: Icon(Icons.navigation_rounded, color: color, size: 20),
                       ),
-                    ])),
+                    ]),
                   ),
                 );
               },
-            )),
+            ))),
           ],
         ),
-      ),
+      )),
     ).whenComplete(() {
       TtsAlertService.instance.stop();
     });
@@ -4176,6 +6001,11 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
     'biker_shop' => Icons.two_wheeler,
     'auto_shop' => Icons.directions_car,
     'restaurant' => Icons.restaurant,
+    'cafe' => Icons.coffee_rounded,
+    'bank' => Icons.account_balance_rounded,
+    'hospital' => Icons.local_hospital_rounded,
+    'grocery' => Icons.shopping_cart_rounded,
+    'pharmacy' => Icons.local_pharmacy_rounded,
     _ => Icons.place,
   };
 
@@ -4205,6 +6035,11 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
       'biker_shop' => 0xFFE53935, // Red
       'auto_shop' => 0xFF2196F3,  // Blue
       'restaurant' => 0xFF4CAF50, // Green
+      'cafe' => 0xFF795548,       // Brown
+      'bank' => 0xFFFFC107,       // Amber
+      'hospital' => 0xFFE91E63,   // Pink
+      'grocery' => 0xFF8BC34A,    // Light Green
+      'pharmacy' => 0xFF00BCD4,   // Cyan
       _ => 0xFFFFFFFF,
     };
 
@@ -4235,11 +6070,16 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
 
   /// Load ALL POI categories and show them on the map automatically.
   Future<void> _loadAllPoisOnMap() async {
-    if (_mapboxMap == null || !_gpsReady) return;
+    if (_mapboxMap == null) return;
+
+    // Use GPS position if available, otherwise PLZ fallback
+    final lat = _gpsReady && _lat.abs() > 1 ? _lat : (_plzLat ?? _lat);
+    final lon = _gpsReady && _lng.abs() > 1 ? _lng : (_plzLng ?? _lng);
+    if (lat.abs() < 1 && lon.abs() < 1) return; // No valid position
 
     try {
       final allResults = await PoiSearchService.instance.searchAll(
-        lat: _lat, lon: _lng,
+        lat: lat, lon: lon,
         limitPerCategory: 10,
       );
 
@@ -4279,6 +6119,7 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
         circleStrokeColor: 0xFFFFFFFF,
         circleStrokeWidth: 2.0,
         circleOpacity: 0.95,
+        minZoom: 11.0, // Erst ab Zoom 11 anzeigen
       ));
 
       // Try to set per-type colors via raw expression
@@ -4292,6 +6133,10 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
           '"auto_shop", "#2196F3", '   // Blue
           '"restaurant", "#4CAF50", '  // Green
           '"cafe", "#795548", '        // Brown
+          '"bank", "#FFC107", '        // Amber
+          '"hospital", "#E91E63", '    // Pink
+          '"grocery", "#8BC34A", '     // Light Green
+          '"pharmacy", "#00BCD4", '    // Cyan
           '"#FFFFFF"]',
         );
       } catch (e) {
@@ -4383,7 +6228,7 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
           Listener(
             onPointerDown: (_) {
               _activePointers++;
-              _searchPanelTimer?.cancel();
+              // Touch klappt Suchleiste ein (bleibt eingeklappt bis User öffnet)
               if (!_isNavigating && _currentRoute == null && !_searchPanelHidden) {
                 setState(() => _searchPanelHidden = true);
               }
@@ -4395,15 +6240,6 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
             },
             onPointerUp: (_) {
               _activePointers = (_activePointers - 1).clamp(0, 10);
-              // Only start show-timer when ALL fingers are lifted
-              if (_activePointers == 0 && _searchPanelHidden && !_isNavigating && _currentRoute == null) {
-                _searchPanelTimer?.cancel();
-                _searchPanelTimer = Timer(const Duration(seconds: 3), () {
-                  if (mounted && !_isNavigating && _currentRoute == null) {
-                    setState(() => _searchPanelHidden = false);
-                  }
-                });
-              }
               // Resume follow 5s after last finger lifts
               if (_activePointers == 0 && _isNavigating && !_isFollowing) {
                 _resumeFollowTimer?.cancel();
@@ -4416,17 +6252,6 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
             },
             onPointerCancel: (_) {
               _activePointers = (_activePointers - 1).clamp(0, 10);
-              // BUG-FIX: Mapbox cancelt einzelne Finger bei Zoom-Gesten. Wenn
-              // der Zähler hier auf 0 geht, muss auch der Show-Timer starten —
-              // sonst bleibt das Such-Panel für immer versteckt.
-              if (_activePointers == 0 && _searchPanelHidden && !_isNavigating && _currentRoute == null) {
-                _searchPanelTimer?.cancel();
-                _searchPanelTimer = Timer(const Duration(seconds: 3), () {
-                  if (mounted && !_isNavigating && _currentRoute == null) {
-                    setState(() => _searchPanelHidden = false);
-                  }
-                });
-              }
             },
             child: MapWidget(
               key: const ValueKey('mapbox-ride'),
@@ -4450,8 +6275,56 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
               ),
             ),
 
-          // ── SEARCH CARD (unified: search + quick buttons + recent destinations) ──
-          // Auto-hides when user touches map, reappears after 3s idle
+          // ── COMPACT SEARCH BAR (default, eingeklappt) ──
+          if (!_isNavigating && _currentRoute == null && !_searchOpen && _searchPanelHidden)
+            Positioned(
+              top: 0, left: 0, right: 0,
+              child: SafeArea(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 46, 12, 0),
+                  child: GestureDetector(
+                    onTap: () => setState(() => _searchPanelHidden = false),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                      decoration: BoxDecoration(
+                        color: _cardBg,
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: _cardBorder),
+                        boxShadow: [BoxShadow(color: _shadowColor, blurRadius: 16, offset: const Offset(0, 4))],
+                      ),
+                      child: Row(children: [
+                        Icon(Icons.search_rounded, color: _modeColor, size: 22),
+                        const SizedBox(width: 10),
+                        Expanded(child: Text('Wohin, Racer?', style: TextStyle(color: _textMuted, fontSize: 16))),
+                        GestureDetector(
+                          onTap: () {
+                            // Mic button for voice search
+                            setState(() => _searchPanelHidden = false);
+                          },
+                          child: Icon(Icons.mic_rounded, color: _iconMuted, size: 20),
+                        ),
+                        const SizedBox(width: 8),
+                        GestureDetector(
+                          onTap: _triggerSos,
+                          behavior: HitTestBehavior.opaque,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: Colors.red.withValues(alpha: 0.15),
+                              borderRadius: BorderRadius.circular(6),
+                              border: Border.all(color: Colors.red.withValues(alpha: 0.4)),
+                            ),
+                            child: const Text('SOS', style: TextStyle(color: Colors.red, fontSize: 12, fontWeight: FontWeight.w900, letterSpacing: 1)),
+                          ),
+                        ),
+                      ]),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+
+          // ── SEARCH CARD (expanded: search + quick buttons + recent destinations) ──
           if (!_isNavigating && _currentRoute == null && !_searchOpen && !_searchPanelHidden)
             Positioned(
               top: 0, left: 0, right: 0,
@@ -4498,6 +6371,12 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
                                 ),
                                 child: const Text('SOS', style: TextStyle(color: Colors.red, fontSize: 12, fontWeight: FontWeight.w900, letterSpacing: 1)),
                               ),
+                            ),
+                            const SizedBox(width: 8),
+                            // Close/collapse button
+                            GestureDetector(
+                              onTap: () => setState(() => _searchPanelHidden = true),
+                              child: Icon(Icons.close_rounded, color: _iconMuted, size: 20),
                             ),
                           ]),
                         ),
@@ -4738,10 +6617,10 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
                   child: Icon(Icons.info_outline, color: _modeColor, size: 14),
                 ),
               ),
-              // GPS Live Toggle
-              _buildGpsToggle(),
               // Hi Moto
               _buildHiMotoBtn(),
+              // GPS Live Toggle
+              _buildGpsToggle(),
               // 3D Toggle (only during nav)
               if (_isNavigating)
                 FloatingActionButton.small(
@@ -5012,6 +6891,78 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
               ],
             ),
           ),
+
+          // ── POI LOADING INDICATOR ──
+          if (_poiLoading)
+            Positioned(
+              top: MediaQuery.of(context).padding.top + 280,
+              left: 0, right: 0,
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: _isDark ? const Color(0xF0111111) : const Color(0xF0FFFFFF),
+                    borderRadius: BorderRadius.circular(24),
+                    boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 10)],
+                  ),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    SizedBox(
+                      width: 18, height: 18,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2.5,
+                        color: _modeColor,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Text(
+                      '${_poiCategoryLabel(_activePoiCategory)} werden gesucht…',
+                      style: TextStyle(
+                        color: _isDark ? Colors.white70 : Colors.black54,
+                        fontSize: 14, fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ]),
+                ),
+              ),
+            ),
+
+          // ── POI ERROR PILL ──
+          if (_poiError != null)
+            Positioned(
+              top: MediaQuery.of(context).padding.top + 280,
+              left: 24, right: 24,
+              child: Center(
+                child: GestureDetector(
+                  onTap: () => setState(() => _poiError = null),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                    decoration: BoxDecoration(
+                      color: const Color(0xF0B71C1C), // dark red
+                      borderRadius: BorderRadius.circular(24),
+                      boxShadow: [BoxShadow(color: Colors.black38, blurRadius: 12)],
+                    ),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      const Icon(Icons.wifi_off_rounded, color: Colors.white, size: 18),
+                      const SizedBox(width: 10),
+                      Flexible(
+                        child: Text(
+                          _poiError!,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 13, fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ]),
+                  ),
+                ),
+              ),
+            ),
+
+          // POI Highlight: nur Mapbox-Layer (blinkender Ring auf der Karte)
+
+          // ── MAP TUTORIAL OVERLAY ──
+          if (_tutorialActive) _buildTutorialOverlay(),
 
           // ── LOADING ──
           if (_isCalculating)
@@ -6136,10 +8087,21 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
     ),
   );
 
+  bool _gpsToggleBusy = false;
+
   Widget _buildGpsToggle() => GestureDetector(
-    onTap: _toggleGpsLive,
+    behavior: HitTestBehavior.opaque,
+    onTap: () async {
+      if (_gpsToggleBusy) return; // Debounce
+      _gpsToggleBusy = true;
+      try {
+        await _toggleGpsLive();
+      } finally {
+        _gpsToggleBusy = false;
+      }
+    },
     child: SizedBox(
-      width: 48,
+      width: 56, height: 72,
       child: Column(mainAxisSize: MainAxisSize.min, children: [
         // ON/OFF badge
         Container(
@@ -6201,7 +8163,7 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
     try {
       final ratings = await supabase
           .from('poi_ratings')
-          .select('rating, user_id, created_at')
+          .select('rating, user_id, created_at, review_text')
           .eq('poi_name', poi.name)
           .order('created_at', ascending: false);
 
@@ -6233,6 +8195,7 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
               'user_id': uid,
               'username': profile?['username'] ?? 'Unbekannt',
               'avatar_url': profile?['avatar_url'],
+              'review_text': r['review_text'],
               'is_me': uid == userId,
             });
           }
@@ -6243,6 +8206,7 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
               'user_id': r['user_id'],
               'username': 'User',
               'avatar_url': null,
+              'review_text': r['review_text'],
               'is_me': r['user_id'] == userId,
             });
           }
@@ -6253,139 +8217,197 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
     if (!mounted) return;
 
     int selectedRating = myRating;
+    String existingReview = '';
+    // Load existing review text
+    try {
+      final myReview = await supabase
+          .from('poi_ratings')
+          .select('review_text')
+          .eq('user_id', userId)
+          .eq('poi_name', poi.name)
+          .maybeSingle();
+      if (myReview != null && myReview['review_text'] != null) {
+        existingReview = myReview['review_text'] as String;
+      }
+    } catch (_) {}
 
-    showModalBottomSheet(
+    if (!mounted) return;
+    final reviewCtrl = TextEditingController(text: existingReview);
+
+    await showModalBottomSheet(
       context: context,
       backgroundColor: _isDark ? const Color(0xFF1A1A2E) : Colors.white,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
       isScrollControlled: true,
-      constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.7),
-      builder: (ctx) => StatefulBuilder(builder: (ctx, setSheetState) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(20),
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            // POI Name
-            Text(poi.name, style: TextStyle(
-              color: _textPrimary, fontSize: 18, fontWeight: FontWeight.bold,
-            )),
-            if (poi.address != null) ...[
-              const SizedBox(height: 4),
-              Text(poi.address!, style: TextStyle(color: _textSecondary, fontSize: 13)),
-            ],
-            const SizedBox(height: 8),
-            // Average rating
-            if (totalRatings > 0) Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-              ...List.generate(5, (i) => Icon(
-                i < avgRating.round() ? Icons.star_rounded : Icons.star_outline_rounded,
-                color: Colors.amber, size: 20,
-              )),
-              const SizedBox(width: 8),
-              Text('${avgRating.toStringAsFixed(1)} ($totalRatings)',
-                style: TextStyle(color: _textSecondary, fontSize: 13)),
-            ]) else Text('Noch keine Bewertungen', style: TextStyle(color: _textSecondary, fontSize: 13)),
-
-            const SizedBox(height: 16),
-            Text(myRating > 0 ? 'Deine Bewertung ändern:' : 'Jetzt bewerten:',
-              style: TextStyle(color: _textPrimary, fontSize: 14)),
-            const SizedBox(height: 8),
-
-            // Star selector
-            Row(mainAxisAlignment: MainAxisAlignment.center, children: List.generate(5, (i) {
-              final star = i + 1;
-              return GestureDetector(
-                onTap: () => setSheetState(() => selectedRating = star),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 4),
-                  child: Icon(
-                    star <= selectedRating ? Icons.star_rounded : Icons.star_outline_rounded,
-                    color: Colors.amber, size: 40,
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setSheetState) {
+        final bottomInset = MediaQuery.of(ctx).viewInsets.bottom;
+        final bottomPadding = MediaQuery.of(ctx).padding.bottom;
+        return Padding(
+          padding: EdgeInsets.only(bottom: bottomInset),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.75),
+            child: SingleChildScrollView(
+              padding: EdgeInsets.fromLTRB(20, 20, 20, bottomPadding + 24),
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                // Drag handle
+                Container(
+                  width: 40, height: 4, margin: const EdgeInsets.only(bottom: 16),
+                  decoration: BoxDecoration(
+                    color: _textSecondary.withValues(alpha: 0.4),
+                    borderRadius: BorderRadius.circular(2),
                   ),
                 ),
-              );
-            })),
+                // POI Name
+                Text(poi.name, style: TextStyle(
+                  color: _textPrimary, fontSize: 18, fontWeight: FontWeight.bold,
+                )),
+                if (poi.address != null) ...[
+                  const SizedBox(height: 4),
+                  Text(poi.address!, style: TextStyle(color: _textSecondary, fontSize: 13)),
+                ],
+                const SizedBox(height: 8),
+                // Average rating
+                if (totalRatings > 0) Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  ...List.generate(5, (i) => Icon(
+                    i < avgRating.round() ? Icons.star_rounded : Icons.star_outline_rounded,
+                    color: Colors.amber, size: 20,
+                  )),
+                  const SizedBox(width: 8),
+                  Text('${avgRating.toStringAsFixed(1)} ($totalRatings)',
+                    style: TextStyle(color: _textSecondary, fontSize: 13)),
+                ]) else Text('Noch keine Bewertungen', style: TextStyle(color: _textSecondary, fontSize: 13)),
 
-            const SizedBox(height: 16),
-            // Submit button
-            SizedBox(width: double.infinity, child: ElevatedButton(
-              onPressed: selectedRating > 0 ? () async {
-                try {
-                  await supabase.from('poi_ratings').upsert({
-                    'user_id': userId,
-                    'poi_name': poi.name,
-                    'poi_lat': poi.lat,
-                    'poi_lng': poi.lon,
-                    'poi_type': poi.type,
-                    'rating': selectedRating,
-                  }, onConflict: 'user_id, poi_name');
-                  if (ctx.mounted) Navigator.pop(ctx);
-                  if (mounted) ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('⭐ ${poi.name} mit $selectedRating Sternen bewertet!'),
-                      backgroundColor: _modeColor, behavior: SnackBarBehavior.floating),
-                  );
-                } catch (e) {
-                  debugPrint('[Rating] Error: $e');
-                }
-              } : null,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: _modeColor, foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 14),
-              ),
-              child: Text(myRating > 0 ? 'Bewertung ändern' : 'Bewerten'),
-            )),
+                const SizedBox(height: 16),
+                Text(myRating > 0 ? 'Deine Bewertung ändern:' : 'Jetzt bewerten:',
+                  style: TextStyle(color: _textPrimary, fontSize: 14)),
+                const SizedBox(height: 8),
 
-            // Raters list
-            if (ratersList.isNotEmpty) ...[
-              const SizedBox(height: 16),
-              Divider(color: _textSecondary.withValues(alpha: 0.3)),
-              const SizedBox(height: 8),
-              Text('Bewertungen', style: TextStyle(
-                color: _textPrimary, fontSize: 14, fontWeight: FontWeight.w600)),
-              const SizedBox(height: 8),
-              Flexible(child: ListView.builder(
-                shrinkWrap: true,
-                itemCount: ratersList.length,
-                itemBuilder: (_, i) {
-                  final rater = ratersList[i];
-                  final stars = rater['rating'] as int;
-                  final avatarUrl = rater['avatar_url'] as String?;
-                  return Padding(
-                    padding: const EdgeInsets.only(bottom: 8),
-                    child: Row(children: [
-                      // Avatar
-                      CircleAvatar(
-                        radius: 16,
-                        backgroundColor: Colors.grey[700],
-                        backgroundImage: avatarUrl != null ? NetworkImage(avatarUrl) : null,
-                        child: avatarUrl == null
-                            ? Icon(Icons.person, size: 16, color: Colors.white70)
-                            : null,
+                // Star selector
+                Row(mainAxisAlignment: MainAxisAlignment.center, children: List.generate(5, (i) {
+                  final star = i + 1;
+                  return GestureDetector(
+                    onTap: () => setSheetState(() => selectedRating = star),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                      child: Icon(
+                        star <= selectedRating ? Icons.star_rounded : Icons.star_outline_rounded,
+                        color: Colors.amber, size: 40,
                       ),
-                      const SizedBox(width: 10),
-                      // Username
-                      Expanded(child: Text(
-                        rater['is_me'] == true
-                            ? '${rater['username']} (Du)'
-                            : rater['username'] as String,
-                        style: TextStyle(
-                          color: rater['is_me'] == true ? _modeColor : _textPrimary,
-                          fontSize: 13, fontWeight: FontWeight.w500,
-                        ),
-                        maxLines: 1, overflow: TextOverflow.ellipsis,
-                      )),
-                      // Stars
-                      ...List.generate(5, (s) => Icon(
-                        s < stars ? Icons.star_rounded : Icons.star_outline_rounded,
-                        color: Colors.amber, size: 14,
-                      )),
-                    ]),
+                    ),
                   );
-                },
-              )),
-            ],
-          ]),
-        ),
-      )),
+                })),
+
+                const SizedBox(height: 16),
+                // Review text field
+                TextField(
+                  controller: reviewCtrl,
+                  maxLines: 3,
+                  minLines: 2,
+                  maxLength: 300,
+                  style: TextStyle(color: _textPrimary, fontSize: 14),
+                  decoration: InputDecoration(
+                    hintText: 'Schreib eine Bewertung... (optional)',
+                    hintStyle: TextStyle(color: _textSecondary.withValues(alpha: 0.6)),
+                    filled: true,
+                    fillColor: _isDark ? Colors.white.withValues(alpha: 0.08) : Colors.grey[100],
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide.none,
+                    ),
+                    contentPadding: const EdgeInsets.all(14),
+                    counterStyle: TextStyle(color: _textSecondary, fontSize: 11),
+                  ),
+                ),
+
+                const SizedBox(height: 12),
+                // Submit button
+                SizedBox(width: double.infinity, child: ElevatedButton(
+                  onPressed: selectedRating > 0 ? () async {
+                    try {
+                      await supabase.from('poi_ratings').upsert({
+                        'user_id': userId,
+                        'poi_name': poi.name,
+                        'poi_lat': poi.lat,
+                        'poi_lng': poi.lon,
+                        'poi_type': poi.type,
+                        'rating': selectedRating,
+                        'review_text': reviewCtrl.text.trim().isEmpty ? null : reviewCtrl.text.trim(),
+                      }, onConflict: 'user_id, poi_name');
+                      if (ctx.mounted) Navigator.pop(ctx);
+                      if (mounted) ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('⭐ ${poi.name} mit $selectedRating Sternen bewertet!'),
+                          backgroundColor: _modeColor, behavior: SnackBarBehavior.floating),
+                      );
+                    } catch (e) {
+                      debugPrint('[Rating] Error: $e');
+                    }
+                  } : null,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _modeColor, foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                  ),
+                  child: Text(myRating > 0 ? 'Bewertung ändern' : 'Bewerten'),
+                )),
+
+                // Raters list
+                if (ratersList.isNotEmpty) ...[
+                  const SizedBox(height: 16),
+                  Divider(color: _textSecondary.withValues(alpha: 0.3)),
+                  const SizedBox(height: 8),
+                  Text('Bewertungen', style: TextStyle(
+                    color: _textPrimary, fontSize: 14, fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 8),
+                  ...ratersList.map((rater) {
+                    final stars = rater['rating'] as int;
+                    final avatarUrl = rater['avatar_url'] as String?;
+                    final reviewText = rater['review_text'] as String?;
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 10),
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        Row(children: [
+                          CircleAvatar(
+                            radius: 16,
+                            backgroundColor: Colors.grey[700],
+                            backgroundImage: avatarUrl != null ? NetworkImage(avatarUrl) : null,
+                            child: avatarUrl == null
+                                ? const Icon(Icons.person, size: 16, color: Colors.white70)
+                                : null,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(child: Text(
+                            rater['is_me'] == true
+                                ? '${rater['username']} (Du)'
+                                : rater['username'] as String,
+                            style: TextStyle(
+                              color: rater['is_me'] == true ? _modeColor : _textPrimary,
+                              fontSize: 13, fontWeight: FontWeight.w500,
+                            ),
+                            maxLines: 1, overflow: TextOverflow.ellipsis,
+                          )),
+                          ...List.generate(5, (s) => Icon(
+                            s < stars ? Icons.star_rounded : Icons.star_outline_rounded,
+                            color: Colors.amber, size: 14,
+                          )),
+                        ]),
+                        if (reviewText != null && reviewText.isNotEmpty)
+                          Padding(
+                            padding: const EdgeInsets.only(left: 42, top: 4),
+                            child: Text(reviewText, style: TextStyle(
+                              color: _textSecondary, fontSize: 12, fontStyle: FontStyle.italic,
+                            )),
+                          ),
+                      ]),
+                    );
+                  }),
+                ],
+              ]),
+            ),
+          ),
+        );
+      }),
     );
+    // Controller wird vom GC aufgeräumt — dispose() während Sheet-Animation
+    // verursacht '_dependents.isEmpty' Assertion Error.
   }
 
   // ── Save Zuhause/Arbeit dialog ──
@@ -6452,6 +8474,7 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
               } catch (_) {}
               final prefs = await SharedPreferences.getInstance();
               await prefs.setString(prefKey, '$displayName|$_lat|$_lng');
+              if (prefKey == 'nav_home' && mounted) setState(() => _homeSaved = true);
               if (mounted) ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(content: Text('📍 $label: $displayName'), backgroundColor: _modeColor, behavior: SnackBarBehavior.floating),
               );
@@ -6487,6 +8510,7 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
                     final short = name.split(',').take(2).join(',').trim();
                     final prefs = await SharedPreferences.getInstance();
                     await prefs.setString(prefKey, '$short|$lat|$lng');
+                    if (prefKey == 'nav_home' && mounted) setState(() => _homeSaved = true);
                     if (mounted) ScaffoldMessenger.of(context).showSnackBar(
                       SnackBar(content: Text('📍 $label: $short gespeichert!'), backgroundColor: _modeColor, behavior: SnackBarBehavior.floating),
                     );
@@ -6511,6 +8535,7 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
                 Navigator.pop(ctx);
                 final prefs = await SharedPreferences.getInstance();
                 await prefs.remove(prefKey);
+                if (prefKey == 'nav_home' && mounted) setState(() => _homeSaved = false);
                 if (mounted) ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(content: Text('$label gelöscht'), behavior: SnackBarBehavior.floating),
                 );
@@ -6525,55 +8550,90 @@ class _MapboxRideScreenState extends ConsumerState<MapboxRideScreen> {
   // ── Waze-style quick nav button (Zuhause, Arbeit, Tanken, Essen) ──
   Widget _quickNavBtn(IconData icon, String label, String? prefKey, {PoiCategory? poiCat}) {
     final isActivePoi = _activePoiCategory == poiCat?.id;
-    return Expanded(
-      child: GestureDetector(
-        onTap: () async {
-          if (poiCat != null) {
-            // Toggle POI layer on/off
-            if (isActivePoi) {
-              _clearPoiMarkers();
-              return;
+    final shouldPulse = prefKey == 'nav_home' && !_homeSaved;
+
+    Widget button = GestureDetector(
+      onTap: () async {
+        if (poiCat != null) {
+          if (isActivePoi) { _clearPoiMarkers(); return; }
+          _searchPoiAndShowOnMap(poiCat);
+          return;
+        }
+        if (prefKey == null) return;
+        final prefs = await SharedPreferences.getInstance();
+        final saved = prefs.getString(prefKey);
+        if (saved != null) {
+          final parts = saved.split('|');
+          if (parts.length >= 3) {
+            final lat = double.tryParse(parts[1]);
+            final lng = double.tryParse(parts[2]);
+            if (lat != null && lng != null) {
+              _selectDestination(lat, lng, parts[0]);
             }
-            _searchPoiAndShowOnMap(poiCat);
-            return;
           }
-          if (prefKey == null) return;
-          final prefs = await SharedPreferences.getInstance();
-          final saved = prefs.getString(prefKey);
-          if (saved != null) {
-            final parts = saved.split('|');
-            if (parts.length >= 3) {
-              final lat = double.tryParse(parts[1]);
-              final lng = double.tryParse(parts[2]);
-              if (lat != null && lng != null) {
-                _selectDestination(lat, lng, parts[0]);
-              }
-            }
-          } else {
-            _showSaveLocationDialog(label, prefKey!);
-          }
-        },
-        onLongPress: () async {
-          if (prefKey == null) return;
-          _showSaveLocationDialog(label, prefKey);
-        },
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 10),
-          decoration: BoxDecoration(
-            color: isActivePoi ? _modeColor.withValues(alpha: 0.15) : const Color(0xF0111111),
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: isActivePoi ? _modeColor : Colors.white10),
-          ),
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            Icon(icon, color: isActivePoi ? _modeColor : _modeColor.withValues(alpha: 0.7), size: 22),
-            const SizedBox(height: 4),
-            Text(label, style: TextStyle(
-              color: isActivePoi ? _modeColor : Colors.white54,
-              fontSize: 11, fontWeight: FontWeight.w600)),
-          ]),
+        } else {
+          _showSaveLocationDialog(label, prefKey!);
+        }
+      },
+      onLongPress: () async {
+        if (prefKey == null) return;
+        _showSaveLocationDialog(label, prefKey);
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        decoration: BoxDecoration(
+          color: isActivePoi ? _modeColor.withValues(alpha: 0.15) : _cardBg,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: isActivePoi ? _modeColor : _cardBorder),
         ),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Icon(icon, color: isActivePoi ? _modeColor : _modeColor.withValues(alpha: 0.7), size: 22),
+          const SizedBox(height: 4),
+          Text(label, style: TextStyle(
+            color: isActivePoi ? _modeColor : _iconMuted,
+            fontSize: 11, fontWeight: FontWeight.w600)),
+          // Pulse hint for unsaved Zuhause
+          if (shouldPulse) ...[
+            const SizedBox(height: 2),
+            Text('⏺ Halten', style: TextStyle(
+              color: _modeColor.withValues(alpha: 0.8),
+              fontSize: 8, fontWeight: FontWeight.w700)),
+          ],
+        ]),
       ),
     );
+
+    // Wrap with pulsing glow for unsaved home
+    if (shouldPulse) {
+      button = TweenAnimationBuilder<double>(
+        tween: Tween(begin: 0.0, end: 1.0),
+        duration: const Duration(milliseconds: 1200),
+        builder: (ctx, val, child) {
+          // Oscillate: 0→1→0 via sin
+          final pulse = math.sin(val * 3.14159 * 2).abs();
+          return Container(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(14),
+              boxShadow: [
+                BoxShadow(
+                  color: _modeColor.withValues(alpha: 0.15 + pulse * 0.35),
+                  blurRadius: 8 + pulse * 8,
+                  spreadRadius: pulse * 3,
+                ),
+              ],
+            ),
+            child: child,
+          );
+        },
+        onEnd: () {
+          // Repeat animation if still unsaved
+          if (mounted && !_homeSaved) setState(() {});
+        },
+        child: button,
+      );
+    }
+
+    return Expanded(child: button);
   }
 }
 

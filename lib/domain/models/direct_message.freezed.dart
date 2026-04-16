@@ -320,7 +320,7 @@ as DateTime?,
 mixin _$DirectMessage {
 
  int get id; int get conversationId; String get senderId; String get body; String? get imageUrl; String? get audioUrl; int? get audioDurationMs; double? get locationLat; double? get locationLng; String? get locationName; int? get replyToId; String get messageType;// text, image, audio, location
- bool get isRead; DateTime? get createdAt; DateTime? get editedAt;// Group chat enrichment
+ bool get isDelivered; bool get isRead; DateTime? get createdAt; DateTime? get editedAt;// Group chat enrichment
  String? get senderName; String? get senderAvatar;
 /// Create a copy of DirectMessage
 /// with the given fields replaced by the non-null parameter values.
@@ -334,16 +334,16 @@ $DirectMessageCopyWith<DirectMessage> get copyWith => _$DirectMessageCopyWithImp
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is DirectMessage&&(identical(other.id, id) || other.id == id)&&(identical(other.conversationId, conversationId) || other.conversationId == conversationId)&&(identical(other.senderId, senderId) || other.senderId == senderId)&&(identical(other.body, body) || other.body == body)&&(identical(other.imageUrl, imageUrl) || other.imageUrl == imageUrl)&&(identical(other.audioUrl, audioUrl) || other.audioUrl == audioUrl)&&(identical(other.audioDurationMs, audioDurationMs) || other.audioDurationMs == audioDurationMs)&&(identical(other.locationLat, locationLat) || other.locationLat == locationLat)&&(identical(other.locationLng, locationLng) || other.locationLng == locationLng)&&(identical(other.locationName, locationName) || other.locationName == locationName)&&(identical(other.replyToId, replyToId) || other.replyToId == replyToId)&&(identical(other.messageType, messageType) || other.messageType == messageType)&&(identical(other.isRead, isRead) || other.isRead == isRead)&&(identical(other.createdAt, createdAt) || other.createdAt == createdAt)&&(identical(other.editedAt, editedAt) || other.editedAt == editedAt)&&(identical(other.senderName, senderName) || other.senderName == senderName)&&(identical(other.senderAvatar, senderAvatar) || other.senderAvatar == senderAvatar));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is DirectMessage&&(identical(other.id, id) || other.id == id)&&(identical(other.conversationId, conversationId) || other.conversationId == conversationId)&&(identical(other.senderId, senderId) || other.senderId == senderId)&&(identical(other.body, body) || other.body == body)&&(identical(other.imageUrl, imageUrl) || other.imageUrl == imageUrl)&&(identical(other.audioUrl, audioUrl) || other.audioUrl == audioUrl)&&(identical(other.audioDurationMs, audioDurationMs) || other.audioDurationMs == audioDurationMs)&&(identical(other.locationLat, locationLat) || other.locationLat == locationLat)&&(identical(other.locationLng, locationLng) || other.locationLng == locationLng)&&(identical(other.locationName, locationName) || other.locationName == locationName)&&(identical(other.replyToId, replyToId) || other.replyToId == replyToId)&&(identical(other.messageType, messageType) || other.messageType == messageType)&&(identical(other.isDelivered, isDelivered) || other.isDelivered == isDelivered)&&(identical(other.isRead, isRead) || other.isRead == isRead)&&(identical(other.createdAt, createdAt) || other.createdAt == createdAt)&&(identical(other.editedAt, editedAt) || other.editedAt == editedAt)&&(identical(other.senderName, senderName) || other.senderName == senderName)&&(identical(other.senderAvatar, senderAvatar) || other.senderAvatar == senderAvatar));
 }
 
 @JsonKey(includeFromJson: false, includeToJson: false)
 @override
-int get hashCode => Object.hash(runtimeType,id,conversationId,senderId,body,imageUrl,audioUrl,audioDurationMs,locationLat,locationLng,locationName,replyToId,messageType,isRead,createdAt,editedAt,senderName,senderAvatar);
+int get hashCode => Object.hash(runtimeType,id,conversationId,senderId,body,imageUrl,audioUrl,audioDurationMs,locationLat,locationLng,locationName,replyToId,messageType,isDelivered,isRead,createdAt,editedAt,senderName,senderAvatar);
 
 @override
 String toString() {
-  return 'DirectMessage(id: $id, conversationId: $conversationId, senderId: $senderId, body: $body, imageUrl: $imageUrl, audioUrl: $audioUrl, audioDurationMs: $audioDurationMs, locationLat: $locationLat, locationLng: $locationLng, locationName: $locationName, replyToId: $replyToId, messageType: $messageType, isRead: $isRead, createdAt: $createdAt, editedAt: $editedAt, senderName: $senderName, senderAvatar: $senderAvatar)';
+  return 'DirectMessage(id: $id, conversationId: $conversationId, senderId: $senderId, body: $body, imageUrl: $imageUrl, audioUrl: $audioUrl, audioDurationMs: $audioDurationMs, locationLat: $locationLat, locationLng: $locationLng, locationName: $locationName, replyToId: $replyToId, messageType: $messageType, isDelivered: $isDelivered, isRead: $isRead, createdAt: $createdAt, editedAt: $editedAt, senderName: $senderName, senderAvatar: $senderAvatar)';
 }
 
 
@@ -354,7 +354,7 @@ abstract mixin class $DirectMessageCopyWith<$Res>  {
   factory $DirectMessageCopyWith(DirectMessage value, $Res Function(DirectMessage) _then) = _$DirectMessageCopyWithImpl;
 @useResult
 $Res call({
- int id, int conversationId, String senderId, String body, String? imageUrl, String? audioUrl, int? audioDurationMs, double? locationLat, double? locationLng, String? locationName, int? replyToId, String messageType, bool isRead, DateTime? createdAt, DateTime? editedAt, String? senderName, String? senderAvatar
+ int id, int conversationId, String senderId, String body, String? imageUrl, String? audioUrl, int? audioDurationMs, double? locationLat, double? locationLng, String? locationName, int? replyToId, String messageType, bool isDelivered, bool isRead, DateTime? createdAt, DateTime? editedAt, String? senderName, String? senderAvatar
 });
 
 
@@ -371,7 +371,7 @@ class _$DirectMessageCopyWithImpl<$Res>
 
 /// Create a copy of DirectMessage
 /// with the given fields replaced by the non-null parameter values.
-@pragma('vm:prefer-inline') @override $Res call({Object? id = null,Object? conversationId = null,Object? senderId = null,Object? body = null,Object? imageUrl = freezed,Object? audioUrl = freezed,Object? audioDurationMs = freezed,Object? locationLat = freezed,Object? locationLng = freezed,Object? locationName = freezed,Object? replyToId = freezed,Object? messageType = null,Object? isRead = null,Object? createdAt = freezed,Object? editedAt = freezed,Object? senderName = freezed,Object? senderAvatar = freezed,}) {
+@pragma('vm:prefer-inline') @override $Res call({Object? id = null,Object? conversationId = null,Object? senderId = null,Object? body = null,Object? imageUrl = freezed,Object? audioUrl = freezed,Object? audioDurationMs = freezed,Object? locationLat = freezed,Object? locationLng = freezed,Object? locationName = freezed,Object? replyToId = freezed,Object? messageType = null,Object? isDelivered = null,Object? isRead = null,Object? createdAt = freezed,Object? editedAt = freezed,Object? senderName = freezed,Object? senderAvatar = freezed,}) {
   return _then(_self.copyWith(
 id: null == id ? _self.id : id // ignore: cast_nullable_to_non_nullable
 as int,conversationId: null == conversationId ? _self.conversationId : conversationId // ignore: cast_nullable_to_non_nullable
@@ -385,7 +385,8 @@ as double?,locationLng: freezed == locationLng ? _self.locationLng : locationLng
 as double?,locationName: freezed == locationName ? _self.locationName : locationName // ignore: cast_nullable_to_non_nullable
 as String?,replyToId: freezed == replyToId ? _self.replyToId : replyToId // ignore: cast_nullable_to_non_nullable
 as int?,messageType: null == messageType ? _self.messageType : messageType // ignore: cast_nullable_to_non_nullable
-as String,isRead: null == isRead ? _self.isRead : isRead // ignore: cast_nullable_to_non_nullable
+as String,isDelivered: null == isDelivered ? _self.isDelivered : isDelivered // ignore: cast_nullable_to_non_nullable
+as bool,isRead: null == isRead ? _self.isRead : isRead // ignore: cast_nullable_to_non_nullable
 as bool,createdAt: freezed == createdAt ? _self.createdAt : createdAt // ignore: cast_nullable_to_non_nullable
 as DateTime?,editedAt: freezed == editedAt ? _self.editedAt : editedAt // ignore: cast_nullable_to_non_nullable
 as DateTime?,senderName: freezed == senderName ? _self.senderName : senderName // ignore: cast_nullable_to_non_nullable
@@ -475,10 +476,10 @@ return $default(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( int id,  int conversationId,  String senderId,  String body,  String? imageUrl,  String? audioUrl,  int? audioDurationMs,  double? locationLat,  double? locationLng,  String? locationName,  int? replyToId,  String messageType,  bool isRead,  DateTime? createdAt,  DateTime? editedAt,  String? senderName,  String? senderAvatar)?  $default,{required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>(TResult Function( int id,  int conversationId,  String senderId,  String body,  String? imageUrl,  String? audioUrl,  int? audioDurationMs,  double? locationLat,  double? locationLng,  String? locationName,  int? replyToId,  String messageType,  bool isDelivered,  bool isRead,  DateTime? createdAt,  DateTime? editedAt,  String? senderName,  String? senderAvatar)?  $default,{required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case _DirectMessage() when $default != null:
-return $default(_that.id,_that.conversationId,_that.senderId,_that.body,_that.imageUrl,_that.audioUrl,_that.audioDurationMs,_that.locationLat,_that.locationLng,_that.locationName,_that.replyToId,_that.messageType,_that.isRead,_that.createdAt,_that.editedAt,_that.senderName,_that.senderAvatar);case _:
+return $default(_that.id,_that.conversationId,_that.senderId,_that.body,_that.imageUrl,_that.audioUrl,_that.audioDurationMs,_that.locationLat,_that.locationLng,_that.locationName,_that.replyToId,_that.messageType,_that.isDelivered,_that.isRead,_that.createdAt,_that.editedAt,_that.senderName,_that.senderAvatar);case _:
   return orElse();
 
 }
@@ -496,10 +497,10 @@ return $default(_that.id,_that.conversationId,_that.senderId,_that.body,_that.im
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( int id,  int conversationId,  String senderId,  String body,  String? imageUrl,  String? audioUrl,  int? audioDurationMs,  double? locationLat,  double? locationLng,  String? locationName,  int? replyToId,  String messageType,  bool isRead,  DateTime? createdAt,  DateTime? editedAt,  String? senderName,  String? senderAvatar)  $default,) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>(TResult Function( int id,  int conversationId,  String senderId,  String body,  String? imageUrl,  String? audioUrl,  int? audioDurationMs,  double? locationLat,  double? locationLng,  String? locationName,  int? replyToId,  String messageType,  bool isDelivered,  bool isRead,  DateTime? createdAt,  DateTime? editedAt,  String? senderName,  String? senderAvatar)  $default,) {final _that = this;
 switch (_that) {
 case _DirectMessage():
-return $default(_that.id,_that.conversationId,_that.senderId,_that.body,_that.imageUrl,_that.audioUrl,_that.audioDurationMs,_that.locationLat,_that.locationLng,_that.locationName,_that.replyToId,_that.messageType,_that.isRead,_that.createdAt,_that.editedAt,_that.senderName,_that.senderAvatar);case _:
+return $default(_that.id,_that.conversationId,_that.senderId,_that.body,_that.imageUrl,_that.audioUrl,_that.audioDurationMs,_that.locationLat,_that.locationLng,_that.locationName,_that.replyToId,_that.messageType,_that.isDelivered,_that.isRead,_that.createdAt,_that.editedAt,_that.senderName,_that.senderAvatar);case _:
   throw StateError('Unexpected subclass');
 
 }
@@ -516,10 +517,10 @@ return $default(_that.id,_that.conversationId,_that.senderId,_that.body,_that.im
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( int id,  int conversationId,  String senderId,  String body,  String? imageUrl,  String? audioUrl,  int? audioDurationMs,  double? locationLat,  double? locationLng,  String? locationName,  int? replyToId,  String messageType,  bool isRead,  DateTime? createdAt,  DateTime? editedAt,  String? senderName,  String? senderAvatar)?  $default,) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>(TResult? Function( int id,  int conversationId,  String senderId,  String body,  String? imageUrl,  String? audioUrl,  int? audioDurationMs,  double? locationLat,  double? locationLng,  String? locationName,  int? replyToId,  String messageType,  bool isDelivered,  bool isRead,  DateTime? createdAt,  DateTime? editedAt,  String? senderName,  String? senderAvatar)?  $default,) {final _that = this;
 switch (_that) {
 case _DirectMessage() when $default != null:
-return $default(_that.id,_that.conversationId,_that.senderId,_that.body,_that.imageUrl,_that.audioUrl,_that.audioDurationMs,_that.locationLat,_that.locationLng,_that.locationName,_that.replyToId,_that.messageType,_that.isRead,_that.createdAt,_that.editedAt,_that.senderName,_that.senderAvatar);case _:
+return $default(_that.id,_that.conversationId,_that.senderId,_that.body,_that.imageUrl,_that.audioUrl,_that.audioDurationMs,_that.locationLat,_that.locationLng,_that.locationName,_that.replyToId,_that.messageType,_that.isDelivered,_that.isRead,_that.createdAt,_that.editedAt,_that.senderName,_that.senderAvatar);case _:
   return null;
 
 }
@@ -531,7 +532,7 @@ return $default(_that.id,_that.conversationId,_that.senderId,_that.body,_that.im
 @JsonSerializable()
 
 class _DirectMessage implements DirectMessage {
-  const _DirectMessage({required this.id, required this.conversationId, required this.senderId, required this.body, this.imageUrl, this.audioUrl, this.audioDurationMs, this.locationLat, this.locationLng, this.locationName, this.replyToId, this.messageType = 'text', this.isRead = false, this.createdAt, this.editedAt, this.senderName, this.senderAvatar});
+  const _DirectMessage({required this.id, required this.conversationId, required this.senderId, required this.body, this.imageUrl, this.audioUrl, this.audioDurationMs, this.locationLat, this.locationLng, this.locationName, this.replyToId, this.messageType = 'text', this.isDelivered = false, this.isRead = false, this.createdAt, this.editedAt, this.senderName, this.senderAvatar});
   factory _DirectMessage.fromJson(Map<String, dynamic> json) => _$DirectMessageFromJson(json);
 
 @override final  int id;
@@ -547,6 +548,7 @@ class _DirectMessage implements DirectMessage {
 @override final  int? replyToId;
 @override@JsonKey() final  String messageType;
 // text, image, audio, location
+@override@JsonKey() final  bool isDelivered;
 @override@JsonKey() final  bool isRead;
 @override final  DateTime? createdAt;
 @override final  DateTime? editedAt;
@@ -567,16 +569,16 @@ Map<String, dynamic> toJson() {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is _DirectMessage&&(identical(other.id, id) || other.id == id)&&(identical(other.conversationId, conversationId) || other.conversationId == conversationId)&&(identical(other.senderId, senderId) || other.senderId == senderId)&&(identical(other.body, body) || other.body == body)&&(identical(other.imageUrl, imageUrl) || other.imageUrl == imageUrl)&&(identical(other.audioUrl, audioUrl) || other.audioUrl == audioUrl)&&(identical(other.audioDurationMs, audioDurationMs) || other.audioDurationMs == audioDurationMs)&&(identical(other.locationLat, locationLat) || other.locationLat == locationLat)&&(identical(other.locationLng, locationLng) || other.locationLng == locationLng)&&(identical(other.locationName, locationName) || other.locationName == locationName)&&(identical(other.replyToId, replyToId) || other.replyToId == replyToId)&&(identical(other.messageType, messageType) || other.messageType == messageType)&&(identical(other.isRead, isRead) || other.isRead == isRead)&&(identical(other.createdAt, createdAt) || other.createdAt == createdAt)&&(identical(other.editedAt, editedAt) || other.editedAt == editedAt)&&(identical(other.senderName, senderName) || other.senderName == senderName)&&(identical(other.senderAvatar, senderAvatar) || other.senderAvatar == senderAvatar));
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is _DirectMessage&&(identical(other.id, id) || other.id == id)&&(identical(other.conversationId, conversationId) || other.conversationId == conversationId)&&(identical(other.senderId, senderId) || other.senderId == senderId)&&(identical(other.body, body) || other.body == body)&&(identical(other.imageUrl, imageUrl) || other.imageUrl == imageUrl)&&(identical(other.audioUrl, audioUrl) || other.audioUrl == audioUrl)&&(identical(other.audioDurationMs, audioDurationMs) || other.audioDurationMs == audioDurationMs)&&(identical(other.locationLat, locationLat) || other.locationLat == locationLat)&&(identical(other.locationLng, locationLng) || other.locationLng == locationLng)&&(identical(other.locationName, locationName) || other.locationName == locationName)&&(identical(other.replyToId, replyToId) || other.replyToId == replyToId)&&(identical(other.messageType, messageType) || other.messageType == messageType)&&(identical(other.isDelivered, isDelivered) || other.isDelivered == isDelivered)&&(identical(other.isRead, isRead) || other.isRead == isRead)&&(identical(other.createdAt, createdAt) || other.createdAt == createdAt)&&(identical(other.editedAt, editedAt) || other.editedAt == editedAt)&&(identical(other.senderName, senderName) || other.senderName == senderName)&&(identical(other.senderAvatar, senderAvatar) || other.senderAvatar == senderAvatar));
 }
 
 @JsonKey(includeFromJson: false, includeToJson: false)
 @override
-int get hashCode => Object.hash(runtimeType,id,conversationId,senderId,body,imageUrl,audioUrl,audioDurationMs,locationLat,locationLng,locationName,replyToId,messageType,isRead,createdAt,editedAt,senderName,senderAvatar);
+int get hashCode => Object.hash(runtimeType,id,conversationId,senderId,body,imageUrl,audioUrl,audioDurationMs,locationLat,locationLng,locationName,replyToId,messageType,isDelivered,isRead,createdAt,editedAt,senderName,senderAvatar);
 
 @override
 String toString() {
-  return 'DirectMessage(id: $id, conversationId: $conversationId, senderId: $senderId, body: $body, imageUrl: $imageUrl, audioUrl: $audioUrl, audioDurationMs: $audioDurationMs, locationLat: $locationLat, locationLng: $locationLng, locationName: $locationName, replyToId: $replyToId, messageType: $messageType, isRead: $isRead, createdAt: $createdAt, editedAt: $editedAt, senderName: $senderName, senderAvatar: $senderAvatar)';
+  return 'DirectMessage(id: $id, conversationId: $conversationId, senderId: $senderId, body: $body, imageUrl: $imageUrl, audioUrl: $audioUrl, audioDurationMs: $audioDurationMs, locationLat: $locationLat, locationLng: $locationLng, locationName: $locationName, replyToId: $replyToId, messageType: $messageType, isDelivered: $isDelivered, isRead: $isRead, createdAt: $createdAt, editedAt: $editedAt, senderName: $senderName, senderAvatar: $senderAvatar)';
 }
 
 
@@ -587,7 +589,7 @@ abstract mixin class _$DirectMessageCopyWith<$Res> implements $DirectMessageCopy
   factory _$DirectMessageCopyWith(_DirectMessage value, $Res Function(_DirectMessage) _then) = __$DirectMessageCopyWithImpl;
 @override @useResult
 $Res call({
- int id, int conversationId, String senderId, String body, String? imageUrl, String? audioUrl, int? audioDurationMs, double? locationLat, double? locationLng, String? locationName, int? replyToId, String messageType, bool isRead, DateTime? createdAt, DateTime? editedAt, String? senderName, String? senderAvatar
+ int id, int conversationId, String senderId, String body, String? imageUrl, String? audioUrl, int? audioDurationMs, double? locationLat, double? locationLng, String? locationName, int? replyToId, String messageType, bool isDelivered, bool isRead, DateTime? createdAt, DateTime? editedAt, String? senderName, String? senderAvatar
 });
 
 
@@ -604,7 +606,7 @@ class __$DirectMessageCopyWithImpl<$Res>
 
 /// Create a copy of DirectMessage
 /// with the given fields replaced by the non-null parameter values.
-@override @pragma('vm:prefer-inline') $Res call({Object? id = null,Object? conversationId = null,Object? senderId = null,Object? body = null,Object? imageUrl = freezed,Object? audioUrl = freezed,Object? audioDurationMs = freezed,Object? locationLat = freezed,Object? locationLng = freezed,Object? locationName = freezed,Object? replyToId = freezed,Object? messageType = null,Object? isRead = null,Object? createdAt = freezed,Object? editedAt = freezed,Object? senderName = freezed,Object? senderAvatar = freezed,}) {
+@override @pragma('vm:prefer-inline') $Res call({Object? id = null,Object? conversationId = null,Object? senderId = null,Object? body = null,Object? imageUrl = freezed,Object? audioUrl = freezed,Object? audioDurationMs = freezed,Object? locationLat = freezed,Object? locationLng = freezed,Object? locationName = freezed,Object? replyToId = freezed,Object? messageType = null,Object? isDelivered = null,Object? isRead = null,Object? createdAt = freezed,Object? editedAt = freezed,Object? senderName = freezed,Object? senderAvatar = freezed,}) {
   return _then(_DirectMessage(
 id: null == id ? _self.id : id // ignore: cast_nullable_to_non_nullable
 as int,conversationId: null == conversationId ? _self.conversationId : conversationId // ignore: cast_nullable_to_non_nullable
@@ -618,7 +620,8 @@ as double?,locationLng: freezed == locationLng ? _self.locationLng : locationLng
 as double?,locationName: freezed == locationName ? _self.locationName : locationName // ignore: cast_nullable_to_non_nullable
 as String?,replyToId: freezed == replyToId ? _self.replyToId : replyToId // ignore: cast_nullable_to_non_nullable
 as int?,messageType: null == messageType ? _self.messageType : messageType // ignore: cast_nullable_to_non_nullable
-as String,isRead: null == isRead ? _self.isRead : isRead // ignore: cast_nullable_to_non_nullable
+as String,isDelivered: null == isDelivered ? _self.isDelivered : isDelivered // ignore: cast_nullable_to_non_nullable
+as bool,isRead: null == isRead ? _self.isRead : isRead // ignore: cast_nullable_to_non_nullable
 as bool,createdAt: freezed == createdAt ? _self.createdAt : createdAt // ignore: cast_nullable_to_non_nullable
 as DateTime?,editedAt: freezed == editedAt ? _self.editedAt : editedAt // ignore: cast_nullable_to_non_nullable
 as DateTime?,senderName: freezed == senderName ? _self.senderName : senderName // ignore: cast_nullable_to_non_nullable

@@ -12,6 +12,14 @@ if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
 }
 
+// Mapbox Public Token aus local.properties (gitignored) — per Manifest Placeholder eingespielt
+def localPropsApp = new Properties()
+def localPropsFileApp = rootProject.file('local.properties')
+if (localPropsFileApp.exists()) {
+    localPropsApp.load(new FileInputStream(localPropsFileApp))
+}
+def mapboxPublicToken = localPropsApp.getProperty('MAPBOX_PUBLIC_TOKEN') ?: (System.getenv('MAPBOX_PUBLIC_TOKEN') ?: '')
+
 android {
     namespace "com.bikergram.app"
 
@@ -37,6 +45,11 @@ android {
 
         versionCode flutter.versionCode
         versionName flutter.versionName
+
+        // Mapbox Public Token aus local.properties in Manifest einspielen
+        manifestPlaceholders = [
+            MAPBOX_PUBLIC_TOKEN: mapboxPublicToken
+        ]
     }
 
     signingConfigs {

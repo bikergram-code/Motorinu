@@ -23,6 +23,7 @@ import '../presentation/messages/messages_screen.dart';
 import '../presentation/messages/chat_detail_screen.dart';
 import '../presentation/notifications/notifications_screen.dart';
 import '../presentation/settings/settings_screen.dart';
+import '../presentation/settings/linked_devices_screen.dart';
 import '../presentation/map/map_settings_screen.dart';
 import '../presentation/feed/post_detail_screen.dart';
 import '../presentation/search/user_search_screen.dart';
@@ -35,9 +36,12 @@ import '../presentation/groups/group_ride_screen.dart';
 import '../presentation/groups/groups_screen.dart';
 import '../presentation/navigation/mapbox_nav_screen.dart';
 import '../presentation/navigation/mapbox_ride_screen.dart';
+import '../presentation/navigation/web_map_screen.dart';
 import '../presentation/tracker/ride_history_screen.dart';
 import '../presentation/marketplace/marketplace_detail_screen.dart';
 import '../presentation/dating/dating_screen.dart';
+import '../presentation/call/call_screen.dart';
+import '../presentation/call/incoming_call_screen.dart';
 
 /// Global navigator key for push notification navigation.
 final rootNavigatorKey = GlobalKey<NavigatorState>(debugLabel: 'root');
@@ -161,7 +165,12 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       }
 
       // Definitively not authenticated → go to login
-      if (authState is Unauthenticated || authState is AuthError) {
+      // EmailConfirmationPending is the post-register state where the user
+      // must still verify their email. We treat it like Unauthenticated
+      // but allow /app-tour and /login so the welcome flow works.
+      if (authState is Unauthenticated ||
+          authState is AuthError ||
+          authState is EmailConfirmationPending) {
         if (!isAuthRoute && !isOnboarding && !isAppTour) return '/login';
         return null;
       }
@@ -197,7 +206,11 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       // Auth routes
       GoRoute(
         path: '/login',
-        builder: (_, __) => const LoginScreen(),
+        builder: (_, state) {
+          final extra = state.extra as Map<String, dynamic>?;
+          final pendingEmail = extra?['pendingEmail'] as String?;
+          return LoginScreen(pendingEmail: pendingEmail);
+        },
       ),
       GoRoute(
         path: '/register',
@@ -207,7 +220,11 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       // App tour after registration
       GoRoute(
         path: '/app-tour',
-        builder: (_, __) => const AppTourScreen(),
+        builder: (_, state) {
+          final extra = state.extra as Map<String, dynamic>?;
+          final pendingEmail = extra?['pendingEmail'] as String?;
+          return AppTourScreen(pendingEmail: pendingEmail);
+        },
       ),
 
       // Complete profile after social sign-in
@@ -231,7 +248,7 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             path: '/map',
             pageBuilder: (_, state) => NoTransitionPage(
               key: state.pageKey,
-              child: const MapboxRideScreen(), // Freie Fahrt — Mapbox statt Google Maps
+              child: kIsWeb ? const WebMapScreen() : const MapboxRideScreen(),
             ),
           ),
           GoRoute(
@@ -321,6 +338,24 @@ final appRouterProvider = Provider<GoRouter>((ref) {
           return _motoPage(
             key: state.pageKey,
             child: ChatDetailScreen(conversationId: id),
+          );
+        },
+      ),
+      GoRoute(
+        path: '/call',
+        pageBuilder: (_, state) {
+          return _motoPage(
+            key: state.pageKey,
+            child: const CallScreen(),
+          );
+        },
+      ),
+      GoRoute(
+        path: '/incoming-call',
+        pageBuilder: (_, state) {
+          return _motoPage(
+            key: state.pageKey,
+            child: const IncomingCallScreen(),
           );
         },
       ),
@@ -416,6 +451,13 @@ final appRouterProvider = Provider<GoRouter>((ref) {
         pageBuilder: (_, state) => _motoPage(
           key: state.pageKey,
           child: const SettingsScreen(),
+        ),
+      ),
+      GoRoute(
+        path: '/linked-devices',
+        pageBuilder: (_, state) => _motoPage(
+          key: state.pageKey,
+          child: const LinkedDevicesScreen(),
         ),
       ),
       GoRoute(

@@ -1,4 +1,4 @@
-import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -23,6 +23,18 @@ class ImagePreviewPage extends StatefulWidget {
 
 class _ImagePreviewPageState extends State<ImagePreviewPage> {
   final _captionController = TextEditingController();
+  Uint8List? _imageBytes;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadImage();
+  }
+
+  Future<void> _loadImage() async {
+    final bytes = await widget.image.readAsBytes();
+    if (mounted) setState(() => _imageBytes = bytes);
+  }
 
   @override
   void dispose() {
@@ -55,10 +67,12 @@ class _ImagePreviewPageState extends State<ImagePreviewPage> {
           // Image preview
           Expanded(
             child: Center(
-              child: Image.file(
-                File(widget.image.path),
-                fit: BoxFit.contain,
-              ),
+              child: _imageBytes != null
+                  ? Image.memory(
+                      _imageBytes!,
+                      fit: BoxFit.contain,
+                    )
+                  : const CircularProgressIndicator(color: Colors.white),
             ),
           ),
 

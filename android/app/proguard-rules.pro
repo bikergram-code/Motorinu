@@ -85,8 +85,17 @@
 # Apache Tika / javax.xml.stream — transitive dep (file_picker / video_compress)
 # R8 kann diese Klassen im normalen Android SDK nicht finden
 -dontwarn javax.xml.stream.**
+-dontwarn javax.xml.stream.XMLStreamException
+-dontwarn javax.xml.stream.XMLOutputFactory
+-dontwarn javax.xml.stream.XMLEventFactory
+-dontwarn javax.xml.stream.XMLInputFactory
 -dontwarn org.apache.tika.**
+-dontwarn org.apache.commons.**
 
 # Stripe PushProvisioning (weitere veraltete Klassen)
 -dontwarn com.google.android.datatransport.**
 -dontwarn com.google.common.reflect.**
+
+# Globale Warnung-Unterdrueckung als Safety Net — falls R8 full mode
+# doch irgendwo noch aktiv ist (z.B. via Plugin-Override)
+-ignorewarnings

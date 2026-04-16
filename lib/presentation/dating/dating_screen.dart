@@ -928,24 +928,27 @@ class _ActionButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: size,
-        height: size,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          color: filled ? color : Colors.transparent,
-          border: Border.all(color: color, width: 2.5),
-          boxShadow: filled
-              ? [BoxShadow(color: color.withValues(alpha: 0.4), blurRadius: 16, spreadRadius: 2)]
-              : null,
-        ),
-        child: Center(
-          child: Icon(
-            icon,
-            size: iconSize,
-            color: filled ? Colors.white : color,
+    return Listener(
+      onPointerUp: (_) => onTap(),
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: Container(
+          width: size,
+          height: size,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: filled ? color : Colors.transparent,
+            border: Border.all(color: color, width: 2.5),
+            boxShadow: filled
+                ? [BoxShadow(color: color.withValues(alpha: 0.4), blurRadius: 16, spreadRadius: 2)]
+                : null,
+          ),
+          child: Center(
+            child: Icon(
+              icon,
+              size: iconSize,
+              color: filled ? Colors.white : color,
+            ),
           ),
         ),
       ),

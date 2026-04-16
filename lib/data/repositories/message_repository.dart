@@ -69,14 +69,19 @@ class MessageRepository {
         String? groupAvatarUrl;
 
         if (isGroupChat) {
-          // Group conversation: load group info
-          final group = await _supabase
-              .from('groups')
-              .select('name, avatar_url')
-              .eq('id', groupId)
-              .maybeSingle();
-          groupName = group?['name'] as String? ?? 'Gruppe';
-          groupAvatarUrl = group?['avatar_url'] as String?;
+          // Group conversation: load via RPC (bypasses RLS to avoid 42P17 recursion)
+          try {
+            final group = await _supabase.rpc('get_group_by_id', params: {'p_group_id': groupId});
+            if (group is Map) {
+              groupName = group['name'] as String? ?? 'Gruppe';
+              groupAvatarUrl = group['avatar_url'] as String?;
+            } else {
+              groupName = 'Gruppe';
+            }
+          } catch (e) {
+            debugPrint('[MsgRepo] get_group_by_id($groupId) error: $e');
+            groupName = 'Gruppe';
+          }
           otherUsername = groupName;
           otherUserId = 'group_$groupId';
         } else {
@@ -372,6 +377,16 @@ class MessageRepository {
         );
 
     return _supabase.storage.from('posts').getPublicUrl(storagePath);
+  }
+
+  /// Mark a single message as delivered (zugestellt).
+  /// Uses RPC (SECURITY DEFINER) to bypass RLS — Empfänger darf Sender-Nachricht updaten.
+  Future<void> markAsDelivered(int messageId) async {
+    try {
+      await _supabase.rpc('mark_message_delivered', params: {'p_message_id': messageId});
+    } catch (e) {
+      debugPrint('[MsgRepo] markAsDelivered error: $e');
+    }
   }
 
   /// Mark all messages in a conversation as read (messages from the other user).

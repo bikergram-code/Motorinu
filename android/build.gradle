@@ -1,3 +1,11 @@
+// Mapbox Tokens aus local.properties laden (gitignored, niemals im Repo)
+def localProps = new Properties()
+def localPropsFile = rootProject.file('local.properties')
+if (localPropsFile.exists()) {
+    localProps.load(new FileInputStream(localPropsFile))
+}
+def mapboxDownloadsToken = localProps.getProperty('MAPBOX_DOWNLOADS_TOKEN') ?: (System.getenv('MAPBOX_DOWNLOADS_TOKEN') ?: '')
+
 allprojects {
     repositories {
         google()
@@ -9,7 +17,7 @@ allprojects {
             }
             credentials {
                 username = "mapbox"
-                password = project.properties['MAPBOX_DOWNLOADS_TOKEN'] ?: ""
+                password = mapboxDownloadsToken
             }
         }
     }

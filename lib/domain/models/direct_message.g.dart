@@ -64,6 +64,7 @@ _DirectMessage _$DirectMessageFromJson(Map<String, dynamic> json) =>
       locationName: json['locationName'] as String?,
       replyToId: (json['replyToId'] as num?)?.toInt(),
       messageType: json['messageType'] as String? ?? 'text',
+      isDelivered: json['isDelivered'] as bool? ?? false,
       isRead: json['isRead'] as bool? ?? false,
       createdAt: json['createdAt'] == null
           ? null
@@ -89,6 +90,7 @@ Map<String, dynamic> _$DirectMessageToJson(_DirectMessage instance) =>
       'locationName': instance.locationName,
       'replyToId': instance.replyToId,
       'messageType': instance.messageType,
+      'isDelivered': instance.isDelivered,
       'isRead': instance.isRead,
       'createdAt': instance.createdAt?.toIso8601String(),
       'editedAt': instance.editedAt?.toIso8601String(),

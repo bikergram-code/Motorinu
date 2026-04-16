@@ -87,6 +87,17 @@ class ChatNotifier extends Notifier<ChatState> {
   late MessageRepository _repo;
   RealtimeChannel? _channel;
   bool _isCurrentlyTyping = false;
+  bool _isScreenOpen = false;
+
+  /// Chat-Screen ruft das auf wenn er sichtbar/unsichtbar wird
+  void setScreenOpen(bool open) {
+    _isScreenOpen = open;
+    // Wenn Screen geöffnet wird → bestehende Nachrichten sofort als gelesen markieren
+    if (open && state.messages.isNotEmpty) {
+      _repo.markAsRead(_conversationId);
+      ref.read(unreadMessagesProvider.notifier).refresh();
+    }
+  }
 
   @override
   ChatState build() {
@@ -177,8 +188,11 @@ class ChatNotifier extends Notifier<ChatState> {
         otherUserId: isGroupChat ? null : otherUser?['id'] as String?,
       );
 
-      await _repo.markAsRead(conversationId);
-      ref.read(unreadMessagesProvider.notifier).refresh();
+      // Nur als gelesen markieren wenn der Chat-Screen tatsächlich offen ist
+      if (_isScreenOpen) {
+        await _repo.markAsRead(conversationId);
+        ref.read(unreadMessagesProvider.notifier).refresh();
+      }
 
       _subscribeToMessages(conversationId);
     } catch (e) {
@@ -248,8 +262,8 @@ class ChatNotifier extends Notifier<ChatState> {
         );
       }
 
-      // Only mark as read if user is actually viewing this chat
-      if (message.senderId != currentUserId && state.isLoading == false && state.messages.isNotEmpty) {
+      // Nur als gelesen markieren wenn der User den Chat-Screen tatsächlich offen hat
+      if (_isScreenOpen && message.senderId != currentUserId) {
         Future.delayed(const Duration(milliseconds: 500), () {
           _repo.markAsRead(conversationId);
           ref.read(unreadMessagesProvider.notifier).refresh();
@@ -294,8 +308,10 @@ class ChatNotifier extends Notifier<ChatState> {
         messages = data.map((row) => _parseMessage(row)).toList();
       }
       state = state.copyWith(messages: messages);
-      await _repo.markAsRead(_conversationId);
-      ref.read(unreadMessagesProvider.notifier).refresh();
+      if (_isScreenOpen) {
+        await _repo.markAsRead(_conversationId);
+        ref.read(unreadMessagesProvider.notifier).refresh();
+      }
     } catch (e) {
       debugPrint('[Chat] reconnect refetch error: $e');
     }
@@ -524,6 +540,7 @@ class ChatNotifier extends Notifier<ChatState> {
       locationName: row['location_name'] as String?,
       replyToId: row['reply_to_id'] as int?,
       messageType: row['message_type'] as String? ?? 'text',
+      isDelivered: row['is_delivered'] as bool? ?? false,
       isRead: row['is_read'] as bool? ?? false,
       createdAt: row['created_at'] != null
           ? DateTime.tryParse(row['created_at'] as String)

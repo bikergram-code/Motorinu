@@ -287,6 +287,19 @@ class NotificationNotifier extends Notifier<NotificationsState> {
     }
   }
 
+  /// Delete a notification.
+  Future<void> deleteNotification(int notificationId) async {
+    try {
+      await _repo.deleteNotification(notificationId);
+      state = state.copyWith(
+        notifications:
+            state.notifications.where((n) => n.id != notificationId).toList(),
+      );
+    } catch (e) {
+      debugPrint('[Notif] Error deleting: $e');
+    }
+  }
+
   /// Refresh notifications from Supabase.
   Future<void> refresh() => _loadNotifications();
 }

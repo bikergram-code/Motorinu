@@ -42,6 +42,7 @@ abstract class DirectMessage with _$DirectMessage {
     String? locationName,
     int? replyToId,
     @Default('text') String messageType, // text, image, audio, location
+    @Default(false) bool isDelivered,
     @Default(false) bool isRead,
     DateTime? createdAt,
     DateTime? editedAt,

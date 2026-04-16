@@ -13,6 +13,7 @@ import '../../domain/models/direct_message.dart';
 import '../../providers/core/providers.dart';
 import '../widgets/online_status_avatar.dart';
 import '../../providers/messages/messages_notifier.dart';
+import 'create_group_chat_sheet.dart';
 import '../../providers/messages/unread_messages_notifier.dart';
 import '../../theme/app_theme.dart';
 import '../widgets/immersive_scroll_wrapper.dart';
@@ -252,6 +253,59 @@ class _MessagesScreenState extends ConsumerState<MessagesScreen> {
                   onPressed: _markAllAsRead,
                   icon: Icon(Icons.done_all_rounded, color: community?.textColor(brightness) ?? (brightness == Brightness.dark ? Colors.white70 : Colors.black54)),
                   tooltip: 'Alle als gelesen',
+                ),
+                PopupMenuButton<String>(
+                  icon: Icon(Icons.more_vert_rounded, color: community?.textColor(brightness) ?? (brightness == Brightness.dark ? Colors.white70 : Colors.black54)),
+                  onSelected: (value) {
+                    switch (value) {
+                      case 'settings':
+                        context.push('/settings');
+                        break;
+                      case 'new_group':
+                        showModalBottomSheet(
+                          context: context,
+                          isScrollControlled: true,
+                          backgroundColor: Colors.transparent,
+                          builder: (_) => const CreateGroupChatSheet(),
+                        );
+                        break;
+                      case 'linked_devices':
+                        context.push('/linked-devices');
+                        break;
+                    }
+                  },
+                  itemBuilder: (context) => [
+                    const PopupMenuItem(
+                      value: 'new_group',
+                      child: Row(
+                        children: [
+                          Icon(Icons.group_add_rounded, size: 20),
+                          SizedBox(width: 12),
+                          Text('Neue Gruppe'),
+                        ],
+                      ),
+                    ),
+                    const PopupMenuItem(
+                      value: 'linked_devices',
+                      child: Row(
+                        children: [
+                          Icon(Icons.devices_rounded, size: 20),
+                          SizedBox(width: 12),
+                          Text('Verknüpfte Geräte'),
+                        ],
+                      ),
+                    ),
+                    const PopupMenuItem(
+                      value: 'settings',
+                      child: Row(
+                        children: [
+                          Icon(Icons.settings_rounded, size: 20),
+                          SizedBox(width: 12),
+                          Text('Einstellungen'),
+                        ],
+                      ),
+                    ),
+                  ],
                 ),
               ],
       ),

@@ -112,10 +112,14 @@ class _GoLiveScreenState extends ConsumerState<GoLiveScreen> {
 
   Future<void> _startCameraPreview() async {
     try {
-      final status = await Permission.camera.request();
-      if (!status.isGranted) {
-        if (mounted) setState(() => _permissionDenied = true);
-        return;
+      // On web, permission_handler doesn't work — LiveKit's createCameraTrack
+      // triggers the browser's native permission prompt directly.
+      if (!kIsWeb) {
+        final status = await Permission.camera.request();
+        if (!status.isGranted) {
+          if (mounted) setState(() => _permissionDenied = true);
+          return;
+        }
       }
 
       final track = await lk.LocalVideoTrack.createCameraTrack(
@@ -131,6 +135,8 @@ class _GoLiveScreenState extends ConsumerState<GoLiveScreen> {
       }
     } catch (e) {
       debugPrint('[GoLive] Camera preview error: $e');
+      // On web, if user denied the browser prompt, show permission denied
+      if (mounted) setState(() => _permissionDenied = true);
     }
   }
 
